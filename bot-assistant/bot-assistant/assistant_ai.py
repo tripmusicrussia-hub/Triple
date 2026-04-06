@@ -10,6 +10,13 @@ GROQ_KEY = os.getenv("GROQ_API_KEY", "")
 
 DATA_FILE = "assistant_data.json"
 
+# Список поставщиков из Sigma (обновляется при старте и раз в час)
+_sigma_suppliers: list = []
+
+def set_suppliers(names: list):
+    global _sigma_suppliers
+    _sigma_suppliers = names
+
 def load_data():
     if os.path.exists(DATA_FILE):
         try:
@@ -134,7 +141,12 @@ def system_prompt(data):
         "напоминания": [r for r in data["reminders"] if not r.get("done")][-10:],
         "цели": data.get("goals",[])[-10:],
     }
+    suppliers_text = ""
+    if _sigma_suppliers:
+        suppliers_text = f"\nПОСТАВЩИКИ В SIGMA ({len(_sigma_suppliers)} шт.):\n" + ", ".join(_sigma_suppliers[:30])
+
     return f"""Ты личный ассистент владельца продуктового магазина. Сегодня {today}.
+{suppliers_text}
 
 ВАЖНО — ЧТО УМЕЕТ БОТ:
 - Учёт финансов: расходы, доходы, баланс, статистика

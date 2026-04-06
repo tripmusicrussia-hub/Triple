@@ -866,11 +866,62 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not accumulated or not accumulated.get("items"):
             await query.answer("Нет данных!", show_alert=True)
             return
-        all_items = accumulated["items"]
-        supplier = accumulated["supplier"]
-        pending_invoices[user_id] = {"supplier": supplier, "items": all_items}
-        text = format_invoice_summary(supplier, all_items, final=True)
-        await query.message.edit_text(text)
+        pending_invoices[user_id] = {
+            "supplier": accumulated["supplier"],
+            "items": accumulated["items"]
+        }
+        invoice = pending_invoices[user_id]
+        text = format_invoice_final(invoice["supplier"], invoice["items"])
+        await query.message.edit_text(text, reply_markup=kb_invoice_edit(invoice["items"]))
+        return
+
+    if data.startswith("inv_edit_"):
+        if user_id != ADMIN_ID: return
+        idx = int(data.split("_")[2])
+        if user_id not in pending_invoices: return
+        item = pending_invoices[user_id]["items"][idx]
+        editing_qty[user_id] = idx
+        await query.message.reply_text(
+            f"Введи правильное количество для:\n{item['name'][:50]}\n\nСейчас: {item['qty']} шт"
+        )
+        return
+
+    if data == "invoice_upload":
+        if user_id != ADMIN_ID: return
+        if user_id not in pending_invoices:
+            await query.answer("Нет данных!", show_alert=True)
+            return
+        invoice = pending_invoices[user_id]
+        await query.message.edit_text("⏳ Загружаю в Sigma...")
+        try:
+            api = sigma_api.SigmaAPI()
+            result = await api.process_invoice(
+                items=invoice["items"],
+                supplier_name=invoice["supplier"]
+            )
+            if result["ok"]:
+                del pending_invoices[user_id]
+                skipped_text = ""
+                if result.get("skipped"):
+                    skipped_text = f"\n\nНе найдено в базе Sigma:\n" + "\n".join(f"- {s}" for s in result["skipped"])
+                await query.message.edit_text(
+                    f"✅ Готово! Приход создан в Sigma\n"
+                    f"Добавлено товаров: {result.get('added', 0)}"
+                    f"{skipped_text}"
+                )
+            else:
+                await query.message.edit_text(f"❌ Ошибка: {result['error']}")
+        except Exception as e:
+            logger.error(f"Invoice upload error: {e}")
+            await query.message.edit_text(f"❌ Ошибка: {str(e)[:200]}")
+        return
+
+    if data == "invoice_cancel":
+        if user_id != ADMIN_ID: return
+        pending_invoices.pop(user_id, None)
+        invoice_pages.pop(user_id, None)
+        editing_qty.pop(user_id, None)
+        await query.message.edit_text("Накладная отменена.")
         return
 
 
@@ -1014,7 +1065,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Sigma Invoice Handler ─────────────────────────────────────
 
 pending_invoices = {}
-invoice_pages = {}  # накапливаем страницы: {user_id: {"supplier": str, "items": [...]}}
+invoice_pages = {}       # накапливаем страницы до нажатия "это всё"
+editing_qty = {}         # {user_id: item_index} — ждём новое кол-во от пользователя
 
 def kb_invoice_more_pages():
     return InlineKeyboardMarkup([
@@ -1022,22 +1074,30 @@ def kb_invoice_more_pages():
         [InlineKeyboardButton("✅ Нет, это всё", callback_data="invoice_done")],
     ])
 
-def format_invoice_summary(supplier, items, final=False):
-    lines = [f"📋 Лист распознан!\n"]
+def kb_invoice_edit(items):
+    """Кнопки для редактирования количества каждого товара + загрузка"""
+    rows = []
+    for i, item in enumerate(items):
+        name_short = item["name"][:28]
+        rows.append([InlineKeyboardButton(
+            f"✏️ {i+1}. {name_short} — {item['qty']} шт",
+            callback_data=f"inv_edit_{i}"
+        )])
+    rows.append([InlineKeyboardButton("🚀 Загрузить в Sigma", callback_data="invoice_upload")])
+    rows.append([InlineKeyboardButton("❌ Отмена", callback_data="invoice_cancel")])
+    return InlineKeyboardMarkup(rows)
+
+def format_invoice_final(supplier, items):
+    lines = [f"📋 Накладная готова к загрузке\n"]
     lines.append(f"🏭 Поставщик: {supplier}")
-    lines.append(f"📦 Товаров на этом листе: {len(items)}\n")
+    lines.append(f"📦 Товаров: {len(items)}\n")
     for i, item in enumerate(items, 1):
-        lines.append(f"{i}. {item['name']}\n   Кол-во: {item['qty']} | Цена: {item['price']} ₽")
-    if final:
-        lines.append("\n💰 Цены продажи (наценка):")
-        for i, item in enumerate(items, 1):
-            markup = sigma_api.get_markup(item["name"])
-            sell = sigma_api.calc_price(item["price"], markup)
-            pct = int(markup * 100)
-            lines.append(f"  {i}. {sell} р. (+{pct}%) — {item['name'][:30]}")
-        lines.append("\n✅ Всё верно? Напиши ок чтобы загрузить в Sigma")
-    else:
-        lines.append("\nЕщё листы есть?")
+        markup = sigma_api.get_markup(item["name"])
+        sell = sigma_api.calc_price(item["price"], markup)
+        pct = int(markup * 100)
+        lines.append(f"{i}. {item['name'][:35]}")
+        lines.append(f"   {item['qty']} шт x {item['price']} р. → продажа {sell} р. (+{pct}%)")
+    lines.append("\nНажми кнопку товара чтобы исправить кол-во")
     return "\n".join(lines)
 
 async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1065,18 +1125,17 @@ async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYP
         if user_id not in invoice_pages:
             invoice_pages[user_id] = {"supplier": supplier, "items": []}
         invoice_pages[user_id]["items"].extend(items)
-        # Поставщик берём из первого листа
         if not invoice_pages[user_id]["supplier"] or invoice_pages[user_id]["supplier"] == "Не определён":
             invoice_pages[user_id]["supplier"] = supplier
 
-        page_num = len(invoice_pages[user_id]["items"]) - len(items) + 1
         total_so_far = len(invoice_pages[user_id]["items"])
-
-        text = format_invoice_summary(supplier, items, final=False)
+        lines = [f"📋 Лист распознан! Товаров: {len(items)}"]
+        for i, item in enumerate(items, 1):
+            lines.append(f"{i}. {item['name'][:35]} — {item['qty']} шт")
         if total_so_far > len(items):
-            text += f"\n\nВсего накоплено товаров: {total_so_far}"
-
-        await msg.edit_text(text, reply_markup=kb_invoice_more_pages())
+            lines.append(f"\nВсего накоплено: {total_so_far} товаров")
+        lines.append("\nЕщё листы есть?")
+        await msg.edit_text("\n".join(lines), reply_markup=kb_invoice_more_pages())
 
     except Exception as e:
         logger.error(f"Invoice error: {e}")
@@ -1149,6 +1208,23 @@ async def handle_assistant(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(ADMIN_ID) + "_broadcast" in bulk_add_mode: return
     text = update.message.text or ""
     if not text.strip() or text.startswith("/"): return
+
+    # Редактирование количества товара в накладной
+    if user_id in editing_qty and user_id in pending_invoices:
+        try:
+            new_qty = float(text.strip().replace(",", "."))
+            idx = editing_qty.pop(user_id)
+            pending_invoices[user_id]["items"][idx]["qty"] = new_qty
+            invoice = pending_invoices[user_id]
+            item_name = invoice["items"][idx]["name"][:35]
+            await update.message.reply_text(f"✅ Обновлено: {item_name} — {new_qty} шт")
+            # Показываем обновлённый список
+            text_summary = format_invoice_final(invoice["supplier"], invoice["items"])
+            await update.message.reply_text(text_summary, reply_markup=kb_invoice_edit(invoice["items"]))
+        except ValueError:
+            await update.message.reply_text("Введи число, например: 5")
+        return
+
     if await handle_invoice_confirm(update, context): return
     msg = update.message
     is_forwarded = (msg.audio or msg.forward_origin or
@@ -1188,12 +1264,32 @@ async def heartbeat_scheduler():
         write_heartbeat()
         await asyncio.sleep(30)
 
+async def load_sigma_suppliers():
+    """Загружаем поставщиков из Sigma и передаём в assistant_ai"""
+    try:
+        api = sigma_api.SigmaAPI()
+        if await api.login():
+            suppliers = await api.get_suppliers()
+            names = [s.get("name", "") for s in suppliers if s.get("name")]
+            assistant_ai.set_suppliers(names)
+            logger.info(f"Sigma suppliers loaded: {len(names)}")
+    except Exception as e:
+        logger.warning(f"Could not load Sigma suppliers: {e}")
+
+async def sigma_suppliers_scheduler():
+    """Обновляем список поставщиков раз в час"""
+    while True:
+        await asyncio.sleep(3600)
+        await load_sigma_suppliers()
+
 async def post_init(application):
     beats_db.load_beats()
     load_users()
     logger.info("Bot started: " + str(len(beats_db.BEATS_CACHE)) + " beats, " + str(len(all_users)) + " users")
     asyncio.create_task(daily_beat_scheduler(application.bot))
     asyncio.create_task(heartbeat_scheduler())
+    asyncio.create_task(sigma_suppliers_scheduler())
+    asyncio.create_task(load_sigma_suppliers())
     write_heartbeat()
 
 
