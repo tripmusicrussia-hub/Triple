@@ -15,7 +15,6 @@ def load_data():
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 d = json.load(f)
-                # Ensure all keys exist
                 for key in ["expenses","income","tasks","notes","contacts","reminders","goals"]:
                     if key not in d:
                         d[key] = []
@@ -135,13 +134,20 @@ def system_prompt(data):
         "напоминания": [r for r in data["reminders"] if not r.get("done")][-10:],
         "цели": data.get("goals",[])[-10:],
     }
-    return f"""Ты личный ассистент. Сегодня {today}.
+    return f"""Ты личный ассистент владельца продуктового магазина. Сегодня {today}.
+
+ВАЖНО — ЧТО УМЕЕТ БОТ:
+- Учёт финансов: расходы, доходы, баланс, статистика
+- Задачи и напоминания
+- Заметки и контакты
+- Цели с накоплением
+- Накладные: если пользователь пишет про накладную, приход товара, поставку, поставщика — скажи ему отправить ФОТО накладной. Бот автоматически распознает фото и загрузит приход в Sigma. Пример ответа: "Пришли фото накладной 📸 — распознаю и загружу в Sigma автоматически"
 
 ДАННЫЕ ПОЛЬЗОВАТЕЛЯ:
 {json.dumps(summary, ensure_ascii=False)}
 
 Верни ТОЛЬКО JSON без markdown:
-{{"action":"add_expense"|"add_income"|"add_task"|"add_note"|"add_contact"|"add_reminder"|"add_goal"|"update_goal"|"complete_task"|"delete"|"stats"|"query"|"none","data":{{...}},"response":"текст ответа по-русски"}}
+{{"action":"add_expense"|"add_income"|"add_task"|"add_note"|"add_contact"|"add_reminder"|"add_goal"|"update_goal"|"complete_task"|"delete"|"stats"|"invoice"|"query"|"none","data":{{...}},"response":"текст ответа по-русски"}}
 
 ДЕЙСТВИЯ:
 - add_expense: {{amount:число, category:"еда"|"транспорт"|"здоровье"|"развлечения"|"покупки"|"другое", description:"текст"}}
@@ -155,6 +161,7 @@ def system_prompt(data):
 - complete_task: {{id:число}}
 - delete: {{type:"expense"|"income"|"task"|"note"|"contact"|"goal", id:число}}
 - stats: {{period:"today"|"week"|"month"|"all"}}
+- invoice: {{}} — когда пользователь говорит про накладную/приход/поставку
 - query/none: {{}}
 
 СТИЛЬ: очень коротко, 1-2 предложения. Суммы в рублях."""
@@ -192,10 +199,14 @@ async def process_message(text: str, conversation_history: list) -> dict:
     except Exception:
         pass
 
-    # Handle stats action
     if parsed.get("action") == "stats":
         period = parsed.get("data", {}).get("period", "month")
         parsed["response"] = get_stats(data, period)
+        return parsed
+
+    # invoice action — не сохраняем ничего, просто возвращаем ответ
+    if parsed.get("action") == "invoice":
+        parsed["response"] = "Пришли фото накладной 📸 — распознаю товары и загружу приход в Sigma автоматически."
         return parsed
 
     apply_action(parsed, data)
