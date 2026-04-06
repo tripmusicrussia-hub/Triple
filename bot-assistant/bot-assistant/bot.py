@@ -1099,7 +1099,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_assistant))
     app.add_handler(MessageHandler(filters.ALL, handle_message))
     logger.info("Starting bot...")
-    app.run_polling(drop_pending_updates=True)
+    asyncio.run(app.run_polling(drop_pending_updates=True))
 
 
 if __name__ == "__main__":
