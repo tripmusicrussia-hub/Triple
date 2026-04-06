@@ -850,6 +850,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="admin_giveaway")]]))
         return
 
+    # ── Накладная: ещё листы ──────────────────────────────────
+    if data == "invoice_more":
+        if user_id != ADMIN_ID: return
+        accumulated = invoice_pages.get(user_id, {})
+        total = len(accumulated.get("items", []))
+        await query.message.edit_text(
+            f"Ок, жду следующий лист 📸\nУже накоплено товаров: {total}"
+        )
+        return
+
+    if data == "invoice_done":
+        if user_id != ADMIN_ID: return
+        accumulated = invoice_pages.pop(user_id, None)
+        if not accumulated or not accumulated.get("items"):
+            await query.answer("Нет данных!", show_alert=True)
+            return
+        all_items = accumulated["items"]
+        supplier = accumulated["supplier"]
+        pending_invoices[user_id] = {"supplier": supplier, "items": all_items}
+        text = format_invoice_summary(supplier, all_items, final=True)
+        await query.message.edit_text(text)
+        return
+
 
 # ── Обработка текстовых сообщений ────────────────────────────
 
@@ -991,15 +1014,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Sigma Invoice Handler ─────────────────────────────────────
 
 pending_invoices = {}
+invoice_pages = {}  # накапливаем страницы: {user_id: {"supplier": str, "items": [...]}}
+
+def kb_invoice_more_pages():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📄 Да, ещё лист", callback_data="invoice_more")],
+        [InlineKeyboardButton("✅ Нет, это всё", callback_data="invoice_done")],
+    ])
+
+def format_invoice_summary(supplier, items, final=False):
+    lines = [f"📋 Лист распознан!\n"]
+    lines.append(f"🏭 Поставщик: {supplier}")
+    lines.append(f"📦 Товаров на этом листе: {len(items)}\n")
+    for i, item in enumerate(items, 1):
+        lines.append(f"{i}. {item['name']}\n   Кол-во: {item['qty']} | Цена: {item['price']} ₽")
+    if final:
+        lines.append("\n💰 Цены продажи (наценка):")
+        for i, item in enumerate(items, 1):
+            markup = sigma_api.get_markup(item["name"])
+            sell = sigma_api.calc_price(item["price"], markup)
+            pct = int(markup * 100)
+            lines.append(f"  {i}. {sell} р. (+{pct}%) — {item['name'][:30]}")
+        lines.append("\n✅ Всё верно? Напиши ок чтобы загрузить в Sigma")
+    else:
+        lines.append("\nЕщё листы есть?")
+    return "\n".join(lines)
 
 async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle photo of invoice - recognize and prepare for sigma"""
+    """Handle photo of invoice - supports multi-page"""
     if not update.effective_user: return
     user_id = update.effective_user.id
     if user_id != ADMIN_ID: return
     if not update.message.photo: return
 
-    msg = await update.message.reply_text("Читаю накладную...")
+    msg = await update.message.reply_text("Читаю лист накладной...")
     try:
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
@@ -1010,28 +1058,25 @@ async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYP
         items = result.get("items", [])
 
         if not items:
-            await msg.edit_text("Не нашёл заказанных товаров на накладной. Попробуй другое фото.")
+            await msg.edit_text("Не нашёл товаров на этом листе. Попробуй другое фото.")
             return
 
-        pending_invoices[user_id] = result
+        # Накапливаем страницы
+        if user_id not in invoice_pages:
+            invoice_pages[user_id] = {"supplier": supplier, "items": []}
+        invoice_pages[user_id]["items"].extend(items)
+        # Поставщик берём из первого листа
+        if not invoice_pages[user_id]["supplier"] or invoice_pages[user_id]["supplier"] == "Не определён":
+            invoice_pages[user_id]["supplier"] = supplier
 
-        lines = ["📋 Накладная распознана!\n"]
-        lines.append(f"🏭 Поставщик: {supplier}")
-        lines.append(f"📦 Товаров: {len(items)}\n")
-        for i, item in enumerate(items, 1):
-            lines.append(f"{i}. {item['name']}\n   Кол-во: {item['qty']} | Цена: {item['price']} ₽")
+        page_num = len(invoice_pages[user_id]["items"]) - len(items) + 1
+        total_so_far = len(invoice_pages[user_id]["items"])
 
-        lines.append("\n💰 Цены продажи (наценка):")
-        for i, item in enumerate(items, 1):
-            markup = sigma_api.get_markup(item["name"])
-            sell = sigma_api.calc_price(item["price"], markup)
-            pct = int(markup * 100)
-            lines.append(f"  {i}. {sell} ₽ (+{pct}%) — {item['name'][:30]}")
+        text = format_invoice_summary(supplier, items, final=False)
+        if total_so_far > len(items):
+            text += f"\n\nВсего накоплено товаров: {total_so_far}"
 
-        lines.append("\n✅ Всё верно? Напиши *ок* чтобы загрузить в Sigma")
-        lines.append("✏️ Или напиши что исправить")
-
-        await msg.edit_text("\n".join(lines), parse_mode="Markdown")
+        await msg.edit_text(text, reply_markup=kb_invoice_more_pages())
 
     except Exception as e:
         logger.error(f"Invoice error: {e}")
