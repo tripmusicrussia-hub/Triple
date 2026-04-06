@@ -1029,12 +1029,12 @@ async def handle_invoice_photo(update, context):
 
     msg = await update.message.reply_text("Читаю накладную...")
     try:
-        import sigma_automation
+        import sigma_api
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         img_bytes = bytes(await file.download_as_bytearray())
 
-        result = await sigma_automation.recognize_invoice(img_bytes)
+        result = await sigma_api.recognize_invoice(img_bytes)
         supplier = result.get("supplier", "Не определён")
         items = result.get("items", [])
 
@@ -1049,6 +1049,13 @@ async def handle_invoice_photo(update, context):
         lines.append(f"📦 Товаров: {len(items)}\n")
         for i, item in enumerate(items, 1):
             lines.append(f"{i}. {item['name']}\n   Кол-во: {item['qty']} | Цена: {item['price']} ₽")
+
+        lines.append("\n💰 Цены продажи (наценка):")
+        for i, item in enumerate(items, 1):
+            markup = sigma_api.get_markup(item["name"])
+            sell = sigma_api.calc_price(item["price"], markup)
+            pct = int(markup * 100)
+            lines.append(f"  {i}. {sell} ₽ (+{pct}%) — {item['name'][:30]}")
 
         lines.append("\n✅ Всё верно? Напиши *ок* чтобы загрузить в Sigma")
         lines.append("✏️ Или напиши что исправить")
@@ -1074,7 +1081,7 @@ async def handle_invoice_confirm(update, context) -> bool:
     msg = await update.message.reply_text("⏳ Загружаю в Sigma...")
 
     try:
-        import sigma_automation
+        import sigma_api
         result = await sigma_automation.fill_income(
             items=invoice["items"],
             supplier=invoice["supplier"]
