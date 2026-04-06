@@ -198,24 +198,19 @@ class SigmaAPI:
         Полный цикл: логин → найти поставщика → создать приход → добавить товары → провести
         items: [{"name": str, "qty": float, "price": float}]
         """
-        # Login
         if not await self.login():
             return {"ok": False, "error": "Не удалось войти в Sigma. Проверь логин/пароль."}
 
-        # Get company info
         await self.get_company_info()
 
-        # Find supplier
         supplier_id = await self.find_supplier(supplier_name)
         if not supplier_id:
             logger.warning(f"Supplier not found: {supplier_name}")
 
-        # Create income document
         waybill_id = await self.create_income(supplier_id)
         if not waybill_id:
             return {"ok": False, "error": "Не удалось создать документ прихода в Sigma."}
 
-        # Add products
         added = 0
         skipped = []
         for item in items:
@@ -242,7 +237,6 @@ class SigmaAPI:
         if added == 0:
             return {"ok": False, "error": "Ни один товар не добавлен. Возможно названия не совпадают с базой Sigma."}
 
-        # Conduct
         conducted = await self.conduct_income(waybill_id)
 
         return {
@@ -252,3 +246,45 @@ class SigmaAPI:
             "skipped": skipped,
             "conducted": conducted
         }
+
+
+async def recognize_invoice(image_bytes: bytes) -> dict:
+    """
+    Распознаёт накладную через Groq Vision.
+    Возвращает {"supplier": str, "items": [...]}
+    """
+    import base64
+
+    GROQ_KEY = os.getenv("GROQ_API_KEY", "")
+    img_b64 = base64.b64encode(image_bytes).decode()
+
+    prompt = """Это накладная из продуктового магазина.
+Найди ТОЛЬКО товары где в колонке "Заказ" есть галочка (v или ✓) или рукописная цифра.
+Если галочка без цифры — qty=1. Если написана цифра — используй её.
+Поставщик указан в шапке (ООО, ИП или название компании).
+
+Верни ТОЛЬКО JSON без markdown:
+{"supplier":"название","items":[{"name":"полное название товара","qty":число,"price":цена за единицу}]}"""
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+                "max_tokens": 2000,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
+                        {"type": "text", "text": prompt}
+                    ]
+                }]
+            }
+        )
+        j = resp.json()
+        if "error" in j:
+            raise Exception(j["error"]["message"])
+        raw = j["choices"][0]["message"]["content"]
+
+    return json.loads(raw.replace("```json", "").replace("```", "").strip())

@@ -15,6 +15,7 @@ from telegram.error import TelegramError
 from config import BOT_TOKEN, CHANNEL_ID, CHANNEL_LINK, SAMPLE_PACK_PATH, SAMPLE_PACK_FILE_ID, WELCOME_TEXT, CATALOG_INTRO, ADMIN_ID
 import beats_db
 import assistant_ai
+import sigma_api
 
 conversation_history = {}
 
@@ -119,16 +120,13 @@ def parse_beat_from_text(text, msg_id, channel_username):
     }
 
 def try_add_beat(beat):
-    # Проверяем по ID
     if beat["id"] in beats_db.BEATS_BY_ID:
         return False
-    # Проверяем по file_unique_id если есть аудио
     fuid = beat.get("file_unique_id")
     if fuid:
         for b in beats_db.BEATS_CACHE:
             if b.get("file_unique_id") == fuid:
                 return False
-    # Проверяем по названию (на случай разных msg_id)
     for b in beats_db.BEATS_CACHE:
         if b["name"].strip().lower() == beat["name"].strip().lower():
             return False
@@ -474,7 +472,7 @@ async def finish_giveaway(bot):
 
 
 # ══════════════════════════════════════════════════════════════
-# CALLBACK HANDLER — все кнопки в одном месте
+# CALLBACK HANDLER
 # ══════════════════════════════════════════════════════════════
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -486,7 +484,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer()
 
-    # ── Подписка ──────────────────────────────────────────────
     if data == "check_sub":
         subscribed_users.discard(user_id)
         if await is_subscribed(bot, user_id):
@@ -500,7 +497,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("Ты ещё не подписан! Подпишись и нажми снова.", show_alert=True)
         return
 
-    # ── Главное меню ──────────────────────────────────────────
     if data == "main_menu":
         await show_main_menu(bot, query.message.chat_id)
         return
@@ -530,7 +526,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("🎤 Под кого делаем? Выбирай артиста — найду похожие биты!", reply_markup=kb_artists())
         return
 
-    # ── Биты по тегу ──────────────────────────────────────────
     if data.startswith("cattag_"):
         parts = data.split("_", 2)
         content_type, tag = parts[1], parts[2]
@@ -545,7 +540,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_beat(bot, query.message.chat_id, beat, user_id)
         return
 
-    # ── Случайный по категории ─────────────────────────────────
     if data.startswith("randcat_"):
         content_type = data[8:]
         items = [b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == content_type]
@@ -558,7 +552,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_beat(bot, query.message.chat_id, beat, user_id)
         return
 
-    # ── Следующий похожий ─────────────────────────────────────
     if data.startswith("next_"):
         beat_id = int(data.split("_")[1])
         current = beats_db.get_beat_by_id(beat_id)
@@ -566,11 +559,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         content_type = current.get("content_type", "beat")
         history = get_history(user_id)
-        # Ищем похожие только в той же категории
         similar = beats_db.get_similar_beats(current, exclude_ids=history)
         similar = [b for b in similar if b.get("content_type", "beat") == content_type]
         if not similar:
-            # Случайный из той же категории
             items = [b for b in beats_db.BEATS_CACHE
                      if b.get("content_type", "beat") == content_type and b["id"] not in history]
             if not items:
@@ -584,7 +575,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_beat(bot, query.message.chat_id, next_beat, user_id)
         return
 
-    # ── Случайный бит ─────────────────────────────────────────
     if data == "random_beat":
         beat = beats_db.get_random_beat(exclude_ids=get_history(user_id))
         if not beat:
@@ -592,7 +582,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_beat(bot, query.message.chat_id, beat, user_id)
         return
 
-    # ── Избранное ─────────────────────────────────────────────
     if data.startswith("fav_"):
         beat_id = int(data.split("_")[1])
         if user_id not in user_favorites:
@@ -623,13 +612,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_beat(bot, query.message.chat_id, beat, user_id)
         return
 
-    # ── Поиск ─────────────────────────────────────────────────
     if data == "search_prompt":
         bulk_add_mode[str(user_id) + "_search"] = True
         await query.message.reply_text("🔍 Напиши название бита, имя артиста или тег — найду всё что есть!")
         return
 
-    # ── Розыгрыш ──────────────────────────────────────────────
     if data == "join_giveaway":
         if not giveaway["active"]:
             await query.answer("Розыгрыш завершён!", show_alert=True)
@@ -668,7 +655,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Всего: " + str(total) + "\nС репостом: " + str(reposted), show_alert=True)
         return
 
-    # ── Админ панель ──────────────────────────────────────────
     if data == "admin_panel":
         if user_id != ADMIN_ID: return
         await query.message.reply_text("🎛 Панель управления:", reply_markup=kb_admin())
@@ -766,7 +752,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("admin_delete_cat_"):
         if user_id != ADMIN_ID: return
-        cat = data.split("_")[3]  # beat / track / remix
+        cat = data.split("_")[3]
         items = [b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == cat]
         if not items:
             await query.answer("В этой категории ничего нет!", show_alert=True)
@@ -797,7 +783,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         beats_db.BEATS_BY_ID.pop(beat_id, None)
         asyncio.create_task(asyncio.to_thread(beats_db.save_beats))
         await query.answer("✅ Удалено: " + beat["name"][:30], show_alert=True)
-        # Обновляем список
         cat = beat.get("content_type", "beat")
         items = [b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == cat]
         if not items:
@@ -876,7 +861,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot = context.bot
     write_heartbeat()
 
-    # Канальные посты
     if update.channel_post:
         msg = update.channel_post
         text = msg.text or msg.caption or ""
@@ -898,7 +882,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = message.text or message.caption or ""
 
-    # Поиск
     search_key = str(user_id) + "_search"
     if search_key in bulk_add_mode:
         del bulk_add_mode[search_key]
@@ -908,7 +891,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id != ADMIN_ID:
         return
 
-    # Рассылка
     broadcast_key = str(ADMIN_ID) + "_broadcast"
     if broadcast_key in bulk_add_mode:
         del bulk_add_mode[broadcast_key]
@@ -925,9 +907,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("✅ Рассылка улетела! Отправлено: " + str(sent) + " чел.")
         return
 
-    # Добавление битов
     if ADMIN_ID not in bulk_add_mode or bulk_add_mode.get(ADMIN_ID) not in ("beat", "track", "remix"):
-        # Файл — сохраняем как сэмпл пак или приз
         if message.document and not text:
             fid = message.document.file_id
             await message.reply_text("FILE_ID:\n\n" + fid + "\n\nВставь в config.py:\nSAMPLE_PACK_FILE_ID = " + chr(34) + fid + chr(34))
@@ -952,7 +932,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msg_id is None:
         msg_id = message.message_id
 
-    # Если нет текста но есть аудио — создаём название из имени файла
     if not text.strip():
         if message.audio:
             text = message.audio.file_name or ("Beat #" + str(msg_id))
@@ -964,12 +943,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     beat = parse_beat_from_text(text, msg_id, channel_username)
     if message.audio:
         beat["file_id"] = message.audio.file_id
-        # Используем file_unique_id как дополнительный ключ дедупликации
         beat["file_unique_id"] = message.audio.file_unique_id
     elif message.voice:
         beat["file_id"] = message.voice.file_id
 
-    # Принудительно устанавливаем тип из режима добавления
     mode = bulk_add_mode.get(ADMIN_ID)
     if mode in ("beat", "track", "remix"):
         beat["content_type"] = mode
@@ -989,10 +966,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     batch_stats["last_time"] = time_module.time()
 
-    # Отправляем отчёт через 3 секунды после последнего поста
     async def send_batch_report():
         await asyncio.sleep(3)
-        # Если прошло 3+ секунды с последнего поста — это конец пакета
         if time_module.time() - batch_stats["last_time"] >= 2.9:
             added = batch_stats["added"]
             skipped = batch_stats["skipped"]
@@ -1013,23 +988,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(send_batch_report())
 
 
+# ── Sigma Invoice Handler ─────────────────────────────────────
 
-# -- Sigma Invoice Handler --
-
-# Store pending invoices per user
 pending_invoices = {}
 
-async def handle_invoice_photo(update, context):
+async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle photo of invoice - recognize and prepare for sigma"""
     if not update.effective_user: return
-    from config import ADMIN_ID
     user_id = update.effective_user.id
     if user_id != ADMIN_ID: return
     if not update.message.photo: return
 
     msg = await update.message.reply_text("Читаю накладную...")
     try:
-        import sigma_api
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         img_bytes = bytes(await file.download_as_bytearray())
@@ -1044,7 +1015,7 @@ async def handle_invoice_photo(update, context):
 
         pending_invoices[user_id] = result
 
-        lines = [f"📋 Накладная распознана!\n"]
+        lines = ["📋 Накладная распознана!\n"]
         lines.append(f"🏭 Поставщик: {supplier}")
         lines.append(f"📦 Товаров: {len(items)}\n")
         for i, item in enumerate(items, 1):
@@ -1066,12 +1037,11 @@ async def handle_invoice_photo(update, context):
         logger.error(f"Invoice error: {e}")
         await msg.edit_text(f"Ошибка распознавания: {str(e)[:200]}")
 
-async def handle_invoice_confirm(update, context) -> bool:
+async def handle_invoice_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Handle 'ok' confirmation to upload to sigma"""
-    if not update.effective_user: return
-    from config import ADMIN_ID
+    if not update.effective_user: return False
     user_id = update.effective_user.id
-    if user_id != ADMIN_ID: return
+    if user_id != ADMIN_ID: return False
 
     text = (update.message.text or "").strip().lower()
     if text not in ["ок", "ok", "окей", "да", "загрузить", "загружай"]: return False
@@ -1081,29 +1051,33 @@ async def handle_invoice_confirm(update, context) -> bool:
     msg = await update.message.reply_text("⏳ Загружаю в Sigma...")
 
     try:
-        import sigma_api
-        result = await sigma_automation.fill_income(
+        api = sigma_api.SigmaAPI()
+        result = await api.process_invoice(
             items=invoice["items"],
-            supplier=invoice["supplier"]
+            supplier_name=invoice["supplier"]
         )
         if result["ok"]:
             del pending_invoices[user_id]
+            skipped_text = ""
+            if result.get("skipped"):
+                skipped_text = f"\n⚠️ Не найдено в базе Sigma: {', '.join(result['skipped'])}"
             await msg.edit_text(
                 f"✅ Готово! Приход создан в Sigma\n"
-                f"Добавлено товаров: {result.get('items_added', 0)}\n"
-                f"{result.get('doc_number', '')}"
+                f"Добавлено товаров: {result.get('added', 0)}"
+                f"{skipped_text}"
             )
         else:
             await msg.edit_text(f"❌ Ошибка: {result['error']}")
     except Exception as e:
+        logger.error(f"Invoice confirm error: {e}")
         await msg.edit_text(f"❌ Ошибка: {str(e)[:200]}")
+    return True
 
 
-# -- AI Assistant --
+# ── AI Assistant ──────────────────────────────────────────────
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user: return
-    from config import ADMIN_ID
     if update.effective_user.id != ADMIN_ID: return
     voice = update.message.voice or update.message.audio
     if not voice: return
@@ -1124,7 +1098,6 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_assistant(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not update.message: return
-    from config import ADMIN_ID
     user_id = update.effective_user.id
     if user_id != ADMIN_ID: return
     if ADMIN_ID in bulk_add_mode and bulk_add_mode.get(ADMIN_ID) in ("beat","track","remix"): return
@@ -1132,7 +1105,6 @@ async def handle_assistant(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
     if not text.strip() or text.startswith("/"): return
     if await handle_invoice_confirm(update, context): return
-    # Ignore forwarded messages
     msg = update.message
     is_forwarded = (msg.audio or msg.forward_origin or
         getattr(msg, 'forward_from', None) or
@@ -1160,7 +1132,6 @@ async def process_ai(user_id, text):
 
 async def cmd_my(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user: return
-    from config import ADMIN_ID
     if update.effective_user.id != ADMIN_ID: return
     await update.message.reply_text(assistant_ai.get_summary())
 
@@ -1168,7 +1139,6 @@ async def cmd_my(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Запуск ────────────────────────────────────────────────────
 
 async def heartbeat_scheduler():
-    """Обновляем heartbeat каждые 30 секунд чтобы watchdog не перезапускал бота"""
     while True:
         write_heartbeat()
         await asyncio.sleep(30)
@@ -1197,7 +1167,6 @@ def run_health_server():
 
 
 async def reminder_scheduler(bot, admin_id):
-    """Check reminders every minute and send when due"""
     while True:
         try:
             data = assistant_ai.load_data()
@@ -1218,11 +1187,9 @@ async def reminder_scheduler(bot, admin_id):
         await asyncio.sleep(60)
 
 async def daily_report_scheduler(bot, admin_id):
-    """Send daily report at noon"""
     while True:
         try:
             now = datetime.now()
-            # Send at 12:00
             target = now.replace(hour=12, minute=0, second=0, microsecond=0)
             if now >= target:
                 target += timedelta(days=1)
@@ -1252,7 +1219,6 @@ async def run_bot():
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
-    from config import ADMIN_ID
     asyncio.create_task(reminder_scheduler(app.bot, ADMIN_ID))
     asyncio.create_task(daily_report_scheduler(app.bot, ADMIN_ID))
     await asyncio.Event().wait()
@@ -1266,6 +1232,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# This file intentionally uses run_polling which works fine on Render
-# The Procfile/Start Command must be: python bot.py
