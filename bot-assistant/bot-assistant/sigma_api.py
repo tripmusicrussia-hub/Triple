@@ -101,6 +101,9 @@ class SigmaAPI:
 
     async def login(self) -> bool:
         """Получить токен через OAuth2"""
+        from urllib.parse import quote
+        login = quote(SIGMA_LOGIN, safe='')
+        password = quote(SIGMA_PASSWORD, safe='')
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
                 f"{BASE_URL}/oauth/token",
@@ -110,12 +113,7 @@ class SigmaAPI:
                     "Accept": "application/json, text/javascript",
                     "Origin": "https://cloud.sigma.ru",
                 },
-                data={
-                    "scope": "read write",
-                    "grant_type": "password",
-                    "username": SIGMA_LOGIN,
-                    "password": SIGMA_PASSWORD,
-                }
+                content=f"scope=read+write&grant_type=password&username={login}&password={password}".encode()
             )
             if resp.status_code != 200:
                 logger.error(f"Sigma login failed: {resp.status_code} {resp.text[:200]}")
