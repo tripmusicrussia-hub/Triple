@@ -880,9 +880,34 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         idx = int(data.split("_")[2])
         if user_id not in pending_invoices: return
         item = pending_invoices[user_id]["items"][idx]
-        editing_qty[user_id] = idx
         await query.message.reply_text(
-            f"Введи правильное количество для:\n{item['name'][:50]}\n\nСейчас: {item['qty']} шт"
+            f"Что исправить?\n{item['name'][:50]}\nКол-во: {item['qty']} шт | Цена: {item['price']} р.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Кол-во", callback_data=f"inv_qty_{idx}"),
+                 InlineKeyboardButton("Цену", callback_data=f"inv_price_{idx}")]
+            ])
+        )
+        return
+
+    if data.startswith("inv_qty_"):
+        if user_id != ADMIN_ID: return
+        idx = int(data.split("_")[2])
+        if user_id not in pending_invoices: return
+        item = pending_invoices[user_id]["items"][idx]
+        editing_qty[user_id] = ("qty", idx)
+        await query.message.edit_text(
+            f"Введи новое количество для:\n{item['name'][:50]}\nСейчас: {item['qty']} шт"
+        )
+        return
+
+    if data.startswith("inv_price_"):
+        if user_id != ADMIN_ID: return
+        idx = int(data.split("_")[2])
+        if user_id not in pending_invoices: return
+        item = pending_invoices[user_id]["items"][idx]
+        editing_qty[user_id] = ("price", idx)
+        await query.message.edit_text(
+            f"Введи новую цену для:\n{item['name'][:50]}\nСейчас: {item['price']} р."
         )
         return
 
@@ -1075,12 +1100,12 @@ def kb_invoice_more_pages():
     ])
 
 def kb_invoice_edit(items):
-    """Кнопки для редактирования количества каждого товара + загрузка"""
+    """Кнопки для редактирования каждого товара + загрузка"""
     rows = []
     for i, item in enumerate(items):
-        name_short = item["name"][:28]
+        name_short = item["name"][:22]
         rows.append([InlineKeyboardButton(
-            f"✏️ {i+1}. {name_short} — {item['qty']} шт",
+            f"✏️ {i+1}. {name_short} | {item['qty']}шт x {item['price']}р",
             callback_data=f"inv_edit_{i}"
         )])
     rows.append([InlineKeyboardButton("🚀 Загрузить в Sigma", callback_data="invoice_upload")])
@@ -1088,16 +1113,18 @@ def kb_invoice_edit(items):
     return InlineKeyboardMarkup(rows)
 
 def format_invoice_final(supplier, items):
-    lines = [f"📋 Накладная готова к загрузке\n"]
-    lines.append(f"🏭 Поставщик: {supplier}")
+    lines = ["📋 Накладная — проверь и исправь если надо\n"]
+    lines.append(f"🏭 {supplier}")
     lines.append(f"📦 Товаров: {len(items)}\n")
     for i, item in enumerate(items, 1):
         markup = sigma_api.get_markup(item["name"])
         sell = sigma_api.calc_price(item["price"], markup)
         pct = int(markup * 100)
-        lines.append(f"{i}. {item['name'][:35]}")
-        lines.append(f"   {item['qty']} шт x {item['price']} р. → продажа {sell} р. (+{pct}%)")
-    lines.append("\nНажми кнопку товара чтобы исправить кол-во")
+        lines.append(
+            f"{i}. {item['name'][:40]}\n"
+            f"   {item['qty']} шт x {item['price']} р. → продажа {sell} р. (+{pct}%)"
+        )
+    lines.append("\nНажми на товар чтобы исправить кол-во или цену")
     return "\n".join(lines)
 
 async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1209,20 +1236,20 @@ async def handle_assistant(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
     if not text.strip() or text.startswith("/"): return
 
-    # Редактирование количества товара в накладной
+    # Редактирование количества или цены товара в накладной
     if user_id in editing_qty and user_id in pending_invoices:
         try:
-            new_qty = float(text.strip().replace(",", "."))
-            idx = editing_qty.pop(user_id)
-            pending_invoices[user_id]["items"][idx]["qty"] = new_qty
+            new_val = float(text.strip().replace(",", "."))
+            field, idx = editing_qty.pop(user_id)
+            pending_invoices[user_id]["items"][idx][field] = new_val
             invoice = pending_invoices[user_id]
             item_name = invoice["items"][idx]["name"][:35]
-            await update.message.reply_text(f"✅ Обновлено: {item_name} — {new_qty} шт")
-            # Показываем обновлённый список
+            label = "кол-во" if field == "qty" else "цена"
+            await update.message.reply_text(f"✅ {item_name}\n{label} обновлено: {new_val}")
             text_summary = format_invoice_final(invoice["supplier"], invoice["items"])
             await update.message.reply_text(text_summary, reply_markup=kb_invoice_edit(invoice["items"]))
         except ValueError:
-            await update.message.reply_text("Введи число, например: 5")
+            await update.message.reply_text("Введи число, например: 5 или 37.50")
         return
 
     if await handle_invoice_confirm(update, context): return
