@@ -29,9 +29,55 @@ def get_markup(name: str) -> float:
             return 0.10
     return 0.25
 
-def calc_price(buy_price: float, markup: float) -> int:
-    """Цена продажи = закупка × (1 + наценка), округление вверх"""
-    return math.ceil(buy_price * (1 + markup))
+def calc_price(buy_price: float, markup: float) -> float:
+    """Цена продажи = закупка × (1 + наценка), округление до 2 знаков"""
+    return round(buy_price * (1 + markup), 2)
+
+def detect_weight_product(item: dict) -> dict:
+    """
+    Если в названии товара есть вес (например '5кг', '2.5кг'),
+    пересчитываем как весовой: qty=вес, price=цена/вес
+    Возвращает обновлённый item с полем 'weight_recalc' если пересчитан.
+    """
+    import re
+    name = item["name"]
+    qty = item.get("qty", 1)
+    price = item.get("price", 0)
+
+    # Ищем паттерн числа с "кг" в названии: 5кг, 2.5кг, 5 кг
+    match = re.search(r'(\d+(?:[.,]\d+)?)\s*кг', name.lower())
+    if match and qty == 1 and price > 0:
+        weight = float(match.group(1).replace(",", "."))
+        if weight > 0:
+            price_per_kg = round(price / weight, 2)
+            return {
+                **item,
+                "qty": weight,
+                "price": price_per_kg,
+                "weight_recalc": True,
+                "original_qty": qty,
+                "original_price": price,
+                "weight_kg": weight,
+            }
+    return item
+
+def process_weight_products(items: list) -> tuple:
+    """
+    Обрабатывает список товаров, пересчитывая весовые.
+    Возвращает (обновлённый список, список пересчитанных названий для отображения)
+    """
+    updated = []
+    recalc_info = []
+    for item in items:
+        processed = detect_weight_product(item)
+        updated.append(processed)
+        if processed.get("weight_recalc"):
+            recalc_info.append(
+                f"⚖️ {processed['name'][:35]}\n"
+                f"   {processed['original_qty']} шт x {processed['original_price']} р. "
+                f"→ {processed['weight_kg']} кг x {processed['price']} р/кг"
+            )
+    return updated, recalc_info
 
 def format_items_preview(items: list) -> str:
     """Форматировать список товаров для проверки"""

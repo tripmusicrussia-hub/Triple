@@ -866,12 +866,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not accumulated or not accumulated.get("items"):
             await query.answer("Нет данных!", show_alert=True)
             return
+
+        # Пересчитываем весовые товары
+        items, recalc_info = sigma_api.process_weight_products(accumulated["items"])
+
         pending_invoices[user_id] = {
             "supplier": accumulated["supplier"],
-            "items": accumulated["items"]
+            "items": items
         }
         invoice = pending_invoices[user_id]
         text = format_invoice_final(invoice["supplier"], invoice["items"])
+
+        # Если были весовые товары — добавляем пояснение
+        if recalc_info:
+            text += "\n\n⚖️ Пересчитано как весовой товар:\n" + "\n".join(recalc_info)
+
         await query.message.edit_text(text, reply_markup=kb_invoice_edit(invoice["items"]))
         return
 
