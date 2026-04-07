@@ -30,8 +30,8 @@ def get_markup(name: str) -> float:
     return 0.25
 
 def calc_price(buy_price: float, markup: float) -> float:
-    """Цена продажи = закупка × (1 + наценка), округление до 2 знаков"""
-    return round(buy_price * (1 + markup), 2)
+    """Цена продажи = закупка × (1 + наценка), округление до целых (математическое)"""
+    return round(buy_price * (1 + markup))
 
 def detect_weight_product(item: dict) -> dict:
     """
