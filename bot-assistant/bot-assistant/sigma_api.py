@@ -91,6 +91,7 @@ class SigmaAPI:
         password_encoded = quote(SIGMA_PASSWORD, safe='')
         body = f"scope=read+write&grant_type=password&username={login_encoded}&password={password_encoded}"
         logger.info(f"Sigma login attempt for: {SIGMA_LOGIN[:5]}***")
+        logger.info(f"Sigma body: scope=read+write&grant_type=password&username={login_encoded[:8]}***&password=***")
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
                 f"{BASE_URL}/oauth/token",
@@ -102,6 +103,7 @@ class SigmaAPI:
                 },
                 content=body.encode("utf-8")
             )
+            logger.info(f"Sigma response: {resp.status_code} {resp.text[:300]}")
             if resp.status_code != 200:
                 logger.error(f"Sigma login failed: {resp.status_code} {resp.text[:200]}")
                 return False
