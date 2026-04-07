@@ -258,28 +258,32 @@ async def recognize_invoice(image_bytes: bytes) -> dict:
     GROQ_KEY = os.getenv("GROQ_API_KEY", "")
     img_b64 = base64.b64encode(image_bytes).decode()
 
-    prompt = """Это товарный чек или накладная от поставщика.
+    prompt = """Это накладная от поставщика. Определи тип и читай соответственно:
 
-ЗАДАЧА: найди все строки где в колонке "Заказ" есть рукописная цифра (написанная от руки ручкой).
-Галочка без цифры НЕ считается — нужна именно цифра.
-Если в строке нет рукописной цифры в колонке Заказ — пропусти эту строку.
+ТИП А — ПЕЧАТНАЯ с галочками: таблица напечатана, в колонке "Количество" стоят галочки (v, ✓) с цифрами рядом.
+→ Бери только строки с галочкой. Галочка без цифры = qty 1. Цена — из колонки "Цена".
 
-ПОСТАВЩИК: возьми название компании из шапки документа (ООО, ИП или название).
+ТИП Б — РУКОПИСНАЯ: вся таблица написана от руки, каждая строка = товар с количеством и ценой.
+→ Бери все заполненные строки. Пропускай только пустые строки, заголовки секций и итоговые строки (Итого, сумма, НДС, %).
 
-Для каждой найденной строки:
-- name: полное название товара как написано в документе
-- qty: рукописная цифра из колонки Заказ (число)
-- price: цена за единицу из колонки Цена (число)
+ПОСТАВЩИК: из шапки документа (строка "Поставщик", "От кого", или название компании ООО/ИП).
 
-Верни ТОЛЬКО JSON без markdown и пояснений:
-{"supplier":"название","items":[{"name":"полное название","qty":число,"price":число}]}"""
+Для каждого товара:
+- name: полное название как написано/напечатано
+- qty: количество (число)
+- price: цена за единицу (число без "руб")
+
+ВАЖНО: читай ВСЕ строки таблицы до конца, не останавливайся на первой половине!
+
+Верни ТОЛЬКО JSON без markdown:
+{"supplier":"название","items":[{"name":"название","qty":число,"price":число}]}"""
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
             json={
-                "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+                "model": "meta-llama/llama-4-maverick-17b-128e-instruct",
                 "max_tokens": 2000,
                 "messages": [{
                     "role": "user",
@@ -292,7 +296,25 @@ async def recognize_invoice(image_bytes: bytes) -> dict:
         )
         j = resp.json()
         if "error" in j:
-            raise Exception(j["error"]["message"])
+            # Fallback to scout if maverick fails
+            resp2 = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+                    "max_tokens": 2000,
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
+                            {"type": "text", "text": prompt}
+                        ]
+                    }]
+                }
+            )
+            j = resp2.json()
+            if "error" in j:
+                raise Exception(j["error"]["message"])
         raw = j["choices"][0]["message"]["content"]
 
     return json.loads(raw.replace("```json", "").replace("```", "").strip())
