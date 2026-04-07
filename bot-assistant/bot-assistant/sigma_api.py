@@ -5,8 +5,10 @@ import httpx
 import json
 import os
 import math
+import re
 import logging
 from typing import Optional
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
@@ -15,36 +17,37 @@ SIGMA_PASSWORD = os.getenv("SIGMA_PASSWORD", "")
 SIGMA_AUTH_HEADER = "Basic cWFzbGFwcDpteVNlY3JldE9BdXJoU2VjcmV0"
 BASE_URL = "https://api-s07.sigma.ru"
 
-# Категории с наценкой 10%
 LOW_MARGIN_KEYWORDS = [
     "хлеб", "булка", "батон", "лаваш", "пита", "багет", "буханка",
     "молоко", "молоке", "молока",
 ]
 
 def get_markup(name: str) -> float:
-    """Определить наценку по названию товара"""
     name_lower = name.lower()
     for kw in LOW_MARGIN_KEYWORDS:
         if kw in name_lower:
             return 0.10
     return 0.25
 
-def calc_price(buy_price: float, markup: float) -> float:
-    """Цена продажи = закупка × (1 + наценка), округление до целых (математическое)"""
+def calc_price(buy_price: float, markup: float) -> int:
     return round(buy_price * (1 + markup))
 
+def format_items_preview(items: list) -> str:
+    lines = []
+    for i, item in enumerate(items, 1):
+        markup = get_markup(item["name"])
+        sell = calc_price(item["price"], markup)
+        pct = int(markup * 100)
+        lines.append(
+            f"{i}. {item['name']}\n"
+            f"   {item['qty']} шт/уп | Закупка: {item['price']} ₽ → Продажа: {sell} ₽ (+{pct}%)"
+        )
+    return "\n\n".join(lines)
+
 def detect_weight_product(item: dict) -> dict:
-    """
-    Если в названии товара есть вес (например '5кг', '2.5кг'),
-    пересчитываем как весовой: qty=вес, price=цена/вес
-    Возвращает обновлённый item с полем 'weight_recalc' если пересчитан.
-    """
-    import re
     name = item["name"]
     qty = item.get("qty", 1)
     price = item.get("price", 0)
-
-    # Ищем паттерн числа с "кг" в названии: 5кг, 2.5кг, 5 кг
     match = re.search(r'(\d+(?:[.,]\d+)?)\s*кг', name.lower())
     if match and qty == 1 and price > 0:
         weight = float(match.group(1).replace(",", "."))
@@ -62,10 +65,6 @@ def detect_weight_product(item: dict) -> dict:
     return item
 
 def process_weight_products(items: list) -> tuple:
-    """
-    Обрабатывает список товаров, пересчитывая весовые.
-    Возвращает (обновлённый список, список пересчитанных названий для отображения)
-    """
     updated = []
     recalc_info = []
     for item in items:
@@ -79,19 +78,6 @@ def process_weight_products(items: list) -> tuple:
             )
     return updated, recalc_info
 
-def format_items_preview(items: list) -> str:
-    """Форматировать список товаров для проверки"""
-    lines = []
-    for i, item in enumerate(items, 1):
-        markup = get_markup(item["name"])
-        sell = calc_price(item["price"], markup)
-        pct = int(markup * 100)
-        lines.append(
-            f"{i}. {item['name']}\n"
-            f"   {item['qty']} шт/уп | Закупка: {item['price']} ₽ → Продажа: {sell} ₽ (+{pct}%)"
-        )
-    return "\n\n".join(lines)
-
 
 class SigmaAPI:
     def __init__(self):
@@ -101,9 +87,10 @@ class SigmaAPI:
 
     async def login(self) -> bool:
         """Получить токен через OAuth2"""
-        from urllib.parse import quote
-        login = quote(SIGMA_LOGIN, safe='')
-        password = quote(SIGMA_PASSWORD, safe='')
+        login_encoded = quote(SIGMA_LOGIN, safe='')
+        password_encoded = quote(SIGMA_PASSWORD, safe='')
+        body = f"scope=read+write&grant_type=password&username={login_encoded}&password={password_encoded}"
+        logger.info(f"Sigma login attempt for: {SIGMA_LOGIN[:5]}***")
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
                 f"{BASE_URL}/oauth/token",
@@ -113,7 +100,7 @@ class SigmaAPI:
                     "Accept": "application/json, text/javascript",
                     "Origin": "https://cloud.sigma.ru",
                 },
-                content=f"scope=read+write&grant_type=password&username={login}&password={password}".encode()
+                content=body.encode("utf-8")
             )
             if resp.status_code != 200:
                 logger.error(f"Sigma login failed: {resp.status_code} {resp.text[:200]}")
@@ -132,15 +119,12 @@ class SigmaAPI:
         }
 
     async def get_company_info(self) -> bool:
-        """Получить ID компании и склада"""
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.get(f"{BASE_URL}/rest/1.1/account", headers=self._headers())
             if r.status_code != 200:
                 return False
             data = r.json()
             self.company_id = data.get("company", {}).get("id")
-
-            # Get storehouses
             r2 = await client.get(f"{BASE_URL}/rest/1.1/storehouses", headers=self._headers())
             if r2.status_code == 200:
                 houses = r2.json()
@@ -149,7 +133,6 @@ class SigmaAPI:
             return bool(self.company_id)
 
     async def get_suppliers(self) -> list:
-        """Получить список поставщиков"""
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.get(
                 f"{BASE_URL}/rest/1.1/suppliers",
@@ -161,21 +144,17 @@ class SigmaAPI:
             return []
 
     async def find_supplier(self, name: str) -> Optional[str]:
-        """Найти поставщика по имени, вернуть его ID"""
         suppliers = await self.get_suppliers()
         name_lower = name.lower()
-        # Точное совпадение
         for s in suppliers:
             if s.get("name", "").lower() == name_lower:
                 return s.get("id")
-        # Частичное совпадение
         for s in suppliers:
             if name_lower in s.get("name", "").lower() or s.get("name", "").lower() in name_lower:
                 return s.get("id")
         return None
 
     async def find_product(self, name: str) -> Optional[dict]:
-        """Найти товар по названию"""
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.post(
                 f"{BASE_URL}/rest/1.1/products/simple",
@@ -196,39 +175,27 @@ class SigmaAPI:
             return None
 
     async def create_income(self, supplier_id: Optional[str] = None) -> Optional[str]:
-        """Создать документ прихода, вернуть его ID"""
         async with httpx.AsyncClient(timeout=15) as client:
-            payload = {
-                "storehouseId": self.storehouse_id,
-                "supplierId": supplier_id,
-            }
             r = await client.post(
                 f"{BASE_URL}/rest/1.1/waybills",
                 headers=self._headers(),
-                json=payload
+                json={"storehouseId": self.storehouse_id, "supplierId": supplier_id}
             )
             if r.status_code in (200, 201):
-                data = r.json()
-                return data.get("id")
+                return r.json().get("id")
             logger.error(f"Create income failed: {r.status_code} {r.text[:300]}")
             return None
 
     async def add_product_to_income(self, waybill_id: str, product_id: str, qty: float, buy_price: float, sell_price: float) -> bool:
-        """Добавить товар в приход"""
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.post(
                 f"{BASE_URL}/rest/1.1/waybills/{waybill_id}/elements/product/{product_id}",
                 headers=self._headers(),
-                json={
-                    "amount": qty,
-                    "buyingPrice": buy_price,
-                    "sellingPrice": sell_price,
-                }
+                json={"amount": qty, "buyingPrice": buy_price, "sellingPrice": sell_price}
             )
             return r.status_code in (200, 201)
 
     async def conduct_income(self, waybill_id: str) -> bool:
-        """Провести документ прихода"""
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.post(
                 f"{BASE_URL}/rest/1.1/waybills/{waybill_id}/conduct",
@@ -238,10 +205,6 @@ class SigmaAPI:
             return r.status_code in (200, 201)
 
     async def process_invoice(self, items: list, supplier_name: str) -> dict:
-        """
-        Полный цикл: логин → найти поставщика → создать приход → добавить товары → провести
-        items: [{"name": str, "qty": float, "price": float}]
-        """
         if not await self.login():
             return {"ok": False, "error": "Не удалось войти в Sigma. Проверь логин/пароль."}
 
@@ -262,10 +225,8 @@ class SigmaAPI:
             if not product:
                 skipped.append(item["name"])
                 continue
-
             markup = get_markup(item["name"])
             sell_price = calc_price(item["price"], markup)
-
             success = await self.add_product_to_income(
                 waybill_id=waybill_id,
                 product_id=product["id"],
@@ -291,19 +252,14 @@ class SigmaAPI:
 
 
 async def ocr_yandex(image_bytes: bytes) -> str:
-    """Извлекаем текст из изображения через Yandex Vision OCR"""
     import base64
     YANDEX_KEY = os.getenv("YANDEX_API_KEY", "")
     YANDEX_FOLDER = os.getenv("YANDEX_FOLDER_ID", "")
-
     img_b64 = base64.b64encode(image_bytes).decode()
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             "https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze",
-            headers={
-                "Authorization": f"Api-Key {YANDEX_KEY}",
-                "Content-Type": "application/json"
-            },
+            headers={"Authorization": f"Api-Key {YANDEX_KEY}", "Content-Type": "application/json"},
             json={
                 "folderId": YANDEX_FOLDER,
                 "analyzeSpecs": [{
@@ -313,8 +269,6 @@ async def ocr_yandex(image_bytes: bytes) -> str:
             }
         )
         data = resp.json()
-
-    # Извлекаем весь текст из результата
     lines = []
     try:
         pages = data["results"][0]["results"][0]["textDetection"]["pages"]
@@ -330,20 +284,14 @@ async def ocr_yandex(image_bytes: bytes) -> str:
 
 
 async def recognize_invoice(image_bytes: bytes) -> dict:
-    """
-    Распознаёт накладную: сначала Yandex OCR для точного текста,
-    потом Groq для структурирования в JSON.
-    """
     GROQ_KEY = os.getenv("GROQ_API_KEY", "")
 
-    # Шаг 1: получаем чистый текст через Yandex Vision
     raw_text = await ocr_yandex(image_bytes)
     logger.info(f"Yandex OCR result:\n{raw_text[:500]}")
 
     if not raw_text.strip():
         raise Exception("Yandex OCR не смог прочитать текст с изображения")
 
-    # Шаг 2: структурируем текст через Groq
     prompt = f"""Это текст накладной от поставщика, извлечённый OCR системой.
 
 ТЕКСТ НАКЛАДНОЙ:
@@ -357,10 +305,8 @@ async def recognize_invoice(image_bytes: bytes) -> dict:
 - Пропускай: пустые строки, итоги (Итого, НДС, сумма прописью), заголовки секций без цены
 - Поставщик: из строки "Поставщик", "От кого", или название компании ООО/ИП в шапке
 
-КРИТИЧЕСКИ ВАЖНО: копируй название товара ДОСЛОВНО как написано в тексте накладной — не сокращай, не переводи, не изменяй ни одной буквы!
-
 Верни ТОЛЬКО JSON без markdown:
-{{"supplier":"название","items":[{{"name":"точное название товара слово в слово","qty":число,"price":число}}]}}"""
+{{"supplier":"название","items":[{{"name":"точное название товара","qty":число,"price":число}}]}}"""
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
