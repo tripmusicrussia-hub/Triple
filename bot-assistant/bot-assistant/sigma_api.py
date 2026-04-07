@@ -87,11 +87,8 @@ class SigmaAPI:
 
     async def login(self) -> bool:
         """Получить токен через OAuth2"""
-        login_encoded = quote(SIGMA_LOGIN, safe='')
-        password_encoded = quote(SIGMA_PASSWORD, safe='')
-        body = f"scope=read+write&grant_type=password&username={login_encoded}&password={password_encoded}"
+        body = f"scope=read+write&grant_type=password&username={SIGMA_LOGIN}&password={quote(SIGMA_PASSWORD, safe='')}"
         logger.info(f"Sigma login attempt for: {SIGMA_LOGIN[:5]}***")
-        logger.info(f"Sigma body: scope=read+write&grant_type=password&username={login_encoded[:8]}***&password=***")
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
                 f"{BASE_URL}/oauth/token",
