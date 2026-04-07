@@ -248,73 +248,89 @@ class SigmaAPI:
         }
 
 
+async def ocr_yandex(image_bytes: bytes) -> str:
+    """Извлекаем текст из изображения через Yandex Vision OCR"""
+    import base64
+    YANDEX_KEY = os.getenv("YANDEX_API_KEY", "")
+    YANDEX_FOLDER = os.getenv("YANDEX_FOLDER_ID", "")
+
+    img_b64 = base64.b64encode(image_bytes).decode()
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            "https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze",
+            headers={
+                "Authorization": f"Api-Key {YANDEX_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "folderId": YANDEX_FOLDER,
+                "analyzeSpecs": [{
+                    "content": img_b64,
+                    "features": [{"type": "TEXT_DETECTION", "textDetectionConfig": {"languageCodes": ["ru", "en"]}}]
+                }]
+            }
+        )
+        data = resp.json()
+
+    # Извлекаем весь текст из результата
+    lines = []
+    try:
+        pages = data["results"][0]["results"][0]["textDetection"]["pages"]
+        for page in pages:
+            for block in page.get("blocks", []):
+                for line in block.get("lines", []):
+                    words = [w["text"] for w in line.get("words", [])]
+                    if words:
+                        lines.append(" ".join(words))
+    except Exception as e:
+        logger.error(f"Yandex OCR parse error: {e}, response: {str(data)[:300]}")
+    return "\n".join(lines)
+
+
 async def recognize_invoice(image_bytes: bytes) -> dict:
     """
-    Распознаёт накладную через Groq Vision.
-    Возвращает {"supplier": str, "items": [...]}
+    Распознаёт накладную: сначала Yandex OCR для точного текста,
+    потом Groq для структурирования в JSON.
     """
-    import base64
-
     GROQ_KEY = os.getenv("GROQ_API_KEY", "")
-    img_b64 = base64.b64encode(image_bytes).decode()
 
-    prompt = """Это накладная от поставщика. Определи тип и читай соответственно:
+    # Шаг 1: получаем чистый текст через Yandex Vision
+    raw_text = await ocr_yandex(image_bytes)
+    logger.info(f"Yandex OCR result:\n{raw_text[:500]}")
 
-ТИП А — ПЕЧАТНАЯ с галочками: таблица напечатана, в колонке "Количество" стоят галочки (v, ✓) с цифрами рядом.
-→ Бери только строки с галочкой. Галочка без цифры = qty 1. Цена — из колонки "Цена".
+    if not raw_text.strip():
+        raise Exception("Yandex OCR не смог прочитать текст с изображения")
 
-ТИП Б — РУКОПИСНАЯ: вся таблица написана от руки, каждая строка = товар с количеством и ценой.
-→ Бери все заполненные строки. Пропускай только пустые строки, заголовки секций и итоговые строки (Итого, сумма, НДС, %).
+    # Шаг 2: структурируем текст через Groq
+    prompt = f"""Это текст накладной от поставщика, извлечённый OCR системой.
 
-ПОСТАВЩИК: из шапки документа (строка "Поставщик", "От кого", или название компании ООО/ИП).
+ТЕКСТ НАКЛАДНОЙ:
+{raw_text}
 
-Для каждого товара:
-- name: полное название как написано/напечатано
-- qty: количество (число)
-- price: цена за единицу (число без "руб")
+ЗАДАЧА: найди все строки с товарами и их количеством/ценой.
 
-ВАЖНО: читай ВСЕ строки таблицы до конца, не останавливайся на первой половине!
+Правила:
+- Если это печатная накладная с галочками: бери только строки где рядом с товаром есть число (кол-во заказа)
+- Если это рукописная накладная: бери все строки где есть название товара + число кол-во + число цена
+- Пропускай: пустые строки, итоги (Итого, НДС, сумма прописью), заголовки секций без цены
+- Поставщик: из строки "Поставщик", "От кого", или название компании ООО/ИП в шапке
 
 Верни ТОЛЬКО JSON без markdown:
-{"supplier":"название","items":[{"name":"название","qty":число,"price":число}]}"""
+{{"supplier":"название","items":[{{"name":"точное название товара","qty":число,"price":число}}]}}"""
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
             json={
-                "model": "meta-llama/llama-4-maverick-17b-128e-instruct",
+                "model": "llama-3.3-70b-versatile",
                 "max_tokens": 2000,
-                "messages": [{
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
-                        {"type": "text", "text": prompt}
-                    ]
-                }]
+                "messages": [{"role": "user", "content": prompt}]
             }
         )
         j = resp.json()
         if "error" in j:
-            # Fallback to scout if maverick fails
-            resp2 = await client.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
-                json={
-                    "model": "meta-llama/llama-4-scout-17b-16e-instruct",
-                    "max_tokens": 2000,
-                    "messages": [{
-                        "role": "user",
-                        "content": [
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
-                            {"type": "text", "text": prompt}
-                        ]
-                    }]
-                }
-            )
-            j = resp2.json()
-            if "error" in j:
-                raise Exception(j["error"]["message"])
+            raise Exception(j["error"]["message"])
         raw = j["choices"][0]["message"]["content"]
 
     return json.loads(raw.replace("```json", "").replace("```", "").strip())
