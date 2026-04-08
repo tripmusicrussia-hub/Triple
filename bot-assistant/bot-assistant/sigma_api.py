@@ -127,22 +127,34 @@ class SigmaAPI:
                 return False
             data = r.json()
             self.company_id = data.get("company", {}).get("id")
-            r2 = await client.get(f"{BASE_URL}/rest/1.1/storehouses", headers=self._headers())
+            logger.info(f"Sigma company_id: {self.company_id}")
+            if not self.company_id:
+                return False
+            # v2 API requires company_id in URL
+            r2 = await client.get(
+                f"{BASE_URL}/rest/v2/companies/{self.company_id}/storehouses",
+                headers=self._headers()
+            )
+            logger.info(f"Storehouses: {r2.status_code} {r2.text[:200]}")
             if r2.status_code == 200:
                 houses = r2.json()
-                if houses:
-                    self.storehouse_id = houses[0].get("id")
+                items = houses.get("content", houses) if isinstance(houses, dict) else houses
+                if items:
+                    self.storehouse_id = items[0].get("id")
+                    logger.info(f"Sigma storehouse_id: {self.storehouse_id}")
             return bool(self.company_id)
 
     async def get_suppliers(self) -> list:
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.get(
-                f"{BASE_URL}/rest/1.1/suppliers",
+                f"{BASE_URL}/rest/v2/companies/{self.company_id}/suppliers",
                 headers=self._headers(),
                 params={"size": 100}
             )
+            logger.info(f"Suppliers: {r.status_code} {r.text[:200]}")
             if r.status_code == 200:
-                return r.json().get("content", r.json() if isinstance(r.json(), list) else [])
+                data = r.json()
+                return data.get("content", data) if isinstance(data, dict) else data
             return []
 
     async def find_supplier(self, name: str) -> Optional[str]:
@@ -159,7 +171,7 @@ class SigmaAPI:
     async def find_product(self, name: str) -> Optional[dict]:
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.post(
-                f"{BASE_URL}/rest/1.1/products/simple",
+                f"{BASE_URL}/rest/v4/products/simple",
                 headers=self._headers(),
                 params={"page": 0},
                 json={
@@ -169,24 +181,50 @@ class SigmaAPI:
                     "waybillId": None
                 }
             )
+            logger.info(f"Find product '{name[:20]}': {r.status_code} {r.text[:300]}")
             if r.status_code == 200:
                 data = r.json()
-                content = data.get("productsInfo", {}).get("content", [])
+                content = data.get("content", [])
                 if content:
                     return content[0]
             return None
 
     async def create_income(self, supplier_id: Optional[str] = None) -> Optional[str]:
         async with httpx.AsyncClient(timeout=15) as client:
+            payload = {
+                "storehouseId": self.storehouse_id,
+                "supplierId": supplier_id,
+                "type": "INCOME"
+            }
             r = await client.post(
-                f"{BASE_URL}/rest/1.1/waybills",
+                f"{BASE_URL}/waybills",
                 headers=self._headers(),
-                json={"storehouseId": self.storehouse_id, "supplierId": supplier_id}
+                json=payload
             )
+            logger.info(f"Create income: {r.status_code} {r.text[:300]}")
             if r.status_code in (200, 201):
                 return r.json().get("id")
             logger.error(f"Create income failed: {r.status_code} {r.text[:300]}")
             return None
+
+    async def add_product_to_income(self, waybill_id: str, product_id: str, qty: float, buy_price: float, sell_price: float) -> bool:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"{BASE_URL}/waybills/{waybill_id}/elements/product/{product_id}",
+                headers=self._headers(),
+                json={"amount": qty, "buyingPrice": buy_price, "sellingPrice": sell_price}
+            )
+            logger.info(f"Add product {product_id}: {r.status_code} {r.text[:200]}")
+            return r.status_code in (200, 201)
+
+    async def conduct_income(self, waybill_id: str) -> bool:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"{BASE_URL}/waybills/{waybill_id}/conduct",
+                headers=self._headers(),
+                json={}
+            )
+            return r.status_code in (200, 201)
 
     async def add_product_to_income(self, waybill_id: str, product_id: str, qty: float, buy_price: float, sell_price: float) -> bool:
         async with httpx.AsyncClient(timeout=15) as client:
