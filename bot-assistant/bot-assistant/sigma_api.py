@@ -24,10 +24,9 @@ LOW_MARGIN_KEYWORDS = [
 
 # Словарь аббревиатур — расшифровки для поиска в Sigma
 ABBREVIATIONS = {
-    "овк": "очень важная коровка",
+    "овк": "очень важная корова коровка",
     "овс": "очень важная свинка",
     "мп": "молочный переулок",
-    "вк": "важная корова",
 }
 
 # Глобальный кэш товаров — загружается при старте бота
@@ -279,35 +278,17 @@ class SigmaAPI:
         if not tokens:
             return None
 
-        # Числа (проценты, граммы) — должны совпадать точно
-        numbers = set(n.replace(',', '.') for n in re.findall(r'\d+(?:[.,]\d+)?', name_lower))
-        # Слова (не числа)
-        words = [t for t in tokens if not re.match(r'^\d', t)]
-
         best_match = None
         best_score = 0
 
         for product in cache:
             p_name = product.get("name", "").lower()
-
-            # Числа должны совпадать
-            p_numbers = set(n.replace(',', '.') for n in re.findall(r'\d+(?:[.,]\d+)?', p_name))
-            number_mismatch = False
-            for num in numbers:
-                if num not in p_numbers:
-                    number_mismatch = True
-                    break
-            if number_mismatch:
-                continue
-
-            # Считаем совпадение слов
             matched = 0
             score = 0
-            for word in tokens:
-                if word in p_name:
+            for token in tokens:
+                if token in p_name:
                     matched += 1
-                    score += len(word)
-
+                    score += len(token)
             if matched > 0:
                 ratio = matched / len(tokens)
                 if ratio >= 0.4 and score > best_score:
