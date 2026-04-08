@@ -200,22 +200,32 @@ class SigmaAPI:
                     return content[0]
             return None
 
-    async def create_income(self, supplier_id: Optional[str] = None) -> Optional[str]:
+    async def create_income(self, supplier_id: Optional[str] = None, supplier_name: Optional[str] = None) -> Optional[str]:
         from datetime import datetime
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S.") + f"{datetime.now().microsecond // 1000:03d}"
         async with httpx.AsyncClient(timeout=15) as client:
+            # Get next waybill number
+            r_num = await client.get(
+                f"{BASE_URL}/waybills/generate-waybill-number",
+                headers=self._headers(),
+                params={"waybillType": "INCOME", "companyId": self.company_id}
+            )
+            number = r_num.json().get("number", "") if r_num.status_code == 200 else ""
+            logger.info(f"Waybill number: {number}")
+
             payload = {
                 "waybillTime": now,
                 "comment": "",
+                "number": number,
                 "isDefault": True,
                 "status": "DRAFT",
-                "storehouseDestination": {"id": self.storehouse_id, "name": None},
-                "storehouseSource": {"id": None, "name": None},
-                "supplier": {"id": supplier_id, "name": None},
-                "type": "INCOME",
                 "egaisWaybillRegId": None,
                 "serverTime": None,
+                "storehouseDestination": {"id": self.storehouse_id, "name": None},
+                "storehouseSource": {"id": None, "name": None},
+                "supplier": {"id": supplier_id, "name": supplier_name},
                 "totalSum": 0,
+                "type": "INCOME",
             }
             r = await client.post(
                 f"{BASE_URL}/waybills",
@@ -257,7 +267,7 @@ class SigmaAPI:
         if not supplier_id:
             logger.warning(f"Supplier not found: {supplier_name}")
 
-        waybill_id = await self.create_income(supplier_id)
+        waybill_id = await self.create_income(supplier_id, supplier_name if supplier_id else None)
         if not waybill_id:
             return {"ok": False, "error": "Не удалось создать документ прихода в Sigma."}
 
