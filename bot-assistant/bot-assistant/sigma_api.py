@@ -226,24 +226,6 @@ class SigmaAPI:
             )
             return r.status_code in (200, 201)
 
-    async def add_product_to_income(self, waybill_id: str, product_id: str, qty: float, buy_price: float, sell_price: float) -> bool:
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.post(
-                f"{BASE_URL}/rest/1.1/waybills/{waybill_id}/elements/product/{product_id}",
-                headers=self._headers(),
-                json={"amount": qty, "buyingPrice": buy_price, "sellingPrice": sell_price}
-            )
-            return r.status_code in (200, 201)
-
-    async def conduct_income(self, waybill_id: str) -> bool:
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.post(
-                f"{BASE_URL}/rest/1.1/waybills/{waybill_id}/conduct",
-                headers=self._headers(),
-                json={}
-            )
-            return r.status_code in (200, 201)
-
     async def process_invoice(self, items: list, supplier_name: str) -> dict:
         if not await self.login():
             return {"ok": False, "error": "Не удалось войти в Sigma. Проверь логин/пароль."}
