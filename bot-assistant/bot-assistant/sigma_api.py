@@ -22,9 +22,22 @@ LOW_MARGIN_KEYWORDS = [
     "молоко", "молоке", "молока",
 ]
 
-# Глобальный кэш товаров — загружается при старте бота
-_global_products_cache: list = []
-_global_cache_loaded: bool = False
+# Словарь аббревиатур — расшифровки для поиска в Sigma
+ABBREVIATIONS = {
+    "овк": "очень важная коровка",
+    "овс": "очень важная свинка",
+    "мп": "молочный переулок",
+    "вк": "важная корова",
+}
+
+
+def expand_abbreviations(name: str) -> str:
+    """Заменяем аббревиатуры на полные названия для лучшего поиска"""
+    name_lower = name.lower()
+    for abbr, full in ABBREVIATIONS.items():
+        # Заменяем аббревиатуру если она стоит как отдельное слово
+        name_lower = re.sub(r'\b' + abbr + r'\b', full, name_lower)
+    return name_lower
 
 
 def get_markup(name: str) -> float:
@@ -255,27 +268,54 @@ class SigmaAPI:
         cache = _global_products_cache
         if not cache:
             return None
-        name_lower = name.lower()
-        words = [w for w in re.split(r'[\s,./\\%]+', name_lower) if len(w) >= 3]
-        if not words:
+
+        name_lower = expand_abbreviations(name.lower())
+        # Разбиваем на токены
+        tokens = [w for w in re.split(r'[\s,./\\%]+', name_lower) if len(w) >= 2]
+        if not tokens:
             return None
+
+        # Числа (проценты, граммы) — должны совпадать точно
+        numbers = set(re.findall(r'\d+(?:[.,]\d+)?', name_lower))
+        # Слова (не числа)
+        words = [t for t in tokens if not re.match(r'^\d', t)]
+
         best_match = None
         best_score = 0
+
         for product in cache:
             p_name = product.get("name", "").lower()
-            matched_words = 0
+
+            # Числа должны совпадать — если в запросе есть число которого нет в товаре, пропускаем
+            p_numbers = set(re.findall(r'\d+(?:[.,]\d+)?', p_name))
+            number_mismatch = False
+            for num in numbers:
+                num_norm = num.replace(',', '.')
+                # Проверяем что это число есть в названии товара
+                if not any(n.replace(',', '.') == num_norm for n in p_numbers):
+                    number_mismatch = True
+                    break
+            if number_mismatch:
+                continue
+
+            # Считаем совпадение слов
+            matched = 0
             score = 0
-            for word in words:
+            for word in tokens:
                 if word in p_name:
-                    matched_words += 1
+                    matched += 1
                     score += len(word)
-            if matched_words > 0:
-                ratio = matched_words / len(words)
+
+            if matched > 0:
+                ratio = matched / len(tokens)
                 if ratio >= 0.4 and score > best_score:
                     best_score = score
                     best_match = product
+
         if best_match:
-            logger.info(f"Cache hit: '{name[:25]}' → '{best_match.get('name', '')[:35]}'")
+            logger.info(f"Cache hit: '{name[:30]}' → '{best_match.get('name', '')[:40]}'")
+        else:
+            logger.info(f"Cache miss: '{name[:30]}'")
         return best_match
 
     async def find_product(self, name: str) -> Optional[dict]:
@@ -349,13 +389,42 @@ class SigmaAPI:
 
     async def add_product_to_income(self, waybill_id: str, product_id: str, qty: float, buy_price: float, sell_price: float) -> bool:
         async with httpx.AsyncClient(timeout=15) as client:
+            # Шаг 1: добавляем товар в приход
             r = await client.post(
                 f"{BASE_URL}/waybills/{waybill_id}/elements/product/{product_id}",
                 headers=self._headers(),
                 json={"amount": qty, "buyingPrice": buy_price, "sellingPrice": sell_price}
             )
             logger.info(f"Add product {product_id}: {r.status_code} {r.text[:200]}")
-            return r.status_code in (200, 201)
+            if r.status_code not in (200, 201):
+                return False
+
+            # Шаг 2: получаем element_id из ответа
+            element_id = r.json().get("id")
+            if not element_id:
+                # Пробуем получить из списка элементов
+                r2 = await client.get(
+                    f"{BASE_URL}/waybills/{waybill_id}/elements",
+                    headers=self._headers(),
+                    params={"size": 100}
+                )
+                if r2.status_code == 200:
+                    elements = r2.json() if isinstance(r2.json(), list) else r2.json().get("content", [])
+                    for el in elements:
+                        if el.get("product", {}).get("id") == product_id:
+                            element_id = el.get("id")
+                            break
+
+            # Шаг 3: устанавливаем количество отдельным PUT запросом
+            if element_id:
+                r3 = await client.put(
+                    f"{BASE_URL}/waybills/{waybill_id}/elements/{element_id}/quantity",
+                    headers=self._headers(),
+                    json={"value": qty}
+                )
+                logger.info(f"Set quantity {qty} for element {element_id}: {r3.status_code}")
+
+            return True
 
     async def conduct_income(self, waybill_id: str) -> bool:
         async with httpx.AsyncClient(timeout=15) as client:
