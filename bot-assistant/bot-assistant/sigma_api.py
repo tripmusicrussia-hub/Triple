@@ -205,10 +205,11 @@ class SigmaAPI:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S.") + f"{datetime.now().microsecond // 1000:03d}"
         async with httpx.AsyncClient(timeout=15) as client:
             # Get next waybill number
-            r_num = await client.get(
+            r_num = await client.post(
                 f"{BASE_URL}/waybills/generate-waybill-number",
                 headers=self._headers(),
-                params={"waybillType": "INCOME", "companyId": self.company_id}
+                params={"waybillType": "INCOME", "companyId": self.company_id},
+                json={}
             )
             number = r_num.json().get("number", "") if r_num.status_code == 200 else ""
             logger.info(f"Waybill number: {number}")
