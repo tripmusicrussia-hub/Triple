@@ -17,6 +17,9 @@ import beats_db
 import assistant_ai
 import sigma_api
 
+# Глобальный экземпляр SigmaAPI — кэш товаров сохраняется между накладными
+_sigma_instance = sigma_api.SigmaAPI()
+
 conversation_history = {}
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -928,7 +931,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         invoice = pending_invoices[user_id]
         await query.message.edit_text("⏳ Загружаю в Sigma...")
         try:
-            api = sigma_api.SigmaAPI()
+            api = _sigma_instance
             result = await api.process_invoice(
                 items=invoice["items"],
                 supplier_name=invoice["supplier"]
@@ -1192,7 +1195,7 @@ async def handle_invoice_confirm(update: Update, context: ContextTypes.DEFAULT_T
     msg = await update.message.reply_text("⏳ Загружаю в Sigma...")
 
     try:
-        api = sigma_api.SigmaAPI()
+        api = _sigma_instance
         result = await api.process_invoice(
             items=invoice["items"],
             supplier_name=invoice["supplier"]
@@ -1304,7 +1307,7 @@ async def heartbeat_scheduler():
 async def load_sigma_suppliers():
     """Загружаем поставщиков из Sigma и передаём в assistant_ai"""
     try:
-        api = sigma_api.SigmaAPI()
+        api = _sigma_instance
         if await api.login():
             suppliers = await api.get_suppliers()
             names = [s.get("name", "") for s in suppliers if s.get("name")]
@@ -1327,7 +1330,22 @@ async def post_init(application):
     asyncio.create_task(heartbeat_scheduler())
     asyncio.create_task(sigma_suppliers_scheduler())
     asyncio.create_task(load_sigma_suppliers())
+    asyncio.create_task(load_sigma_products())
     write_heartbeat()
+
+
+async def load_sigma_products():
+    """Загрузить все товары из Sigma в глобальный кэш при старте"""
+    try:
+        api = _sigma_instance
+        if not await api.login():
+            logger.warning("Could not load Sigma products: login failed")
+            return
+        await api.get_company_info()
+        count = await api.load_all_products()
+        logger.info(f"Sigma products loaded at startup: {count}")
+    except Exception as e:
+        logger.error(f"Error loading Sigma products: {e}")
 
 
 class HealthHandler(BaseHTTPRequestHandler):

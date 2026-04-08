@@ -4,8 +4,8 @@ sigma_api.py — интеграция с API cloud.sigma.ru
 import httpx
 import json
 import os
-import math
 import re
+import math
 import logging
 from typing import Optional
 from urllib.parse import quote
@@ -22,6 +22,11 @@ LOW_MARGIN_KEYWORDS = [
     "молоко", "молоке", "молока",
 ]
 
+# Глобальный кэш товаров — загружается при старте бота
+_global_products_cache: list = []
+_global_cache_loaded: bool = False
+
+
 def get_markup(name: str) -> float:
     name_lower = name.lower()
     for kw in LOW_MARGIN_KEYWORDS:
@@ -29,8 +34,10 @@ def get_markup(name: str) -> float:
             return 0.10
     return 0.25
 
+
 def calc_price(buy_price: float, markup: float) -> int:
     return round(buy_price * (1 + markup))
+
 
 def format_items_preview(items: list) -> str:
     lines = []
@@ -43,6 +50,7 @@ def format_items_preview(items: list) -> str:
             f"   {item['qty']} шт/уп | Закупка: {item['price']} ₽ → Продажа: {sell} ₽ (+{pct}%)"
         )
     return "\n\n".join(lines)
+
 
 def detect_weight_product(item: dict) -> dict:
     name = item["name"]
@@ -63,6 +71,7 @@ def detect_weight_product(item: dict) -> dict:
                 "weight_kg": weight,
             }
     return item
+
 
 def process_weight_products(items: list) -> tuple:
     updated = []
@@ -90,7 +99,6 @@ class SigmaAPI:
         self.user_fullname = None
 
     async def login(self) -> bool:
-        """Получить токен через OAuth2"""
         logger.info(f"Sigma login attempt for: {SIGMA_LOGIN[:5]}***")
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
@@ -107,7 +115,7 @@ class SigmaAPI:
                     "password": SIGMA_PASSWORD,
                 }
             )
-            logger.info(f"Sigma response: {resp.status_code} {resp.text[:300]}")
+            logger.info(f"Sigma response: {resp.status_code} {resp.text[:200]}")
             if resp.status_code != 200:
                 logger.error(f"Sigma login failed: {resp.status_code} {resp.text[:200]}")
                 return False
@@ -127,23 +135,22 @@ class SigmaAPI:
     async def get_company_info(self) -> bool:
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.get(f"{BASE_URL}/rest/1.1/account", headers=self._headers())
-            logger.info(f"Account response: {r.status_code} {r.text[:500]}")
+            logger.info(f"Account response: {r.status_code} {r.text[:300]}")
             if r.status_code != 200:
                 return False
             data = r.json()
-            # activeCompany is the correct company ID
             self.company_id = data.get("activeCompany") or data.get("company", {}).get("id")
             self.user_email = data.get("email", "")
             self.user_id = data.get("id", "")
             self.user_fullname = f"{data.get('lastName', '')} {data.get('firstName', '')}".strip()
-            logger.info(f"Sigma company_id: {self.company_id}, full data keys: {list(data.keys())}")
+            logger.info(f"Sigma company_id: {self.company_id}")
             if not self.company_id:
                 return False
             r2 = await client.get(
                 f"{BASE_URL}/rest/v2/companies/{self.company_id}/storehouses",
                 headers=self._headers()
             )
-            logger.info(f"Storehouses: {r2.status_code} {r2.text[:300]}")
+            logger.info(f"Storehouses: {r2.status_code} {r2.text[:200]}")
             if r2.status_code == 200:
                 houses = r2.json()
                 items = houses.get("content", houses) if isinstance(houses, dict) else houses
@@ -160,7 +167,7 @@ class SigmaAPI:
                 headers=self._headers(),
                 params={"size": 100}
             )
-            logger.info(f"Suppliers: {r.status_code} {r.text[:300]}")
+            logger.info(f"Suppliers: {r.status_code} {r.text[:200]}")
             if r.status_code == 200:
                 data = r.json()
                 if isinstance(data, list):
@@ -171,48 +178,135 @@ class SigmaAPI:
     async def find_supplier(self, name: str) -> Optional[str]:
         suppliers = await self.get_suppliers()
         name_lower = name.lower().strip().strip('"').strip("'")
-        # Remove company type prefixes for fuzzy match
-        import re as _re
-        name_clean = _re.sub(r'(общество с ограниченной ответственностью|ооо|ип|зао|оао)\s*["\']?', '', name_lower).strip().strip('"').strip("'")
+        name_clean = re.sub(r'(общество с ограниченной ответственностью|ооо|ип|зао|оао)\s*["\']?', '', name_lower).strip().strip('"').strip("'")
         for s in suppliers:
             s_name = s.get("name", "").lower().strip().strip('"').strip("'")
-            s_clean = _re.sub(r'(ооо|ип|зао|оао)\s*["\']?', '', s_name).strip().strip('"').strip("'")
+            s_clean = re.sub(r'(ооо|ип|зао|оао)\s*["\']?', '', s_name).strip().strip('"').strip("'")
             if s_name == name_lower or s_clean == name_clean:
                 return s.get("id")
         for s in suppliers:
             s_name = s.get("name", "").lower()
-            s_clean = _re.sub(r'(ооо|ип|зао|оао)\s*["\']?', '', s_name).strip().strip('"').strip("'")
+            s_clean = re.sub(r'(ооо|ип|зао|оао)\s*["\']?', '', s_name).strip().strip('"').strip("'")
             if name_clean in s_clean or s_clean in name_clean:
                 return s.get("id")
-        logger.warning(f"Supplier not found: '{name}'. Available: {[s.get('name') for s in suppliers[:5]]}")
+        logger.warning(f"Supplier not found: '{name}'")
         return None
 
+    async def _refresh_products_if_needed(self):
+        """Проверяем количество товаров в Sigma — если изменилось, обновляем кэш"""
+        global _global_products_cache, _global_cache_loaded
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.post(
+                    f"{BASE_URL}/rest/v4/products/simple",
+                    headers=self._headers(),
+                    params={"page": 0},
+                    json={"storehouseId": self.storehouse_id, "isProduced": None, "waybillId": None}
+                )
+                if r.status_code == 200:
+                    total_in_sigma = r.json().get("productsInfo", {}).get("totalElements", 0)
+                    cached_count = len(_global_products_cache)
+                    if not _global_cache_loaded or total_in_sigma != cached_count:
+                        logger.info(f"Products changed: sigma={total_in_sigma}, cache={cached_count}. Reloading...")
+                        await self.load_all_products()
+                    else:
+                        logger.info(f"Products cache up to date: {cached_count} items")
+        except Exception as e:
+            logger.error(f"Error checking products count: {e}")
+            if not _global_cache_loaded:
+                await self.load_all_products()
+
+    async def load_all_products(self) -> int:
+        """Загрузить все товары из Sigma в глобальный кэш"""
+        global _global_products_cache, _global_cache_loaded
+        page = 0
+        total = 0
+        products = []
+        async with httpx.AsyncClient(timeout=60) as client:
+            while True:
+                r = await client.post(
+                    f"{BASE_URL}/rest/v4/products/simple",
+                    headers=self._headers(),
+                    params={"page": page},
+                    json={"storehouseId": self.storehouse_id, "isProduced": None, "waybillId": None}
+                )
+                if r.status_code != 200:
+                    logger.error(f"load_all_products page {page}: {r.status_code}")
+                    break
+                data = r.json()
+                content = data.get("productsInfo", {}).get("content", [])
+                if not content:
+                    break
+                products.extend(content)
+                total += len(content)
+                if data.get("productsInfo", {}).get("last", True):
+                    break
+                page += 1
+                if page > 100:
+                    break
+        _global_products_cache = products
+        _global_cache_loaded = True
+        logger.info(f"Loaded {total} products into cache ({page+1} pages)")
+        return total
+
+    def find_product_in_cache(self, name: str) -> Optional[dict]:
+        """Нечёткий поиск товара в кэше по словам"""
+        global _global_products_cache
+        cache = _global_products_cache
+        if not cache:
+            return None
+        name_lower = name.lower()
+        words = [w for w in re.split(r'[\s,./\\%]+', name_lower) if len(w) >= 3]
+        if not words:
+            return None
+        best_match = None
+        best_score = 0
+        for product in cache:
+            p_name = product.get("name", "").lower()
+            matched_words = 0
+            score = 0
+            for word in words:
+                if word in p_name:
+                    matched_words += 1
+                    score += len(word)
+            if matched_words > 0:
+                ratio = matched_words / len(words)
+                if ratio >= 0.4 and score > best_score:
+                    best_score = score
+                    best_match = product
+        if best_match:
+            logger.info(f"Cache hit: '{name[:25]}' → '{best_match.get('name', '')[:35]}'")
+        return best_match
+
     async def find_product(self, name: str) -> Optional[dict]:
+        global _global_cache_loaded
+        # Ищем в кэше
+        if _global_cache_loaded:
+            cached = self.find_product_in_cache(name)
+            if cached:
+                return cached
+            logger.info(f"Not in cache: '{name[:30]}'")
+            return None
+        # Fallback: поиск через API
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.post(
                 f"{BASE_URL}/rest/v4/products/simple",
                 headers=self._headers(),
                 params={"page": 0},
-                json={
-                    "name": name[:30],
-                    "storehouseId": self.storehouse_id,
-                    "isProduced": None,
-                    "waybillId": None
-                }
+                json={"name": name[:30], "storehouseId": self.storehouse_id, "isProduced": None, "waybillId": None}
             )
-            logger.info(f"Find product '{name[:20]}': {r.status_code} {r.text[:300]}")
+            logger.info(f"Find product API '{name[:20]}': {r.status_code} {r.text[:200]}")
             if r.status_code == 200:
                 data = r.json()
-                content = data.get("content", [])
+                content = data.get("productsInfo", {}).get("content", [])
                 if content:
                     return content[0]
-            return None
+        return None
 
     async def create_income(self, supplier_id: Optional[str] = None, supplier_name: Optional[str] = None) -> Optional[str]:
         from datetime import datetime
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S.") + f"{datetime.now().microsecond // 1000:03d}"
         async with httpx.AsyncClient(timeout=15) as client:
-            # Get next waybill number
             r_num = await client.post(
                 f"{BASE_URL}/waybills/generate-waybill-number",
                 headers=self._headers(),
@@ -227,7 +321,6 @@ class SigmaAPI:
             else:
                 number = ""
             logger.info(f"Waybill number: {number}")
-
             payload = {
                 "waybillTime": now,
                 "comment": "",
@@ -243,7 +336,6 @@ class SigmaAPI:
                 "type": "INCOME",
                 "user": {"id": self.user_id, "email": self.user_email, "fullName": self.user_fullname},
             }
-            logger.info(f"Create income payload: {json.dumps(payload, ensure_ascii=False)[:500]}")
             r = await client.post(
                 f"{BASE_URL}/waybills",
                 headers=self._headers(),
@@ -275,10 +367,14 @@ class SigmaAPI:
             return r.status_code in (200, 201)
 
     async def process_invoice(self, items: list, supplier_name: str) -> dict:
+        global _global_cache_loaded
         if not await self.login():
             return {"ok": False, "error": "Не удалось войти в Sigma. Проверь логин/пароль."}
 
         await self.get_company_info()
+
+        # Загружаем или обновляем кэш товаров
+        await self._refresh_products_if_needed()
 
         supplier_id = await self.find_supplier(supplier_name)
         if not supplier_id:
@@ -308,9 +404,6 @@ class SigmaAPI:
                 added += 1
             else:
                 skipped.append(item["name"])
-
-        if added == 0:
-            return {"ok": False, "error": "Ни один товар не добавлен. Возможно названия не совпадают с базой Sigma."}
 
         return {
             "ok": True,
@@ -355,10 +448,8 @@ async def ocr_yandex(image_bytes: bytes) -> str:
 
 async def recognize_invoice(image_bytes: bytes) -> dict:
     GROQ_KEY = os.getenv("GROQ_API_KEY", "")
-
     raw_text = await ocr_yandex(image_bytes)
     logger.info(f"Yandex OCR result:\n{raw_text[:500]}")
-
     if not raw_text.strip():
         raise Exception("Yandex OCR не смог прочитать текст с изображения")
 
@@ -393,8 +484,7 @@ async def recognize_invoice(image_bytes: bytes) -> dict:
             raise Exception(j["error"]["message"])
         raw = j["choices"][0]["message"]["content"]
 
-    # Clean control characters that break JSON parsing
     import re as _re
-    raw_clean = _re.sub(r'[\x00-\x1f\x7f]', lambda m: ' ' if m.group() not in '\n\r\t' else m.group(), raw)
+    raw_clean = _re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', ' ', raw)
     raw_clean = raw_clean.replace("```json", "").replace("```", "").strip()
     return json.loads(raw_clean)
