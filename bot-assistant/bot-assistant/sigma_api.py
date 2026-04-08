@@ -39,8 +39,8 @@ def expand_abbreviations(name: str) -> str:
     """Заменяем аббревиатуры на полные названия для лучшего поиска"""
     name_lower = name.lower()
     for abbr, full in ABBREVIATIONS.items():
-        # Заменяем аббревиатуру если она стоит как отдельное слово
-        name_lower = re.sub(r'\b' + abbr + r'\b', full, name_lower)
+        # Заменяем аббревиатуру — ищем как отдельное слово (кириллица не поддерживает \b)
+        name_lower = re.sub(r'(?<![а-яёa-z])' + abbr + r'(?![а-яёa-z])', full, name_lower)
     return name_lower
 
 
@@ -280,7 +280,7 @@ class SigmaAPI:
             return None
 
         # Числа (проценты, граммы) — должны совпадать точно
-        numbers = set(re.findall(r'\d+(?:[.,]\d+)?', name_lower))
+        numbers = set(n.replace(',', '.') for n in re.findall(r'\d+(?:[.,]\d+)?', name_lower))
         # Слова (не числа)
         words = [t for t in tokens if not re.match(r'^\d', t)]
 
@@ -290,13 +290,11 @@ class SigmaAPI:
         for product in cache:
             p_name = product.get("name", "").lower()
 
-            # Числа должны совпадать — если в запросе есть число которого нет в товаре, пропускаем
-            p_numbers = set(re.findall(r'\d+(?:[.,]\d+)?', p_name))
+            # Числа должны совпадать
+            p_numbers = set(n.replace(',', '.') for n in re.findall(r'\d+(?:[.,]\d+)?', p_name))
             number_mismatch = False
             for num in numbers:
-                num_norm = num.replace(',', '.')
-                # Проверяем что это число есть в названии товара
-                if not any(n.replace(',', '.') == num_norm for n in p_numbers):
+                if num not in p_numbers:
                     number_mismatch = True
                     break
             if number_mismatch:
