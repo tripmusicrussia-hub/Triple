@@ -30,6 +30,10 @@ ABBREVIATIONS = {
     "вк": "важная корова",
 }
 
+# Глобальный кэш товаров — загружается при старте бота
+_global_products_cache: list = []
+_global_cache_loaded: bool = False
+
 
 def expand_abbreviations(name: str) -> str:
     """Заменяем аббревиатуры на полные названия для лучшего поиска"""
