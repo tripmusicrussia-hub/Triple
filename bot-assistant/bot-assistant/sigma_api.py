@@ -84,6 +84,7 @@ class SigmaAPI:
         self.token = None
         self.company_id = None
         self.storehouse_id = None
+        self.storehouse_name = None
 
     async def login(self) -> bool:
         """Получить токен через OAuth2"""
@@ -142,6 +143,7 @@ class SigmaAPI:
                 items = houses.get("content", houses) if isinstance(houses, dict) else houses
                 if items:
                     self.storehouse_id = items[0].get("id")
+                    self.storehouse_name = items[0].get("name")
                     logger.info(f"Sigma storehouse_id: {self.storehouse_id}")
             return bool(self.company_id)
 
@@ -228,11 +230,12 @@ class SigmaAPI:
                 "status": "DRAFT",
                 "egaisWaybillRegId": None,
                 "serverTime": None,
-                "storehouseDestination": {"id": self.storehouse_id, "name": None},
+                "storehouseDestination": {"id": self.storehouse_id, "name": self.storehouse_name},
                 "storehouseSource": {"id": None, "name": None},
                 "supplier": {"id": supplier_id, "name": supplier_name},
                 "totalSum": 0,
                 "type": "INCOME",
+                "user": {"email": SIGMA_LOGIN if "@" in SIGMA_LOGIN else None},
             }
             logger.info(f"Create income payload: {json.dumps(payload, ensure_ascii=False)[:500]}")
             r = await client.post(
