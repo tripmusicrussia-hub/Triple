@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 SIGMA_LOGIN = os.getenv("SIGMA_LOGIN", "")
 SIGMA_PASSWORD = os.getenv("SIGMA_PASSWORD", "")
-SIGMA_AUTH_HEADER = "Basic cWFzbGFwcDpteVNlY3JldE9BdXJoU2VjcmV0"
+SIGMA_AUTH_HEADER = "Basic cWFzbGFwcDpteVNlY3JldE9BdXRoU2VjcmV0"
 BASE_URL = "https://api-s07.sigma.ru"
 
 LOW_MARGIN_KEYWORDS = [
