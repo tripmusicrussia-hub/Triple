@@ -234,6 +234,7 @@ class SigmaAPI:
                 "totalSum": 0,
                 "type": "INCOME",
             }
+            logger.info(f"Create income payload: {json.dumps(payload, ensure_ascii=False)[:500]}")
             r = await client.post(
                 f"{BASE_URL}/waybills",
                 headers=self._headers(),
