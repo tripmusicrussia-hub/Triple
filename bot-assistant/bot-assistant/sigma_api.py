@@ -148,11 +148,11 @@ class SigmaAPI:
     async def get_suppliers(self) -> list:
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.get(
-                f"{BASE_URL}/rest/v2/companies/{self.company_id}/suppliers",
+                f"{BASE_URL}/rest/1.1/companies/null/suppliers",
                 headers=self._headers(),
                 params={"size": 100}
             )
-            logger.info(f"Suppliers: {r.status_code} {r.text[:200]}")
+            logger.info(f"Suppliers: {r.status_code} {r.text[:300]}")
             if r.status_code == 200:
                 data = r.json()
                 return data.get("content", data) if isinstance(data, dict) else data
@@ -191,11 +191,18 @@ class SigmaAPI:
             return None
 
     async def create_income(self, supplier_id: Optional[str] = None) -> Optional[str]:
+        from datetime import datetime
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S.") + f"{datetime.now().microsecond // 1000:03d}"
         async with httpx.AsyncClient(timeout=15) as client:
             payload = {
-                "storehouseId": self.storehouse_id,
-                "supplierId": supplier_id,
-                "type": "INCOME"
+                "waybillTime": now,
+                "comment": "",
+                "isDefault": True,
+                "status": "DRAFT",
+                "storehouseDestination": {"id": self.storehouse_id},
+                "storehouseSource": {"id": None, "name": None},
+                "supplier": {"id": supplier_id, "name": None},
+                "type": "INCOME",
             }
             r = await client.post(
                 f"{BASE_URL}/waybills",
