@@ -123,19 +123,24 @@ class SigmaAPI:
     async def get_company_info(self) -> bool:
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.get(f"{BASE_URL}/rest/1.1/account", headers=self._headers())
+            logger.info(f"Account response: {r.status_code} {r.text[:500]}")
             if r.status_code != 200:
                 return False
             data = r.json()
-            self.company_id = data.get("company", {}).get("id")
-            logger.info(f"Sigma company_id: {self.company_id}")
+            # Try different paths to find company_id
+            self.company_id = (
+                data.get("company", {}).get("id") or
+                data.get("companyId") or
+                data.get("id")
+            )
+            logger.info(f"Sigma company_id: {self.company_id}, full data keys: {list(data.keys())}")
             if not self.company_id:
                 return False
-            # v2 API requires company_id in URL
             r2 = await client.get(
                 f"{BASE_URL}/rest/v2/companies/{self.company_id}/storehouses",
                 headers=self._headers()
             )
-            logger.info(f"Storehouses: {r2.status_code} {r2.text[:200]}")
+            logger.info(f"Storehouses: {r2.status_code} {r2.text[:300]}")
             if r2.status_code == 200:
                 houses = r2.json()
                 items = houses.get("content", houses) if isinstance(houses, dict) else houses
