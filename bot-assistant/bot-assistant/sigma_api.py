@@ -211,7 +211,13 @@ class SigmaAPI:
                 params={"waybillType": "INCOME", "companyId": self.company_id},
                 json={}
             )
-            number = r_num.json().get("number", "") if r_num.status_code == 200 else ""
+            if r_num.status_code == 200:
+                try:
+                    number = r_num.json().get("number", "")
+                except Exception:
+                    number = r_num.text.strip().strip('"')
+            else:
+                number = ""
             logger.info(f"Waybill number: {number}")
 
             payload = {
