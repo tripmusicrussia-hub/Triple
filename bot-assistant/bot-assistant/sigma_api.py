@@ -155,7 +155,9 @@ class SigmaAPI:
             logger.info(f"Suppliers: {r.status_code} {r.text[:300]}")
             if r.status_code == 200:
                 data = r.json()
-                return data.get("content", data) if isinstance(data, dict) else data
+                if isinstance(data, list):
+                    return data
+                return data.get("suppliers", data.get("content", []))
             return []
 
     async def find_supplier(self, name: str) -> Optional[str]:
