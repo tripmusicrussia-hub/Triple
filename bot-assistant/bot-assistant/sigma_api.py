@@ -162,13 +162,21 @@ class SigmaAPI:
 
     async def find_supplier(self, name: str) -> Optional[str]:
         suppliers = await self.get_suppliers()
-        name_lower = name.lower()
+        name_lower = name.lower().strip().strip('"').strip("'")
+        # Remove company type prefixes for fuzzy match
+        import re as _re
+        name_clean = _re.sub(r'(общество с ограниченной ответственностью|ооо|ип|зао|оао)\s*["\']?', '', name_lower).strip().strip('"').strip("'")
         for s in suppliers:
-            if s.get("name", "").lower() == name_lower:
+            s_name = s.get("name", "").lower().strip().strip('"').strip("'")
+            s_clean = _re.sub(r'(ооо|ип|зао|оао)\s*["\']?', '', s_name).strip().strip('"').strip("'")
+            if s_name == name_lower or s_clean == name_clean:
                 return s.get("id")
         for s in suppliers:
-            if name_lower in s.get("name", "").lower() or s.get("name", "").lower() in name_lower:
+            s_name = s.get("name", "").lower()
+            s_clean = _re.sub(r'(ооо|ип|зао|оао)\s*["\']?', '', s_name).strip().strip('"').strip("'")
+            if name_clean in s_clean or s_clean in name_clean:
                 return s.get("id")
+        logger.warning(f"Supplier not found: '{name}'. Available: {[s.get('name') for s in suppliers[:5]]}")
         return None
 
     async def find_product(self, name: str) -> Optional[dict]:
@@ -201,10 +209,13 @@ class SigmaAPI:
                 "comment": "",
                 "isDefault": True,
                 "status": "DRAFT",
-                "storehouseDestination": {"id": self.storehouse_id},
+                "storehouseDestination": {"id": self.storehouse_id, "name": None},
                 "storehouseSource": {"id": None, "name": None},
                 "supplier": {"id": supplier_id, "name": None},
                 "type": "INCOME",
+                "egaisWaybillRegId": None,
+                "serverTime": None,
+                "totalSum": 0,
             }
             r = await client.post(
                 f"{BASE_URL}/waybills",
