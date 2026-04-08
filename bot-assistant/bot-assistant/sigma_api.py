@@ -127,12 +127,8 @@ class SigmaAPI:
             if r.status_code != 200:
                 return False
             data = r.json()
-            # Try different paths to find company_id
-            self.company_id = (
-                data.get("company", {}).get("id") or
-                data.get("companyId") or
-                data.get("id")
-            )
+            # activeCompany is the correct company ID
+            self.company_id = data.get("activeCompany") or data.get("company", {}).get("id")
             logger.info(f"Sigma company_id: {self.company_id}, full data keys: {list(data.keys())}")
             if not self.company_id:
                 return False
