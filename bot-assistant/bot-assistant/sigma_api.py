@@ -353,4 +353,8 @@ async def recognize_invoice(image_bytes: bytes) -> dict:
             raise Exception(j["error"]["message"])
         raw = j["choices"][0]["message"]["content"]
 
-    return json.loads(raw.replace("```json", "").replace("```", "").strip())
+    # Clean control characters that break JSON parsing
+    import re as _re
+    raw_clean = _re.sub(r'[\x00-\x1f\x7f]', lambda m: ' ' if m.group() not in '\n\r\t' else m.group(), raw)
+    raw_clean = raw_clean.replace("```json", "").replace("```", "").strip()
+    return json.loads(raw_clean)
