@@ -86,6 +86,8 @@ class SigmaAPI:
         self.storehouse_id = None
         self.storehouse_name = None
         self.user_email = None
+        self.user_id = None
+        self.user_fullname = None
 
     async def login(self) -> bool:
         """Получить токен через OAuth2"""
@@ -132,6 +134,8 @@ class SigmaAPI:
             # activeCompany is the correct company ID
             self.company_id = data.get("activeCompany") or data.get("company", {}).get("id")
             self.user_email = data.get("email", "")
+            self.user_id = data.get("id", "")
+            self.user_fullname = f"{data.get('lastName', '')} {data.get('firstName', '')}".strip()
             logger.info(f"Sigma company_id: {self.company_id}, full data keys: {list(data.keys())}")
             if not self.company_id:
                 return False
@@ -237,7 +241,7 @@ class SigmaAPI:
                 "supplier": {"id": supplier_id, "name": supplier_name},
                 "totalSum": 0,
                 "type": "INCOME",
-                "user": {"email": self.user_email},
+                "user": {"id": self.user_id, "email": self.user_email, "fullName": self.user_fullname},
             }
             logger.info(f"Create income payload: {json.dumps(payload, ensure_ascii=False)[:500]}")
             r = await client.post(
