@@ -251,15 +251,15 @@ class SigmaAPI:
                 )
                 if r.status_code == 200:
                     total_in_sigma = r.json().get("productsInfo", {}).get("totalElements", 0)
-                    cached_count = len(_global_products_cache)
-                    if not _global_cache_loaded or total_in_sigma != cached_count:
+                    cached_count = len(_cache.products)
+                    if not _cache.loaded or total_in_sigma != cached_count:
                         logger.info(f"Products changed: sigma={total_in_sigma}, cache={cached_count}. Reloading...")
                         await self.load_all_products()
                     else:
                         logger.info(f"Products cache up to date: {cached_count} items")
         except Exception as e:
             logger.error(f"Error checking products count: {e}")
-            if not _global_cache_loaded:
+            if not _cache.loaded:
                 await self.load_all_products()
 
     async def load_all_products(self) -> int:
@@ -289,14 +289,14 @@ class SigmaAPI:
                 page += 1
                 if page > 100:
                     break
-        _global_products_cache = products
-        _global_cache_loaded = True
+        _cache.products = products
+        _cache.loaded = True
         logger.info(f"Loaded {total} products into cache ({page+1} pages)")
         return total
 
     def find_product_in_cache(self, name: str) -> Optional[dict]:
         """Нечёткий поиск товара в кэше по словам"""
-        cache = _global_products_cache
+        cache = _cache.products
         if not cache:
             return None
 
@@ -339,7 +339,7 @@ class SigmaAPI:
 
     async def find_product(self, name: str) -> Optional[dict]:
         # Ищем в кэше
-        if _global_cache_loaded:
+        if _cache.loaded:
             cached = self.find_product_in_cache(name)
             if cached:
                 return cached
@@ -424,8 +424,7 @@ class SigmaAPI:
                 if not product_id:
                     product_id = data.get("id")
                 if product_id:
-                    global _global_products_cache
-                    _global_products_cache.append({"id": product_id, "name": name.upper()})
+                    _cache.products.append({"id": product_id, "name": name.upper()})
                     logger.info(f"Created product '{name[:30]}' with id {product_id}")
                     return {"id": product_id, "name": name}
             return None
