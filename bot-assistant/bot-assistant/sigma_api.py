@@ -36,6 +36,12 @@ ABBREVIATIONS = {
     "сгущ карламан": "сгущ.карламан",
 }
 
+# Замены для конкретных несовпадений между накладной и Sigma
+PRODUCT_NAME_FIXES = {
+    "карламан какао 7,5": "карламан какао 7",
+    "карламан какао 7.5": "карламан какао 7",
+}
+
 # Словарь для определения категории по ключевым словам
 CATEGORY_KEYWORDS = {
     "МОЛОЧКА": ["молоко", "сметана", "кефир", "ряженка", "йогурт", "творог", "масло слив", "сливки", "простокваша", "варенец", "коктейль молоч", "топтыжка", "овк", "очень важная", "васькино", "деревенский"],
@@ -330,11 +336,15 @@ class SigmaAPI:
             return None
 
         name_lower = expand_abbreviations(name.lower())
+        # Применяем фиксы для известных несовпадений
+        for old, new in PRODUCT_NAME_FIXES.items():
+            name_lower = name_lower.replace(old, new)
+        # Нормализуем "гр" → "г" для совпадения с Sigma
+        name_lower = re.sub(r'(\d+)гр\b', r'\1г', name_lower)
 
-        # Извлекаем числа с десятичными (82.5, 3.2, 315, 20 и т.д.)
-        query_numbers = set(n.replace(',', '.') for n in re.findall(r'\d+(?:[.,]\d+)?', name_lower))
-        # Убираем маленькие числа-артикулы (1-19)
-        query_numbers = {n for n in query_numbers if float(n) >= 20}
+        # Только крупные числа (граммы ≥ 100) как обязательные — проценты не проверяем
+        all_numbers = set(n.replace(',', '.') for n in re.findall(r'\d+(?:[.,]\d+)?', name_lower))
+        required_numbers = {n for n in all_numbers if float(n) >= 100}
 
         # Слова для нечёткого поиска
         tokens = [w for w in re.split(r'[\s,./\\%]+', name_lower) if len(w) >= 3 and not re.match(r'^\d+$', w)]
@@ -350,7 +360,7 @@ class SigmaAPI:
 
             # Числа должны совпадать точно
             p_numbers = set(n.replace(',', '.') for n in re.findall(r'\d+(?:[.,]\d+)?', p_name))
-            if query_numbers and not query_numbers.issubset(p_numbers):
+            if required_numbers and not required_numbers.issubset(p_numbers):
                 continue
 
             # Считаем совпадение слов
