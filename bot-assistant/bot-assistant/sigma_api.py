@@ -695,6 +695,11 @@ async def recognize_invoice(image_bytes: bytes) -> dict:
         raw = j["choices"][0]["message"]["content"]
 
     import re as _re
-    raw_clean = _re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', ' ', raw)
+    raw_clean = _re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]', '', raw)
     raw_clean = raw_clean.replace("```json", "").replace("```", "").strip()
-    return json.loads(raw_clean)
+    try:
+        return json.loads(raw_clean)
+    except Exception:
+        # Второй шанс — убираем всё кроме ASCII
+        raw_clean2 = ''.join(c for c in raw_clean if ord(c) >= 32 or c in '\n\r\t')
+        return json.loads(raw_clean2)
