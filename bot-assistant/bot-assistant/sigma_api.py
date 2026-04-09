@@ -16,7 +16,8 @@ SIGMA_LOGIN = os.getenv("SIGMA_LOGIN", "")
 SIGMA_PASSWORD = os.getenv("SIGMA_PASSWORD", "")
 SIGMA_AUTH_HEADER = "Basic cWFzbGFwcDpteVNlY3JldE9BdXRoU2VjcmV0"
 BASE_URL = "https://api-s07.sigma.ru"
-
+_global_products_cache = []
+_global_cache_loaded = False
 LOW_MARGIN_KEYWORDS = [
     "хлеб", "булка", "батон", "лаваш", "пита", "багет", "буханка",
     "молоко", "молоке", "молока",
