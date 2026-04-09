@@ -337,22 +337,19 @@ class SigmaAPI:
             return None
 
         name_lower = expand_abbreviations(name.lower())
-        # Применяем фиксы для известных несовпадений
         for old, new in PRODUCT_NAME_FIXES.items():
             name_lower = name_lower.replace(old, new)
-        # Нормализуем "гр" → "г"
         name_lower = re.sub(r'(\d+)гр\b', r'\1г', name_lower)
-        # Убираем артикулы типа "1/45", "1/6", "1/12"
         name_lower = re.sub(r'\b\d+/\d+\b', '', name_lower)
 
-        # Числа >= 20 как обязательные (процент жирности + граммы)
-        all_numbers = set(n.replace(',', '.') for n in re.findall(r'\d+(?:[.,]\d+)?', name_lower))
-        required_numbers = {n for n in all_numbers if float(n) >= 20}
+        # Числа >= 20 из запроса — обязательны
+        numbers = set(n.replace(',', '.') for n in re.findall(r'\d+(?:[.,]\d+)?', name_lower))
+        numbers = {n for n in numbers if float(n) >= 20}
 
         # Слова для нечёткого поиска
         tokens = [w for w in re.split(r'[\s,./\\%\-]+', name_lower) if len(w) >= 3 and not re.match(r'^\d+$', w)]
 
-        if not tokens and not required_numbers:
+        if not tokens and not numbers:
             return None
 
         best_match = None
@@ -360,20 +357,20 @@ class SigmaAPI:
 
         for product in cache:
             p_name = product.get("name", "").lower()
-
-            # Числа должны совпадать точно
             p_numbers = set(n.replace(',', '.') for n in re.findall(r'\d+(?:[.,]\d+)?', p_name))
-            if required_numbers and not required_numbers.issubset(p_numbers):
+
+            # Каждое обязательное число должно быть в товаре
+            num_mismatch = False
+            for num in numbers:
+                if num not in p_numbers:
+                    num_mismatch = True
+                    break
+            if num_mismatch:
                 continue
 
-            # Считаем совпадение слов
-            matched = 0
-            score = 0
-            for token in tokens:
-                if token in p_name:
-                    matched += 1
-                    score += len(token)
-            if matched > 0 or not tokens:
+            matched = sum(1 for t in tokens if t in p_name)
+            score = sum(len(t) for t in tokens if t in p_name)
+            if matched > 0:
                 ratio = matched / len(tokens) if tokens else 1
                 if ratio >= 0.35 and score > best_score:
                     best_score = score
@@ -382,7 +379,7 @@ class SigmaAPI:
         if best_match:
             logger.info(f"Cache hit: '{name[:30]}' → '{best_match.get('name', '')[:40]}'")
         else:
-            logger.info(f"Cache miss: '{name[:30]}'")
+            logger.info(f"Cache miss: '{name[:30]}' | required={numbers} | tokens={tokens[:4]}")
         return best_match
 
 
@@ -704,9 +701,12 @@ async def recognize_invoice(image_bytes: bytes) -> dict:
     import re as _re
     raw_clean = _re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]', '', raw)
     raw_clean = raw_clean.replace("```json", "").replace("```", "").strip()
+    # Извлекаем только первый JSON объект — убираем лишнее после него
+    match = _re.search(r'\{.*\}', raw_clean, _re.DOTALL)
+    if match:
+        raw_clean = match.group(0)
     try:
         return json.loads(raw_clean)
     except Exception:
-        # Второй шанс — убираем всё кроме ASCII
         raw_clean2 = ''.join(c for c in raw_clean if ord(c) >= 32 or c in '\n\r\t')
         return json.loads(raw_clean2)
