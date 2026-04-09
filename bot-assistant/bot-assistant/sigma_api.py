@@ -16,8 +16,7 @@ SIGMA_LOGIN = os.getenv("SIGMA_LOGIN", "")
 SIGMA_PASSWORD = os.getenv("SIGMA_PASSWORD", "")
 SIGMA_AUTH_HEADER = "Basic cWFzbGFwcDpteVNlY3JldE9BdXRoU2VjcmV0"
 BASE_URL = "https://api-s07.sigma.ru"
-_global_products_cache = []
-_global_cache_loaded = False
+
 LOW_MARGIN_KEYWORDS = [
     "хлеб", "булка", "батон", "лаваш", "пита", "багет", "буханка",
     "молоко", "молоке", "молока",
@@ -430,6 +429,8 @@ class SigmaAPI:
                     logger.info(f"Created product '{name[:30]}' with id {product_id}")
                     return {"id": product_id, "name": name}
             return None
+
+    async def create_income(self, supplier_id: Optional[str] = None, supplier_name: Optional[str] = None) -> Optional[str]:
         from datetime import datetime
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S.") + f"{datetime.now().microsecond // 1000:03d}"
         async with httpx.AsyncClient(timeout=15) as client:
