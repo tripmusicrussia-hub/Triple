@@ -110,35 +110,36 @@ def format_items_preview(items: list) -> str:
 
 
 def detect_weight_product(item: dict) -> dict:
-    """Весовой товар — если в названии есть вес в кг, а qty=1 шт"""
+    """Весовой товар — если количество указано в кг"""
     name = item["name"]
     qty = item.get("qty", 1)
     price = item.get("price", 0)
     original_qty_str = item.get("qty_str", "")
 
-    # Вариант 1: количество в накладной указано в кг (напр. '5 кг')
+    # Вариант 1: количество в накладной указано в кг (напр. '1.53 кг', '1.297 кг')
+    # Цена в накладной уже за 1 кг — просто ставим qty=вес, цена не меняется
     if original_qty_str and re.search(r'кг', str(original_qty_str).lower()):
         match = re.search(r'(\d+(?:[.,]\d+)?)', str(original_qty_str))
         if match and price > 0:
             weight = float(match.group(1).replace(",", "."))
             if weight > 0:
-                price_per_kg = round(price / weight, 2)
                 return {
                     **item,
                     "qty": weight,
-                    "price": price_per_kg,
+                    "price": price,  # цена уже за кг, не делим!
                     "weight_recalc": True,
                     "original_qty": qty,
                     "original_price": price,
                     "weight_kg": weight,
                 }
 
-    # Вариант 2: вес в названии товара (напр. "5кг", "5 кг"), qty=1 шт
+    # Вариант 2: вес в названии товара (напр. "5кг"), qty=1 шт
+    # Это коробочный товар — делим цену коробки на вес
     if qty == 1 and price > 0:
         match = re.search(r'(\d+(?:[.,]\d+)?)\s*кг', name.lower())
         if match:
             weight = float(match.group(1).replace(",", "."))
-            if weight > 1:  # игнорируем "1кг" — обычно просто единица
+            if weight > 1:  # игнорируем "1кг"
                 price_per_kg = round(price / weight, 2)
                 return {
                     **item,
@@ -349,9 +350,9 @@ class SigmaAPI:
         required_numbers = {n for n in all_numbers if float(n) >= 20}
 
         # Слова для нечёткого поиска
-        tokens = [w for w in re.split(r'[\s,./\\%]+', name_lower) if len(w) >= 3 and not re.match(r'^\d+$', w)]
+        tokens = [w for w in re.split(r'[\s,./\\%\-]+', name_lower) if len(w) >= 3 and not re.match(r'^\d+$', w)]
 
-        if not tokens and not query_numbers:
+        if not tokens and not required_numbers:
             return None
 
         best_match = None
@@ -677,9 +678,10 @@ async def recognize_invoice(image_bytes: bytes) -> dict:
 - Если это рукописная накладная: бери все строки где есть название товара + число кол-во + число цена
 - Пропускай: пустые строки, итоги (Итого, НДС, сумма прописью), заголовки секций без цены
 - Поставщик: из строки "Поставщик", "От кого", или название компании ООО/ИП в шапке
+- КРИТИЧНО: поле name — ДОСЛОВНОЕ название из накладной, не переводи, не интерпретируй, не дополняй. Если написано "манго-клуб." — пиши "манго-клуб.", "клуб. со слив." — пиши "клуб. со слив."
 
 Верни ТОЛЬКО JSON без markdown:
-{{"supplier":"название","items":[{{"name":"точное название товара","qty":число,"price":число}}]}}"""
+{{"supplier":"название","items":[{{"name":"дословное название из накладной","qty":число,"price":число}}]}}"""
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
