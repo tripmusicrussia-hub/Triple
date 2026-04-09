@@ -420,10 +420,17 @@ class SigmaAPI:
             logger.info(f"Create product '{name[:30]}' in '{category_name}': {r.status_code} {r.text[:200]}")
             if r.status_code in (200, 201):
                 data = r.json()
-                product_id = data.get("id") or (data.get("variations", [{}])[0].get("id") if data.get("variations") else None)
+                # id товара для прихода — catalogProductId из variations
+                product_id = None
+                variations = data.get("variations", [])
+                if variations:
+                    product_id = variations[0].get("catalogProductId")
+                if not product_id:
+                    product_id = data.get("id")
                 if product_id:
                     global _global_products_cache
                     _global_products_cache.append({"id": product_id, "name": name.upper()})
+                    logger.info(f"Created product '{name[:30]}' with id {product_id}")
                     return {"id": product_id, "name": name}
             return None
         from datetime import datetime
