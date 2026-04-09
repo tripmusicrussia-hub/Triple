@@ -32,9 +32,37 @@ ABBREVIATIONS = {
     "сгущ карламан": "сгущ.карламан",
 }
 
-# Глобальный кэш товаров — загружается при старте бота
-_global_products_cache: list = []
-_global_cache_loaded: bool = False
+# Словарь для определения категории по ключевым словам
+CATEGORY_KEYWORDS = {
+    "МОЛОЧКА": ["молоко", "сметана", "кефир", "ряженка", "йогурт", "творог", "масло слив", "сливки", "простокваша", "варенец", "коктейль молоч", "топтыжка", "овк", "очень важная", "васькино", "деревенский"],
+    "БАКАЛЕЯ": ["крупа", "рис", "гречка", "макарон", "мука", "сахар", "соль", "масло раст", "уксус", "соус", "майонез", "кетчуп"],
+    "КОНСЕРВЫ": ["сгущ", "тушен", "консерв", "рыбн", "горошек", "кукуруза", "фасоль"],
+    "ВЫПЕЧКА": ["хлеб", "батон", "булка", "лаваш", "багет", "пита", "лепешка"],
+    "ЗАМОРОЗКА": ["замороженн", "пельмен", "вареник", "котлет заморож"],
+    "СЛАДОСТИ": ["конфет", "шоколад", "печенье", "вафл", "торт", "пряник", "зефир", "мармелад", "халва"],
+    "МЯСО, КОЛБАСА": ["колбас", "сосиск", "сардельк", "ветчин", "окорок", "бекон", "мясо", "курин", "свинин", "говядин"],
+    "СОКИ, ВОДА": ["сок", "вода", "нектар", "морс", "компот", "лимонад", "квас"],
+    "СЕМЕЧКИ, ЧИПСЫ, СУХ": ["семечк", "чипс", "сухар", "снек", "орех", "попкорн"],
+    "МАЙОНЕЗЫ, СОУСЫ, КЕ": ["майонез", "кетчуп", "соус", "горчиц", "хрен"],
+    "МАСЛА": ["масло раст", "масло олив", "масло подсолн"],
+    "КРУПЫ": ["крупа", "рис", "гречк", "перловк", "пшен", "овсян", "манн"],
+    "МАКАРОНЫ": ["макарон", "спагетт", "вермишел", "лапш"],
+    "МУКА": ["мука", "крахмал", "дрожж"],
+    "ПРИПРАВЫ И СПЕЦИИ": ["специ", "приправ", "перец молот", "лавров", "куркум", "паприк"],
+    "ФРУКТЫ, ОВОЩИ": ["яблок", "груш", "банан", "апельсин", "морковь", "картофел", "помидор", "огурец", "капуст"],
+    "ЧАЙ, КОФЕ": ["чай", "кофе", "какао", "цикори"],
+    "БЫТОВАЯ ХИМИЯ": ["шампун", "гель", "мыло", "порошок", "средство", "дезодорант", "зубная"],
+}
+
+
+def detect_category(name: str) -> str:
+    """Определить категорию товара по названию"""
+    name_lower = name.lower()
+    for category, keywords in CATEGORY_KEYWORDS.items():
+        for kw in keywords:
+            if kw in name_lower:
+                return category
+    return "Главный экран"
 
 
 def expand_abbreviations(name: str) -> str:
@@ -337,7 +365,67 @@ class SigmaAPI:
                     return content[0]
         return None
 
-    async def create_income(self, supplier_id: Optional[str] = None, supplier_name: Optional[str] = None) -> Optional[str]:
+    async def create_product(self, name: str, buy_price: float, sell_price: float) -> Optional[dict]:
+        """Создать новый товар в Sigma если не найден в базе"""
+        async with httpx.AsyncClient(timeout=15) as client:
+            # Получаем список категорий
+            r_menus = await client.get(
+                f"{BASE_URL}/rest/v2/companies/{self.company_id}/menus",
+                headers=self._headers()
+            )
+            menu_id = None
+            if r_menus.status_code == 200:
+                menus = r_menus.json()
+                items = menus if isinstance(menus, list) else menus.get("content", [])
+                if items:
+                    menu_id = items[0].get("id")
+
+            if not menu_id:
+                logger.error("Could not get menuId for product creation")
+                return None
+
+            # Определяем категорию
+            category_name = detect_category(name)
+            parent_id = None
+
+            # Ищем ID категории
+            r_groups = await client.get(
+                f"{BASE_URL}/rest/v2/groups",
+                headers=self._headers(),
+                params={"size": 1000, "path": "*", "menuId": menu_id, "page": 0}
+            )
+            if r_groups.status_code == 200:
+                groups = r_groups.json()
+                items = groups if isinstance(groups, list) else groups.get("content", [])
+                for g in items:
+                    if g.get("name", "").upper() == category_name.upper():
+                        parent_id = g.get("id")
+                        break
+
+            payload = {
+                "name": name,
+                "menuId": menu_id,
+                "parentIds": [parent_id],
+                "variations": [{
+                    "name": "",
+                    "productUnitId": "be56b507-805b-4f9d-87fa-1c66bbd28795",
+                    "price": {"type": "Rb", "value": sell_price}
+                }]
+            }
+            r = await client.post(
+                f"{BASE_URL}/rest/v2/companies/{self.company_id}/menus/{menu_id}/menu-products",
+                headers=self._headers(),
+                json=payload
+            )
+            logger.info(f"Create product '{name[:30]}' in '{category_name}': {r.status_code} {r.text[:200]}")
+            if r.status_code in (200, 201):
+                data = r.json()
+                product_id = data.get("id") or (data.get("variations", [{}])[0].get("id") if data.get("variations") else None)
+                if product_id:
+                    global _global_products_cache
+                    _global_products_cache.append({"id": product_id, "name": name.upper()})
+                    return {"id": product_id, "name": name}
+            return None
         from datetime import datetime
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S.") + f"{datetime.now().microsecond // 1000:03d}"
         async with httpx.AsyncClient(timeout=15) as client:
@@ -455,8 +543,14 @@ class SigmaAPI:
         for item in items:
             product = await self.find_product(item["name"])
             if not product:
-                skipped.append(item["name"])
-                continue
+                # Создаём новый товар
+                markup = get_markup(item["name"])
+                sell_price = calc_price(item["price"], markup)
+                product = await self.create_product(item["name"], item["price"], sell_price)
+                if not product:
+                    skipped.append(item["name"])
+                    continue
+                logger.info(f"Created new product: {item['name']}")
             markup = get_markup(item["name"])
             sell_price = calc_price(item["price"], markup)
             success = await self.add_product_to_income(
