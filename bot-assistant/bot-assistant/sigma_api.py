@@ -24,9 +24,12 @@ LOW_MARGIN_KEYWORDS = [
 
 # Словарь аббревиатур — расшифровки для поиска в Sigma
 ABBREVIATIONS = {
-    "овк": "очень важная корова коровка",
+    "овк": "очень важная корова",
     "овс": "очень важная свинка",
     "мп": "молочный переулок",
+    "коктейль топтыжка": "молочный коктейль топтыжка",
+    "сгущ.карламан": "сгущ.карламан",
+    "сгущ карламан": "сгущ.карламан",
 }
 
 # Глобальный кэш товаров — загружается при старте бота
@@ -273,8 +276,10 @@ class SigmaAPI:
             return None
 
         name_lower = expand_abbreviations(name.lower())
-        # Разбиваем на токены
+        # Разбиваем на токены, убираем мусор
         tokens = [w for w in re.split(r'[\s,./\\%]+', name_lower) if len(w) >= 2]
+        # Убираем маленькие числа-артикулы из накладной (типа 1, 6, 12)
+        tokens = [t for t in tokens if not re.match(r'^\d+$', t) or int(t) >= 100]
         if not tokens:
             return None
 
@@ -289,9 +294,15 @@ class SigmaAPI:
                 if token in p_name:
                     matched += 1
                     score += len(token)
+                # Для чисел с десятичной — проверяем только целую часть
+                elif re.match(r'^\d+\.\d+$', token):
+                    int_part = token.split('.')[0]
+                    if int_part in p_name:
+                        matched += 0.5
+                        score += len(int_part)
             if matched > 0:
                 ratio = matched / len(tokens)
-                if ratio >= 0.4 and score > best_score:
+                if ratio >= 0.35 and score > best_score:
                     best_score = score
                     best_match = product
 
