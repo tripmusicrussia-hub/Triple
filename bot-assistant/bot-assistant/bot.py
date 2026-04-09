@@ -19,7 +19,7 @@ import sigma_api
 
 # Глобальный экземпляр SigmaAPI — кэш товаров сохраняется между накладными
 _sigma_instance = sigma_api.SigmaAPI()
-
+sigma_api._cache = sigma_api._Cache()
 conversation_history = {}
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
