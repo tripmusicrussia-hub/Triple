@@ -104,12 +104,13 @@ def format_items_preview(items: list) -> str:
 
 
 def detect_weight_product(item: dict) -> dict:
-    """Весовой товар — только если в поле qty из накладной явно указаны кг (напр. '5 кг')"""
+    """Весовой товар — если в названии есть вес в кг, а qty=1 шт"""
     name = item["name"]
     qty = item.get("qty", 1)
     price = item.get("price", 0)
-    original_qty_str = item.get("qty_str", "")  # строка из накладной типа "5 кг"
-    # Только если количество в накладной указано в кг (не шт)
+    original_qty_str = item.get("qty_str", "")
+
+    # Вариант 1: количество в накладной указано в кг (напр. '5 кг')
     if original_qty_str and re.search(r'кг', str(original_qty_str).lower()):
         match = re.search(r'(\d+(?:[.,]\d+)?)', str(original_qty_str))
         if match and price > 0:
@@ -125,6 +126,24 @@ def detect_weight_product(item: dict) -> dict:
                     "original_price": price,
                     "weight_kg": weight,
                 }
+
+    # Вариант 2: вес в названии товара (напр. "5кг", "5 кг"), qty=1 шт
+    if qty == 1 and price > 0:
+        match = re.search(r'(\d+(?:[.,]\d+)?)\s*кг', name.lower())
+        if match:
+            weight = float(match.group(1).replace(",", "."))
+            if weight > 1:  # игнорируем "1кг" — обычно просто единица
+                price_per_kg = round(price / weight, 2)
+                return {
+                    **item,
+                    "qty": weight,
+                    "price": price_per_kg,
+                    "weight_recalc": True,
+                    "original_qty": qty,
+                    "original_price": price,
+                    "weight_kg": weight,
+                }
+
     return item
 
 
@@ -311,16 +330,17 @@ class SigmaAPI:
             return None
 
         name_lower = expand_abbreviations(name.lower())
-        # Разбиваем на токены, убираем мусор
-        tokens = [w for w in re.split(r'[\s,./\\%]+', name_lower) if len(w) >= 2]
-        # Убираем только маленькие числа-артикулы (1-12) — типа "1/6", "1/12" из накладной
-        tokens = [t for t in tokens if not re.match(r'^\d+$', t) or int(t) > 12]
-        if not tokens:
-            return None
 
-        # Выделяем числовые токены — они должны совпадать строго
-        num_tokens = [t for t in tokens if re.match(r'^\d', t)]
-        word_tokens = [t for t in tokens if not re.match(r'^\d', t)]
+        # Извлекаем числа с десятичными (82.5, 3.2, 315, 20 и т.д.)
+        query_numbers = set(n.replace(',', '.') for n in re.findall(r'\d+(?:[.,]\d+)?', name_lower))
+        # Убираем маленькие числа-артикулы (1-19)
+        query_numbers = {n for n in query_numbers if float(n) >= 20}
+
+        # Слова для нечёткого поиска
+        tokens = [w for w in re.split(r'[\s,./\\%]+', name_lower) if len(w) >= 3 and not re.match(r'^\d+$', w)]
+
+        if not tokens and not query_numbers:
+            return None
 
         best_match = None
         best_score = 0
@@ -328,17 +348,9 @@ class SigmaAPI:
         for product in cache:
             p_name = product.get("name", "").lower()
 
-            # Числа должны совпадать как отдельные слова (не внутри других чисел)
-            num_mismatch = False
-            for num in num_tokens:
-                num_norm = num.replace(',', '.')
-                # Ищем число как отдельный токен в названии товара
-                p_numbers = re.findall(r'[\d]+(?:[.,]\d+)?', p_name)
-                p_numbers_norm = [n.replace(',', '.') for n in p_numbers]
-                if num_norm not in p_numbers_norm:
-                    num_mismatch = True
-                    break
-            if num_mismatch:
+            # Числа должны совпадать точно
+            p_numbers = set(n.replace(',', '.') for n in re.findall(r'\d+(?:[.,]\d+)?', p_name))
+            if query_numbers and not query_numbers.issubset(p_numbers):
                 continue
 
             # Считаем совпадение слов
@@ -348,8 +360,8 @@ class SigmaAPI:
                 if token in p_name:
                     matched += 1
                     score += len(token)
-            if matched > 0:
-                ratio = matched / len(tokens)
+            if matched > 0 or not tokens:
+                ratio = matched / len(tokens) if tokens else 1
                 if ratio >= 0.35 and score > best_score:
                     best_score = score
                     best_match = product
@@ -359,6 +371,7 @@ class SigmaAPI:
         else:
             logger.info(f"Cache miss: '{name[:30]}'")
         return best_match
+
 
     async def find_product(self, name: str) -> Optional[dict]:
         # Ищем в кэше
