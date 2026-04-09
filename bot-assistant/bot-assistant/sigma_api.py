@@ -104,23 +104,27 @@ def format_items_preview(items: list) -> str:
 
 
 def detect_weight_product(item: dict) -> dict:
+    """Весовой товар — только если в поле qty из накладной явно указаны кг (напр. '5 кг')"""
     name = item["name"]
     qty = item.get("qty", 1)
     price = item.get("price", 0)
-    match = re.search(r'(\d+(?:[.,]\d+)?)\s*кг', name.lower())
-    if match and qty == 1 and price > 0:
-        weight = float(match.group(1).replace(",", "."))
-        if weight > 0:
-            price_per_kg = round(price / weight, 2)
-            return {
-                **item,
-                "qty": weight,
-                "price": price_per_kg,
-                "weight_recalc": True,
-                "original_qty": qty,
-                "original_price": price,
-                "weight_kg": weight,
-            }
+    original_qty_str = item.get("qty_str", "")  # строка из накладной типа "5 кг"
+    # Только если количество в накладной указано в кг (не шт)
+    if original_qty_str and re.search(r'кг', str(original_qty_str).lower()):
+        match = re.search(r'(\d+(?:[.,]\d+)?)', str(original_qty_str))
+        if match and price > 0:
+            weight = float(match.group(1).replace(",", "."))
+            if weight > 0:
+                price_per_kg = round(price / weight, 2)
+                return {
+                    **item,
+                    "qty": weight,
+                    "price": price_per_kg,
+                    "weight_recalc": True,
+                    "original_qty": qty,
+                    "original_price": price,
+                    "weight_kg": weight,
+                }
     return item
 
 
@@ -309,28 +313,41 @@ class SigmaAPI:
         name_lower = expand_abbreviations(name.lower())
         # Разбиваем на токены, убираем мусор
         tokens = [w for w in re.split(r'[\s,./\\%]+', name_lower) if len(w) >= 2]
-        # Убираем маленькие числа-артикулы из накладной (типа 1, 6, 12)
-        tokens = [t for t in tokens if not re.match(r'^\d+$', t) or int(t) >= 100]
+        # Убираем только маленькие числа-артикулы (1-12) — типа "1/6", "1/12" из накладной
+        tokens = [t for t in tokens if not re.match(r'^\d+$', t) or int(t) > 12]
         if not tokens:
             return None
+
+        # Выделяем числовые токены — они должны совпадать строго
+        num_tokens = [t for t in tokens if re.match(r'^\d', t)]
+        word_tokens = [t for t in tokens if not re.match(r'^\d', t)]
 
         best_match = None
         best_score = 0
 
         for product in cache:
             p_name = product.get("name", "").lower()
+
+            # Числа должны совпадать как отдельные слова (не внутри других чисел)
+            num_mismatch = False
+            for num in num_tokens:
+                num_norm = num.replace(',', '.')
+                # Ищем число как отдельный токен в названии товара
+                p_numbers = re.findall(r'[\d]+(?:[.,]\d+)?', p_name)
+                p_numbers_norm = [n.replace(',', '.') for n in p_numbers]
+                if num_norm not in p_numbers_norm:
+                    num_mismatch = True
+                    break
+            if num_mismatch:
+                continue
+
+            # Считаем совпадение слов
             matched = 0
             score = 0
             for token in tokens:
                 if token in p_name:
                     matched += 1
                     score += len(token)
-                # Для чисел с десятичной — проверяем только целую часть
-                elif re.match(r'^\d+\.\d+$', token):
-                    int_part = token.split('.')[0]
-                    if int_part in p_name:
-                        matched += 0.5
-                        score += len(int_part)
             if matched > 0:
                 ratio = matched / len(tokens)
                 if ratio >= 0.35 and score > best_score:
@@ -506,7 +523,7 @@ class SigmaAPI:
 
             # Шаг 3: цена закупки
             await client.put(
-                f"{BASE_URL}/waybills/{waybill_id}/elements/{element_id}/buying-amount",
+                f"{BASE_URL}/waybills/{waybill_id}/elements/{element_id}/buying-cost-per-unit",
                 headers=self._headers(),
                 json={"value": buy_price}
             )
@@ -514,7 +531,7 @@ class SigmaAPI:
 
             # Шаг 4: цена продажи
             await client.put(
-                f"{BASE_URL}/waybills/{waybill_id}/elements/{element_id}/selling-amount",
+                f"{BASE_URL}/waybills/{waybill_id}/elements/{element_id}/selling-cost-per-unit",
                 headers=self._headers(),
                 json={"value": sell_price}
             )
