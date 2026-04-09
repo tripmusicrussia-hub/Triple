@@ -241,7 +241,6 @@ class SigmaAPI:
 
     async def _refresh_products_if_needed(self):
         """Проверяем количество товаров в Sigma — если изменилось, обновляем кэш"""
-        global _global_products_cache, _global_cache_loaded
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 r = await client.post(
@@ -265,7 +264,6 @@ class SigmaAPI:
 
     async def load_all_products(self) -> int:
         """Загрузить все товары из Sigma в глобальный кэш"""
-        global _global_products_cache, _global_cache_loaded
         page = 0
         total = 0
         products = []
@@ -298,7 +296,6 @@ class SigmaAPI:
 
     def find_product_in_cache(self, name: str) -> Optional[dict]:
         """Нечёткий поиск товара в кэше по словам"""
-        global _global_products_cache
         cache = _global_products_cache
         if not cache:
             return None
@@ -341,7 +338,6 @@ class SigmaAPI:
         return best_match
 
     async def find_product(self, name: str) -> Optional[dict]:
-        global _global_cache_loaded
         # Ищем в кэше
         if _global_cache_loaded:
             cached = self.find_product_in_cache(name)
@@ -528,7 +524,6 @@ class SigmaAPI:
             return r.status_code in (200, 201)
 
     async def process_invoice(self, items: list, supplier_name: str) -> dict:
-        global _global_cache_loaded
         if not await self.login():
             return {"ok": False, "error": "Не удалось войти в Sigma. Проверь логин/пароль."}
 
