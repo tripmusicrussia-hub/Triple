@@ -393,30 +393,33 @@ class SigmaAPI:
             if r.status_code not in (200, 201):
                 return False
 
-            # Шаг 2: получаем element_id из ответа
             element_id = r.json().get("id")
             if not element_id:
-                # Пробуем получить из списка элементов
-                r2 = await client.get(
-                    f"{BASE_URL}/waybills/{waybill_id}/elements",
-                    headers=self._headers(),
-                    params={"size": 100}
-                )
-                if r2.status_code == 200:
-                    elements = r2.json() if isinstance(r2.json(), list) else r2.json().get("content", [])
-                    for el in elements:
-                        if el.get("product", {}).get("id") == product_id:
-                            element_id = el.get("id")
-                            break
+                return False
 
-            # Шаг 3: устанавливаем количество отдельным PUT запросом
-            if element_id:
-                r3 = await client.put(
-                    f"{BASE_URL}/waybills/{waybill_id}/elements/{element_id}/quantity",
-                    headers=self._headers(),
-                    json={"value": qty}
-                )
-                logger.info(f"Set quantity {qty} for element {element_id}: {r3.status_code}")
+            # Шаг 2: количество
+            await client.put(
+                f"{BASE_URL}/waybills/{waybill_id}/elements/{element_id}/quantity",
+                headers=self._headers(),
+                json={"value": qty}
+            )
+            logger.info(f"Set quantity {qty} for element {element_id}")
+
+            # Шаг 3: цена закупки
+            await client.put(
+                f"{BASE_URL}/waybills/{waybill_id}/elements/{element_id}/buying-amount",
+                headers=self._headers(),
+                json={"value": buy_price}
+            )
+            logger.info(f"Set buying price {buy_price} for element {element_id}")
+
+            # Шаг 4: цена продажи
+            await client.put(
+                f"{BASE_URL}/waybills/{waybill_id}/elements/{element_id}/selling-amount",
+                headers=self._headers(),
+                json={"value": sell_price}
+            )
+            logger.info(f"Set selling price {sell_price} for element {element_id}")
 
             return True
 
