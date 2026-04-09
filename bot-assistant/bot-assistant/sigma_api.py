@@ -339,12 +339,14 @@ class SigmaAPI:
         # Применяем фиксы для известных несовпадений
         for old, new in PRODUCT_NAME_FIXES.items():
             name_lower = name_lower.replace(old, new)
-        # Нормализуем "гр" → "г" для совпадения с Sigma
+        # Нормализуем "гр" → "г"
         name_lower = re.sub(r'(\d+)гр\b', r'\1г', name_lower)
+        # Убираем артикулы типа "1/45", "1/6", "1/12"
+        name_lower = re.sub(r'\b\d+/\d+\b', '', name_lower)
 
-        # Только крупные числа (граммы ≥ 100) как обязательные — проценты не проверяем
+        # Числа >= 20 как обязательные (процент жирности + граммы)
         all_numbers = set(n.replace(',', '.') for n in re.findall(r'\d+(?:[.,]\d+)?', name_lower))
-        required_numbers = {n for n in all_numbers if float(n) >= 100}
+        required_numbers = {n for n in all_numbers if float(n) >= 20}
 
         # Слова для нечёткого поиска
         tokens = [w for w in re.split(r'[\s,./\\%]+', name_lower) if len(w) >= 3 and not re.match(r'^\d+$', w)]
