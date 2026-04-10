@@ -938,11 +938,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             if result["ok"]:
                 del pending_invoices[user_id]
+                num = result.get("waybill_number") or ""
+                num_line = f" №{num}" if num else ""
                 skipped_text = ""
                 if result.get("skipped"):
                     skipped_text = f"\n\nНе найдено в базе Sigma:\n" + "\n".join(f"- {s}" for s in result["skipped"])
                 await query.message.edit_text(
-                    f"✅ Черновик создан в Sigma!\n"
+                    f"✅ Черновик{num_line} создан в Sigma!\n"
                     f"Добавлено товаров: {result.get('added', 0)}"
                     f"{skipped_text}\n\n"
                     f"Зайди в Sigma → Документы → Приходы → проверь и нажми Провести"
@@ -1202,11 +1204,13 @@ async def handle_invoice_confirm(update: Update, context: ContextTypes.DEFAULT_T
         )
         if result["ok"]:
             del pending_invoices[user_id]
+            num = result.get("waybill_number") or ""
+            num_line = f" №{num}" if num else ""
             skipped_text = ""
             if result.get("skipped"):
                 skipped_text = f"\n⚠️ Не найдено в базе Sigma: {', '.join(result['skipped'])}"
             await msg.edit_text(
-                f"✅ Готово! Приход создан в Sigma\n"
+                f"✅ Готово! Приход{num_line} создан в Sigma\n"
                 f"Добавлено товаров: {result.get('added', 0)}"
                 f"{skipped_text}"
             )

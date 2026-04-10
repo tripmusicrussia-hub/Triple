@@ -516,7 +516,7 @@ class SigmaAPI:
                     return {"id": product_id, "name": name}
             return None
 
-    async def create_income(self, supplier_id: Optional[str] = None, supplier_name: Optional[str] = None) -> Optional[str]:
+    async def create_income(self, supplier_id: Optional[str] = None, supplier_name: Optional[str] = None) -> tuple:
         from datetime import datetime
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S.") + f"{datetime.now().microsecond // 1000:03d}"
         async with httpx.AsyncClient(timeout=15) as client:
@@ -556,9 +556,10 @@ class SigmaAPI:
             )
             logger.info(f"Create income: {r.status_code} {r.text[:300]}")
             if r.status_code in (200, 201):
-                return r.json().get("id")
+                waybill_id = r.json().get("id")
+                return waybill_id, number
             logger.error(f"Create income failed: {r.status_code} {r.text[:300]}")
-            return None
+            return None, None
 
     async def add_product_to_income(self, waybill_id: str, product_id: str, qty: float, buy_price: float, sell_price: float) -> bool:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -624,7 +625,7 @@ class SigmaAPI:
         if not supplier_id:
             logger.warning(f"Supplier not found: {supplier_name}")
 
-        waybill_id = await self.create_income(supplier_id, supplier_name if supplier_id else None)
+        waybill_id, waybill_number = await self.create_income(supplier_id, supplier_name if supplier_id else None)
         if not waybill_id:
             return {"ok": False, "error": "Не удалось создать документ прихода в Sigma."}
 
@@ -658,6 +659,7 @@ class SigmaAPI:
         return {
             "ok": True,
             "waybill_id": waybill_id,
+            "waybill_number": waybill_number,
             "added": added,
             "skipped": skipped,
             "conducted": False
