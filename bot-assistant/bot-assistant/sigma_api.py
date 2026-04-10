@@ -409,34 +409,42 @@ class SigmaAPI:
 
 
     async def find_product(self, name: str) -> Optional[dict]:
-        # Ищем в кэше
+        """Поиск товара в Sigma.
+        Основной путь: API-поиск по ключевым словам (как вручную в строке поиска Sigma).
+        Запасной: кэш всех товаров (если API ничего не вернул).
+        """
+        # ── 1. API-поиск по ключевым словам ──────────────────────────────────
+        # Берём производителя + тип товара из названия → Sigma возвращает 3-10 результатов
+        name_expanded = expand_abbreviations(name.lower())
+        for old, new in PRODUCT_NAME_FIXES.items():
+            name_expanded = name_expanded.replace(old, new)
+        words = [w for w in re.split(r'[\s,./\\%\-]+', name_expanded)
+                 if len(w) >= 3 and not re.match(r'^\d+$', w)]
+        if words:
+            search_query = ' '.join(words[:3])[:30]
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.post(
+                    f"{BASE_URL}/rest/v4/products/simple",
+                    headers=self._headers(),
+                    params={"page": 0},
+                    json={"name": search_query, "storehouseId": None, "isProduced": None, "waybillId": None}
+                )
+                logger.info(f"API search '{search_query}': {r.status_code}")
+                if r.status_code == 200:
+                    content = r.json().get("productsInfo", {}).get("content", [])
+                    if content:
+                        match = self.find_product_in_cache(name, cache=content)
+                        if match:
+                            logger.info(f"Found via API search: '{match.get('name', '')[:40]}'")
+                            return match
+
+        # ── 2. Кэш как запасной путь ─────────────────────────────────────────
         if _cache_loaded:
             cached = self.find_product_in_cache(name)
             if cached:
+                logger.info(f"Found in cache: '{cached.get('name', '')[:40]}'")
                 return cached
-            logger.info(f"Not in cache: '{name[:30]}', trying API name search")
 
-        # Fallback: поиск через API по имени
-        # Нужен для товаров которые есть в Sigma но не попали в постраничную загрузку
-        name_expanded = expand_abbreviations(name.lower())
-        words = [w for w in re.split(r'[\s,./\\%\-]+', name_expanded) if len(w) >= 3]
-        search_query = ' '.join(words[:3])[:30]
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.post(
-                f"{BASE_URL}/rest/v4/products/simple",
-                headers=self._headers(),
-                params={"page": 0},
-                json={"name": search_query, "storehouseId": None, "isProduced": None, "waybillId": None}
-            )
-            logger.info(f"API name search '{search_query}': {r.status_code}")
-            if r.status_code == 200:
-                data = r.json()
-                content = data.get("productsInfo", {}).get("content", [])
-                if content:
-                    match = self.find_product_in_cache(name, cache=content)
-                    if match:
-                        logger.info(f"Found via API search: '{match.get('name', '')}'")
-                        return match
         return None
 
     async def create_product(self, name: str, buy_price: float, sell_price: float) -> Optional[dict]:
