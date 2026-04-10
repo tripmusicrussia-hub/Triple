@@ -40,11 +40,8 @@ ABBREVIATIONS = {
 PRODUCT_NAME_FIXES = {
     "карламан какао 7,5": "карламан какао 7",
     "карламан какао 7.5": "карламан какао 7",
-    # Васькино Счастье в Sigma хранится как "Катык Зеленодольский по домашнему"
-    "васькино счастье": "катык зеленодольский по домашнему",
-    "васькино": "катык зеленодольский по домашнему",
-    "вас. счас.": "катык зеленодольский по домашнему",
-    "вас счас": "катык зеленодольский по домашнему",
+    "вас. счас.": "васькино счастье",
+    "вас счас": "васькино счастье",
 }
 
 # Словарь для определения категории по ключевым словам
@@ -335,9 +332,10 @@ class SigmaAPI:
         logger.info(f"Loaded {total} products into cache ({page+1} pages)")
         return total
 
-    def find_product_in_cache(self, name: str) -> Optional[dict]:
+    def find_product_in_cache(self, name: str, cache: list = None) -> Optional[dict]:
         """Нечёткий поиск товара в кэше по словам"""
-        cache = _products_cache
+        if cache is None:
+            cache = _products_cache
         if not cache:
             return None
 
@@ -365,9 +363,10 @@ class SigmaAPI:
         best_score = 0
 
         for product in cache:
-            p_name = product.get("name", "").lower()
+            p_name = expand_abbreviations(product.get("name", "").lower())
             p_numbers = set(n.replace(',', '.') for n in re.findall(r'\d+(?:[.,]\d+)?', p_name))
             p_pcts = {m.replace(',', '.') for m in re.findall(r'(\d+(?:[.,]\d+)?)\s*%', p_name)}
+            p_tokens = [w for w in re.split(r'[\s,./\\%\-]+', p_name) if len(w) >= 3 and not re.match(r'^\d+$', w)]
 
             # Каждое обязательное число должно быть в товаре
             num_mismatch = False
@@ -379,9 +378,20 @@ class SigmaAPI:
                 continue
 
             # Если в запросе указан % жирности И в товаре тоже — они должны совпадать
-            # Это предотвращает матч Молоко 3.2% → Молоко 2.5%, Сметана 15% → Сметана 20% и т.д.
+            # Предотвращает матч Молоко 3.2% → Молоко 2.5%, Сметана 15% → Сметана 20% и т.д.
             if query_pcts and p_pcts and query_pcts != p_pcts:
                 continue
+
+            # Если в запросе есть % — не матчиться к товарам без % (снеки, чипсы со вкусом)
+            if query_pcts and not p_pcts:
+                continue
+
+            # Если запрос специфичный (> 1 токена) — проверяем что товар Sigma тоже "вписывается"
+            # Предотвращает матч "Сметана ОВК 20% 180г" → "Сметана КАРЛАМАН 20% 180г"
+            if len(tokens) > 1 and p_tokens:
+                p_reverse = sum(1 for pt in p_tokens if pt in name_lower) / len(p_tokens)
+                if p_reverse < 0.35:
+                    continue
 
             matched = sum(1 for t in tokens if t in p_name)
             score = sum(len(t) for t in tokens if t in p_name)
@@ -404,22 +414,29 @@ class SigmaAPI:
             cached = self.find_product_in_cache(name)
             if cached:
                 return cached
-            logger.info(f"Not in cache: '{name[:30]}'")
-            return None
-        # Fallback: поиск через API
+            logger.info(f"Not in cache: '{name[:30]}', trying API name search")
+
+        # Fallback: поиск через API по имени
+        # Нужен для товаров которые есть в Sigma но не попали в постраничную загрузку
+        name_expanded = expand_abbreviations(name.lower())
+        words = [w for w in re.split(r'[\s,./\\%\-]+', name_expanded) if len(w) >= 3]
+        search_query = ' '.join(words[:3])[:30]
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.post(
                 f"{BASE_URL}/rest/v4/products/simple",
                 headers=self._headers(),
                 params={"page": 0},
-                json={"name": name[:30], "storehouseId": self.storehouse_id, "isProduced": None, "waybillId": None}
+                json={"name": search_query, "storehouseId": None, "isProduced": None, "waybillId": None}
             )
-            logger.info(f"Find product API '{name[:20]}': {r.status_code} {r.text[:200]}")
+            logger.info(f"API name search '{search_query}': {r.status_code}")
             if r.status_code == 200:
                 data = r.json()
                 content = data.get("productsInfo", {}).get("content", [])
                 if content:
-                    return content[0]
+                    match = self.find_product_in_cache(name, cache=content)
+                    if match:
+                        logger.info(f"Found via API search: '{match.get('name', '')}'")
+                        return match
         return None
 
     async def create_product(self, name: str, buy_price: float, sell_price: float) -> Optional[dict]:
