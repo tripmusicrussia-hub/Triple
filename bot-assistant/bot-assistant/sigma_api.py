@@ -669,35 +669,36 @@ class SigmaAPI:
 async def recognize_invoice(image_bytes: bytes) -> dict:
     import base64
     import re as _re
-    GROQ_KEY = os.getenv("GROQ_API_KEY", "")
+    OPENROUTER_KEY = os.getenv("OPENROUTER_KEY", "")
     img_b64 = base64.b64encode(image_bytes).decode()
 
-    prompt = """Ты эксперт по чтению накладных от поставщиков продуктового магазина.
-Перед тобой фото накладной. Внимательно изучи всю таблицу.
-
-СТРУКТУРА НАКЛАДНОЙ:
-- Колонка "Заказ" — первая числовая колонка после названия товара. В ней рукой написаны числа (5, 10, 12 и т.д.) — это количество заказанных упаковок. У некоторых строк эта ячейка пустая.
-- Колонка "Цена" — следующая колонка, в ней напечатаны цены (например 62,80 или 122,30).
-- Остальные колонки (Цена за упаковку, Сумма, Рекомендованная цена) — игнорируй.
+    prompt = """Ты читаешь накладную (товарная накладная, счёт-фактура, УПД) от поставщика продуктового магазина.
+У разных поставщиков структура накладной отличается — адаптируйся к тому что видишь.
 
 ЗАДАЧА:
-1. Пройди по каждой строке товара сверху вниз.
-2. Если в колонке "Заказ" у строки есть рукописное число — включи товар в список.
-3. Если ячейка "Заказ" пустая — пропусти строку.
-4. qty = число из колонки "Заказ", price = число из колонки "Цена".
-5. Итоговая рукописная сумма внизу документа → total_sum.
-6. Поставщик — ООО/ИП из шапки.
-7. name — ДОСЛОВНО из накладной.
+1. Найди таблицу с товарами.
+2. Для каждой строки товара определи: название, количество, цену за единицу.
+3. Если есть колонка "Заказ" с рукописными числами — это количество заказанных упаковок, используй её.
+4. Если колонки "Заказ" нет — используй напечатанное количество из накладной.
+5. Строки без количества или с нулевым количеством — пропускай.
+6. Итоговые строки ("Итого", "Всего") — не включай в товары.
+7. name — ДОСЛОВНО как написано в накладной.
+8. Поставщик — название ООО/ИП из шапки документа.
+9. total_sum — итоговая сумма документа.
 
 Верни ТОЛЬКО JSON без markdown:
-{"supplier":"название","total_sum":число,"items":[{"name":"дословное название","qty":число,"qty_str":"число шт","price":число}]}"""
+{"supplier":"название","total_sum":число,"items":[{"name":"дословное название","qty":число,"qty_str":"строка","price":число}]}"""
 
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_KEY}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com/tripmusicrussia-hub/Triple",
+            },
             json={
-                "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+                "model": "google/gemini-2.0-flash-001",
                 "max_tokens": 2000,
                 "messages": [{
                     "role": "user",
@@ -709,9 +710,9 @@ async def recognize_invoice(image_bytes: bytes) -> dict:
             }
         )
         j = resp.json()
-        logger.info(f"Groq vision response: {str(j)[:300]}")
+        logger.info(f"Gemini vision response: {str(j)[:300]}")
         if "error" in j:
-            raise Exception(j["error"]["message"])
+            raise Exception(j["error"].get("message", str(j["error"])))
         raw = j["choices"][0]["message"]["content"]
 
     raw_clean = _re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]', '', raw)
