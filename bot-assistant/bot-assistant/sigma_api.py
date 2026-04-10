@@ -40,6 +40,11 @@ ABBREVIATIONS = {
 PRODUCT_NAME_FIXES = {
     "карламан какао 7,5": "карламан какао 7",
     "карламан какао 7.5": "карламан какао 7",
+    # Васькино Счастье в Sigma хранится как "Катык Зеленодольский по домашнему"
+    "васькино счастье": "катык зеленодольский по домашнему",
+    "васькино": "катык зеленодольский по домашнему",
+    "вас. счас.": "катык зеленодольский по домашнему",
+    "вас счас": "катык зеленодольский по домашнему",
 }
 
 # Словарь для определения категории по ключевым словам
@@ -346,6 +351,10 @@ class SigmaAPI:
         numbers = set(n.replace(',', '.') for n in re.findall(r'\d+(?:[.,]\d+)?', name_lower))
         numbers = {n for n in numbers if float(n) >= 20}
 
+        # Процент жирности (3.2%, 9%, 15% и т.д.) — обязателен для точного совпадения
+        # Если и в запросе, и в товаре Sigma указан %, они должны совпадать
+        query_pcts = {m.replace(',', '.') for m in re.findall(r'(\d+(?:[.,]\d+)?)\s*%', name_lower)}
+
         # Слова для нечёткого поиска
         tokens = [w for w in re.split(r'[\s,./\\%\-]+', name_lower) if len(w) >= 3 and not re.match(r'^\d+$', w)]
 
@@ -358,6 +367,7 @@ class SigmaAPI:
         for product in cache:
             p_name = product.get("name", "").lower()
             p_numbers = set(n.replace(',', '.') for n in re.findall(r'\d+(?:[.,]\d+)?', p_name))
+            p_pcts = {m.replace(',', '.') for m in re.findall(r'(\d+(?:[.,]\d+)?)\s*%', p_name)}
 
             # Каждое обязательное число должно быть в товаре
             num_mismatch = False
@@ -366,6 +376,11 @@ class SigmaAPI:
                     num_mismatch = True
                     break
             if num_mismatch:
+                continue
+
+            # Если в запросе указан % жирности И в товаре тоже — они должны совпадать
+            # Это предотвращает матч Молоко 3.2% → Молоко 2.5%, Сметана 15% → Сметана 20% и т.д.
+            if query_pcts and p_pcts and query_pcts != p_pcts:
                 continue
 
             matched = sum(1 for t in tokens if t in p_name)
@@ -379,7 +394,7 @@ class SigmaAPI:
         if best_match:
             logger.info(f"Cache hit: '{name[:30]}' → '{best_match.get('name', '')[:40]}'")
         else:
-            logger.info(f"Cache miss: '{name[:30]}' | required={numbers} | tokens={tokens[:4]}")
+            logger.info(f"Cache miss: '{name[:30]}' | required={numbers} | pct={query_pcts} | tokens={tokens[:4]}")
         return best_match
 
 
@@ -624,84 +639,56 @@ class SigmaAPI:
         }
 
 
-async def ocr_yandex(image_bytes: bytes) -> str:
-    import base64
-    YANDEX_KEY = os.getenv("YANDEX_API_KEY", "")
-    YANDEX_FOLDER = os.getenv("YANDEX_FOLDER_ID", "")
-    img_b64 = base64.b64encode(image_bytes).decode()
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            "https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze",
-            headers={"Authorization": f"Api-Key {YANDEX_KEY}", "Content-Type": "application/json"},
-            json={
-                "folderId": YANDEX_FOLDER,
-                "analyzeSpecs": [{
-                    "content": img_b64,
-                    "features": [{"type": "TEXT_DETECTION", "textDetectionConfig": {"languageCodes": ["ru", "en"]}}]
-                }]
-            }
-        )
-        data = resp.json()
-    lines = []
-    try:
-        pages = data["results"][0]["results"][0]["textDetection"]["pages"]
-        for page in pages:
-            for block in page.get("blocks", []):
-                for line in block.get("lines", []):
-                    words = [w["text"] for w in line.get("words", [])]
-                    if words:
-                        lines.append(" ".join(words))
-    except Exception as e:
-        logger.error(f"Yandex OCR parse error: {e}, response: {str(data)[:300]}")
-    return "\n".join(lines)
-
-
 async def recognize_invoice(image_bytes: bytes) -> dict:
+    import base64
+    import re as _re
     GROQ_KEY = os.getenv("GROQ_API_KEY", "")
-    raw_text = await ocr_yandex(image_bytes)
-    logger.info(f"Yandex OCR result:\n{raw_text[:500]}")
-    if not raw_text.strip():
-        raise Exception("Yandex OCR не смог прочитать текст с изображения")
+    img_b64 = base64.b64encode(image_bytes).decode()
 
-    prompt = f"""Это текст накладной от поставщика, извлечённый OCR системой.
+    prompt = """Ты эксперт по чтению накладных от поставщиков продуктового магазина.
+Перед тобой фото накладной. Внимательно изучи всю таблицу.
 
-ТЕКСТ НАКЛАДНОЙ:
-{raw_text}
+СТРУКТУРА НАКЛАДНОЙ:
+- Колонка "Заказ" — первая числовая колонка после названия товара. В ней рукой написаны числа (5, 10, 12 и т.д.) — это количество заказанных упаковок. У некоторых строк эта ячейка пустая.
+- Колонка "Цена" — следующая колонка, в ней напечатаны цены (например 62,80 или 122,30).
+- Остальные колонки (Цена за упаковку, Сумма, Рекомендованная цена) — игнорируй.
 
-ЗАДАЧА: найди все строки с товарами и их количеством/ценой.
-
-Правила:
-- Если это печатная накладная с галочками: бери только строки где рядом с товаром есть число (кол-во заказа)
-- Если это рукописная накладная: бери все строки где есть название товара + число кол-во + число цена
-- Пропускай: пустые строки, итоги (Итого, НДС, сумма прописью), заголовки секций без цены
-- Поставщик: из строки "Поставщик", "От кого", или название компании ООО/ИП в шапке
-- КРИТИЧНО: поле name — ДОСЛОВНОЕ название из накладной, не переводи, не интерпретируй, не дополняй. Если написано "манго-клуб." — пиши "манго-клуб.", "клуб. со слив." — пиши "клуб. со слив."
-- КРИТИЧНО: первый столбец (№, Код, Арт.) — это номер строки или артикул, НЕ количество! Игнорируй его
-- Количество берётся ТОЛЬКО из колонки "Количество"/"Кол-во" — число рядом с "шт" или "кг"
-- qty_str — строка с единицей измерения (напр. "1.53 кг", "2 шт")
+ЗАДАЧА:
+1. Пройди по каждой строке товара сверху вниз.
+2. Если в колонке "Заказ" у строки есть рукописное число — включи товар в список.
+3. Если ячейка "Заказ" пустая — пропусти строку.
+4. qty = число из колонки "Заказ", price = число из колонки "Цена".
+5. Итоговая рукописная сумма внизу документа → total_sum.
+6. Поставщик — ООО/ИП из шапки.
+7. name — ДОСЛОВНО из накладной.
 
 Верни ТОЛЬКО JSON без markdown:
-{{"supplier":"название","items":[{{"name":"дословное название из накладной","qty":число,"qty_str":"число единица","price":число}}]}}"""
+{"supplier":"название","total_sum":число,"items":[{"name":"дословное название","qty":число,"qty_str":"число шт","price":число}]}"""
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
             json={
-                "model": "llama-3.3-70b-versatile",
+                "model": "meta-llama/llama-4-scout-17b-16e-instruct",
                 "max_tokens": 2000,
-                "messages": [{"role": "user", "content": prompt}]
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
+                        {"type": "text", "text": prompt}
+                    ]
+                }]
             }
         )
         j = resp.json()
+        logger.info(f"Groq vision response: {str(j)[:300]}")
         if "error" in j:
             raise Exception(j["error"]["message"])
         raw = j["choices"][0]["message"]["content"]
 
-    import re as _re
     raw_clean = _re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]', '', raw)
     raw_clean = raw_clean.replace("```json", "").replace("```", "").strip()
-    # Извлекаем только первый JSON объект — убираем лишнее после него
     match = _re.search(r'\{.*\}', raw_clean, _re.DOTALL)
     if match:
         raw_clean = match.group(0)
