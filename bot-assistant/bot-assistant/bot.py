@@ -1172,10 +1172,22 @@ async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYP
 
         total_so_far = len(invoice_pages[user_id]["items"])
         lines = [f"📋 Лист распознан! Товаров: {len(items)}"]
+        uncertain_indices = []
         for i, item in enumerate(items, 1):
-            lines.append(f"{i}. {item['name'][:35]} — {item['qty']} шт")
+            mark = "⚠️ " if item.get("uncertain") else ""
+            lines.append(f"{mark}{i}. {item['name'][:35]} — {item['qty']} шт")
+            if item.get("uncertain"):
+                uncertain_indices.append(i)
         if total_so_far > len(items):
             lines.append(f"\nВсего накоплено: {total_so_far} товаров")
+        # Предупреждение о неуверенных позициях
+        if uncertain_indices:
+            idx_str = ", ".join(str(i) for i in uncertain_indices)
+            lines.append(
+                f"\n⚠️ Проверь глазами позиции: {idx_str}\n"
+                f"   (в этих строках я не уверен — мог неправильно "
+                f"прочитать цену, количество или название)"
+            )
         # Предупреждение о расхождении напечатанного и вычисленного итога
         mismatch = result.get("total_mismatch")
         if mismatch:
