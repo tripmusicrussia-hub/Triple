@@ -1176,6 +1176,17 @@ async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYP
             lines.append(f"{i}. {item['name'][:35]} — {item['qty']} шт")
         if total_so_far > len(items):
             lines.append(f"\nВсего накоплено: {total_so_far} товаров")
+        # Предупреждение о расхождении напечатанного и вычисленного итога
+        mismatch = result.get("total_mismatch")
+        if mismatch:
+            delta = mismatch["delta"]
+            sign = "больше" if delta > 0 else "меньше"
+            lines.append(
+                f"\n⚠️ Итог не сходится:\n"
+                f"   В накладной: {mismatch['printed']} ₽\n"
+                f"   Посчитал я: {mismatch['computed']} ₽ (на {abs(delta)} ₽ {sign})\n"
+                f"   Проверь позиции — возможно ошибка в одной из цен или количеств."
+            )
         lines.append("\nЕщё листы есть?")
         await msg.edit_text("\n".join(lines), reply_markup=kb_invoice_more_pages())
 

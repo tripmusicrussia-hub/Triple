@@ -765,7 +765,9 @@ async def recognize_invoice(image_bytes: bytes) -> dict:
    ИСКЛЮЧЕНИЕ — хвостовая страница многостраничной накладной: если номера строк в таблице идут НЕ с 1 (например с 54), значит это продолжение. В этом случае:
      - total_sum = "Всего по накладной" (итог ВСЕЙ накладной, он больше видимой суммы)
      - items = ТОЛЬКО видимые на этой странице позиции
+     - is_tail_page = true (обязательно укажи это поле в JSON!)
      - НЕ проверяй сходимость, НЕ возвращай пустой items. Просто извлеки всё, что видишь.
+   Для обычной одностраничной накладной поле is_tail_page не добавляй (или ставь false).
 2. Извлекай ВСЕ товарные строки, которые видны в OCR — даже если часть колонок пустая. Если колонка "Сумма с НДС" не распознана, но есть qty и "Цена с НДС" — сумма строки = qty × цена с НДС. Если не распознаны и qty, и price — тогда пропусти строку. Но не выкидывай строку только потому что одна колонка пустая.
    НИКОГДА не возвращай items=[] если в OCR видно хотя бы одно чётко распознанное название товара со строкой цифр.
    ⚠️ ИСКЛЮЧЕНИЕ — ветка Д (прайс-лист с колонкой "Заказ"): там фильтрация строго по наличию значения в колонке "Заказ", правило №2 не применяется. Пустая "Заказ" = не входит в заказ = не попадает в items.
@@ -776,7 +778,7 @@ async def recognize_invoice(image_bytes: bytes) -> dict:
 7. OCR может путать похожие символы (О↔0, З↔3, рус/лат). Если число выглядит абсурдно (qty=100500, price=0.01) — пропусти строку, не угадывай.
 
 ВЕРНИ ТОЛЬКО ВАЛИДНЫЙ JSON БЕЗ MARKDOWN И БЕЗ КОММЕНТАРИЕВ:
-{{"supplier":"название","total_sum":число,"items":[{{"name":"название","qty":число,"qty_str":"5 шт","price":число}}]}}
+{{"supplier":"название","total_sum":число,"is_tail_page":false,"items":[{{"name":"название","qty":число,"qty_str":"5 шт","price":число}}]}}
 
 === ТЕКСТ НАКЛАДНОЙ (OCR) ===
 {ocr_text}
@@ -842,7 +844,37 @@ async def recognize_invoice(image_bytes: bytes) -> dict:
     if match:
         raw_clean = match.group(0)
     try:
-        return json.loads(raw_clean)
+        result = json.loads(raw_clean)
     except Exception:
         raw_clean2 = ''.join(c for c in raw_clean if ord(c) >= 32 or c in '\n\r\t')
-        return json.loads(raw_clean2)
+        result = json.loads(raw_clean2)
+
+    # ── Проверка сходимости итога (total_mismatch) ─────────────────────────────
+    # Ловит И ошибки поставщика в накладной, И галлюцинации LLM по total_sum.
+    # Пропускаем хвостовые страницы многостраничных накладных (там computed << printed
+    # по определению, потому что видим только часть позиций).
+    items = result.get("items") or []
+    printed = result.get("total_sum")
+    is_tail = bool(result.get("is_tail_page"))
+    if items and not is_tail and isinstance(printed, (int, float)) and printed > 0:
+        computed = 0.0
+        for it in items:
+            q = it.get("qty") or 0
+            p = it.get("price") or 0
+            try:
+                computed += float(q) * float(p)
+            except (TypeError, ValueError):
+                pass
+        computed = round(computed, 2)
+        delta = round(computed - printed, 2)
+        if abs(delta) > 1.0:
+            result["total_mismatch"] = {
+                "computed": computed,
+                "printed": round(float(printed), 2),
+                "delta": delta,
+            }
+            logger.info(
+                "Total mismatch: computed=%.2f printed=%.2f delta=%.2f",
+                computed, printed, delta,
+            )
+    return result
