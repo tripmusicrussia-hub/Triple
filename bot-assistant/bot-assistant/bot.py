@@ -856,7 +856,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Накладная: ещё листы ──────────────────────────────────
     if data == "invoice_more":
         if user_id != ADMIN_ID: return
-        accumulated = invoice_pages.get(user_id, {})
+        accumulated = invoice_pages.get(user_id)
+        if not accumulated:
+            await query.message.edit_text(
+                "Эта накладная уже закрыта (авто-завершение по тишине). "
+                "Пришли фото — начну новую."
+            )
+            return
+        _schedule_invoice_autofinish(user_id, query.message.chat_id, context.bot)
         total = len(accumulated.get("items", []))
         await query.message.edit_text(
             f"Ок, жду следующий лист 📸\nУже накоплено товаров: {total}"
@@ -865,26 +872,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "invoice_done":
         if user_id != ADMIN_ID: return
-        accumulated = invoice_pages.pop(user_id, None)
-        if not accumulated or not accumulated.get("items"):
+        _cancel_invoice_autofinish(user_id)
+        if user_id not in invoice_pages or not invoice_pages[user_id].get("items"):
             await query.answer("Нет данных!", show_alert=True)
             return
-
-        # Пересчитываем весовые товары
-        items, recalc_info = sigma_api.process_weight_products(accumulated["items"])
-
-        pending_invoices[user_id] = {
-            "supplier": accumulated["supplier"],
-            "items": items
-        }
-        invoice = pending_invoices[user_id]
-        text = format_invoice_final(invoice["supplier"], invoice["items"])
-
-        # Если были весовые товары — добавляем пояснение
-        if recalc_info:
-            text += "\n\n⚖️ Пересчитано как весовой товар:\n" + "\n".join(recalc_info)
-
-        await query.message.edit_text(text, reply_markup=kb_invoice_edit(invoice["items"]))
+        await _finalize_invoice_for_review(
+            user_id, query.message.chat_id, context.bot, auto=False
+        )
+        # Убираем кнопки с предыдущего статусного сообщения, чтобы их не жали повторно
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
         return
 
     if data.startswith("inv_edit_"):
@@ -958,6 +957,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "invoice_cancel":
         if user_id != ADMIN_ID: return
+        _cancel_invoice_autofinish(user_id)
         pending_invoices.pop(user_id, None)
         invoice_pages.pop(user_id, None)
         editing_qty.pop(user_id, None)
@@ -1107,6 +1107,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 pending_invoices = {}
 invoice_pages = {}       # накапливаем страницы до нажатия "это всё"
 editing_qty = {}         # {user_id: item_index} — ждём новое кол-во от пользователя
+invoice_autofinish_tasks = {}  # {user_id: asyncio.Task} — автозавершение по тишине
+INVOICE_AUTOFINISH_SECONDS = 20  # сколько ждать новой страницы перед автозакрытием
 
 def kb_invoice_more_pages():
     return InlineKeyboardMarkup([
@@ -1142,6 +1144,64 @@ def format_invoice_final(supplier, items):
     lines.append("\nНажми на товар чтобы исправить кол-во или цену")
     return "\n".join(lines)
 
+async def _finalize_invoice_for_review(user_id: int, chat_id: int, bot, auto: bool):
+    """Перевод накладной из накопления в режим финального review.
+    Вызывается и руками ('Нет, это всё'), и автоматически по таймауту."""
+    accumulated = invoice_pages.pop(user_id, None)
+    if not accumulated or not accumulated.get("items"):
+        return False
+
+    items, recalc_info = sigma_api.process_weight_products(accumulated["items"])
+    pending_invoices[user_id] = {
+        "supplier": accumulated["supplier"],
+        "items": items,
+    }
+    invoice = pending_invoices[user_id]
+    text = format_invoice_final(invoice["supplier"], invoice["items"])
+    if auto:
+        n_pages = accumulated.get("page_count", 1)
+        pages_word = "лист" if n_pages == 1 else "листа" if 2 <= n_pages <= 4 else "листов"
+        text = (
+            f"⏱ Жду новые страницы {INVOICE_AUTOFINISH_SECONDS} сек — тишина, "
+            f"считаю что накладная кончилась ({n_pages} {pages_word}).\n\n"
+            + text
+        )
+    if recalc_info:
+        text += "\n\n⚖️ Пересчитано как весовой товар:\n" + "\n".join(recalc_info)
+    await bot.send_message(chat_id, text, reply_markup=kb_invoice_edit(invoice["items"]))
+    return True
+
+
+async def _autofinish_invoice_after_delay(user_id: int, chat_id: int, bot):
+    try:
+        await asyncio.sleep(INVOICE_AUTOFINISH_SECONDS)
+    except asyncio.CancelledError:
+        return
+    invoice_autofinish_tasks.pop(user_id, None)
+    # Гонка: если пользователь уже нажал кнопку вручную — invoice_pages уже пуст, no-op.
+    if user_id in pending_invoices:
+        return
+    try:
+        await _finalize_invoice_for_review(user_id, chat_id, bot, auto=True)
+    except Exception as e:
+        logger.error(f"autofinish invoice failed: {e}")
+
+
+def _schedule_invoice_autofinish(user_id: int, chat_id: int, bot):
+    old = invoice_autofinish_tasks.pop(user_id, None)
+    if old and not old.done():
+        old.cancel()
+    invoice_autofinish_tasks[user_id] = asyncio.create_task(
+        _autofinish_invoice_after_delay(user_id, chat_id, bot)
+    )
+
+
+def _cancel_invoice_autofinish(user_id: int):
+    task = invoice_autofinish_tasks.pop(user_id, None)
+    if task and not task.done():
+        task.cancel()
+
+
 async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle photo of invoice - supports multi-page"""
     if not update.effective_user: return
@@ -1165,13 +1225,15 @@ async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYP
 
         # Накапливаем страницы
         if user_id not in invoice_pages:
-            invoice_pages[user_id] = {"supplier": supplier, "items": []}
+            invoice_pages[user_id] = {"supplier": supplier, "items": [], "page_count": 0}
         invoice_pages[user_id]["items"].extend(items)
+        invoice_pages[user_id]["page_count"] = invoice_pages[user_id].get("page_count", 0) + 1
         if not invoice_pages[user_id]["supplier"] or invoice_pages[user_id]["supplier"] == "Не определён":
             invoice_pages[user_id]["supplier"] = supplier
 
+        page_num = invoice_pages[user_id]["page_count"]
         total_so_far = len(invoice_pages[user_id]["items"])
-        lines = [f"📋 Лист распознан! Товаров: {len(items)}"]
+        lines = [f"📋 Лист {page_num} распознан! Товаров на листе: {len(items)}"]
         uncertain_indices = []
         for i, item in enumerate(items, 1):
             mark = "⚠️ " if item.get("uncertain") else ""
@@ -1199,8 +1261,14 @@ async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYP
                 f"   Посчитал я: {mismatch['computed']} ₽ (на {abs(delta)} ₽ {sign})\n"
                 f"   Проверь позиции — возможно ошибка в одной из цен или количеств."
             )
-        lines.append("\nЕщё листы есть?")
+        lines.append(
+            f"\nЕщё листы есть? Если тишина {INVOICE_AUTOFINISH_SECONDS} сек — "
+            f"считаю накладную завершённой автоматически."
+        )
         await msg.edit_text("\n".join(lines), reply_markup=kb_invoice_more_pages())
+
+        # Запускаем/обновляем таймер авто-завершения
+        _schedule_invoice_autofinish(user_id, update.effective_chat.id, context.bot)
 
     except Exception as e:
         logger.error(f"Invoice error: {e}")
