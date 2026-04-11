@@ -1,0 +1,28 @@
+# Secrets
+.env
+*.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+
+# Tests & debug artifacts
+# Тестовые накладные — реальные документы поставщиков, не публикуем.
+test_*.jpg
+test_*.jpeg
+photo_*.jpg
+debug_*.jpg
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

@@ -667,57 +667,134 @@ class SigmaAPI:
 
 
 async def recognize_invoice(image_bytes: bytes) -> dict:
-    import base64
+    """
+    Распознавание накладной в два шага (двухступенчатая архитектура):
+
+    Шаг 1 — Yandex Vision OCR читает изображение и возвращает текст построчно.
+            Читает русский язык лучше всех, работает из РФ без гео-блока.
+
+    Шаг 2 — Бесплатный текстовый LLM на OpenRouter работает как «профессиональный
+            бухгалтер»: по тексту классифицирует тип документа, извлекает строки
+            товаров в структурированный JSON, проверяет сходимость итога.
+
+    Раньше использовался Gemini 2.0 Flash напрямую (vision), но Google AI Studio
+    гео-блочит РФ → ушли на эту связку. Яндекс OCR + text-LLM также лучше,
+    чем слабый vision (Nemotron / Gemma free), потому что Yandex силён на
+    русской кириллице и рукописных цифрах.
+    """
     import re as _re
+    from yandex_ocr import yandex_read_text
+
     OPENROUTER_KEY = os.getenv("OPENROUTER_KEY", "")
-    img_b64 = base64.b64encode(image_bytes).decode()
+    if not OPENROUTER_KEY:
+        raise RuntimeError("OPENROUTER_KEY не задан в окружении")
 
-    prompt = """Ты читаешь накладную от поставщика продуктового магазина. Формат может быть любым: ТОРГ-12, УПД, счёт-фактура, прайс-лист с заказом.
+    # ── Шаг 1: OCR через Yandex Vision ─────────────────────────────────────────
+    ocr_text = await yandex_read_text(image_bytes, model="table")
+    logger.info("Yandex OCR: %d строк, %d символов", ocr_text.count("\n") + 1, len(ocr_text))
+    if len(ocr_text) < 20:
+        raise Exception(f"Yandex OCR вернул слишком мало текста: {ocr_text!r}")
 
-ШАГ 1 — ОПРЕДЕЛИ ТИП ДОКУМЕНТА:
-А) Прайс-лист с колонкой "Заказ" — поставщик присылает весь каталог, менеджер вписывает количество в колонку "Заказ". Включай ТОЛЬКО строки где в колонке "Заказ" вписано число.
-Б) Стандартная накладная (ТОРГ-12, УПД, счёт-фактура) — напечатанные строки с количеством в колонке "Количество" / "Кол-во" / "Отгружено".
+    # ── Шаг 2: Текстовый LLM извлекает структуру ───────────────────────────────
+    prompt = f"""Ты — профессиональный бухгалтер продуктового магазина. Перед тобой текст накладной, распознанный OCR построчно (порядок строк сохранён). Твоя задача — аккуратно извлечь товарные позиции в JSON.
 
-ШАГ 2 — ИЗВЛЕКИ ДАННЫЕ:
-- name: название товара ДОСЛОВНО из накладной, включая граммовку и фасовку. Только физические товары — пропускай услуги (доставка, погрузка и т.п.)
-- qty: количество из нужной колонки (см. шаг 1). Число 1–500, может быть дробным для весовых товаров (кг).
-- qty_str: исходное значение с единицей, например "5 шт" или "1.5 кг".
-- price: (итоговая сумма строки) ÷ qty, округли до 2 знаков. Итоговая сумма — предпочитай "Стоимость с НДС" / "Сумма с НДС", иначе "Стоимость" / "Сумма". Пример: сумма 1975, qty 5 → price 395.00.
-- supplier: кто ПРОДАЁТ товар (поле "Продавец" / "Поставщик"), не покупатель.
-- total_sum: итоговая сумма документа.
+ШАГ 1 — ОПРЕДЕЛИ ТИП ДОКУМЕНТА И КОЛОНКУ КОЛИЧЕСТВА:
 
-ВАЖНО: включай в JSON ТОЛЬКО строки с реальным qty > 0. Строки без количества, итоговые строки ("Итого", "Всего") — не включай.
+А) ТОРГ-12 (много колонок: "Количество мест", "В одном месте", "Масса брутто"):
+   qty = "Количество мест" — число коробок/упаковок (обычно 1–20).
+   НЕ бери "В одном месте" и НЕ бери суммарное штучное количество (большие числа 100+).
 
-Верни ТОЛЬКО JSON без markdown:
-{"supplier":"название","total_sum":число,"items":[{"name":"название","qty":число,"qty_str":"5 шт","price":число}]}"""
+Б) УПД / Счёт-фактура (стандартная форма):
+   qty = колонка "Количество" (3-я колонка).
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_KEY}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/tripmusicrussia-hub/Triple",
-            },
-            json={
-                "model": "google/gemini-2.0-flash-001",
-                "max_tokens": 2000,
-                "messages": [{
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
-                        {"type": "text", "text": prompt}
-                    ]
-                }]
-            }
-        )
-        j = resp.json()
-        logger.info(f"Gemini vision response: {str(j)[:300]}")
-        if "error" in j:
-            raise Exception(j["error"].get("message", str(j["error"])))
-        raw = j["choices"][0]["message"]["content"]
+В) Расходная / простая накладная:
+   qty = "Количество" или "Кол-во".
 
-    raw_clean = _re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]', '', raw)
+Г) Товарный чек:
+   qty = "Кол-во". Поставщик = продавец в шапке.
+
+Д) Прайс-лист с колонкой "Заказ" (каталог, часть строк заполнена):
+   qty = "Заказ" — бери ТОЛЬКО строки где это число заполнено.
+
+ШАГ 2 — ИЗВЛЕКИ ПОЛЯ (по-бухгалтерски аккуратно):
+
+- supplier: ПРОДАВЕЦ (поля "Продавец" / "Поставщик" / "Грузоотправитель"), НЕ покупатель.
+- total_sum: итоговая сумма ВСЕГО документа ("Итого", "Всего к оплате", "Сумма по накладной").
+- items[]: каждая товарная позиция:
+  * name — ДОСЛОВНО из накладной, включая граммовку и фасовку ("Молоко 3.2% 1л"). Ничего не перефразируй.
+  * qty — из нужной колонки (шаг 1). Дробным может быть для весовых (кг).
+  * qty_str — исходная строка с единицей ("5 шт", "1.5 кг", "3 уп").
+  * price — ЦЕНА ЗА ЕДИНИЦУ с НДС. Считать: (сумма строки) ÷ qty, округлить до 2 знаков.
+    Сумма строки = "Стоимость с НДС" / "Сумма с НДС", иначе "Стоимость" / "Сумма".
+    Если указана "Цена со скидкой" — сумма строки = "Цена со скидкой" × qty.
+
+БУХГАЛТЕРСКИЕ ПРАВИЛА (очень важно):
+
+1. Итог должен сходиться. Проверь: сумма (price × qty) по всем items ≈ total_sum (±1 ₽ на округления). Если расхождение большое — ищи пропущенную или лишнюю строку.
+2. Не выдумывай числа. Если строка распознана плохо и неясно qty или price — ПРОПУСТИ её (лучше недосчитать, чем дать неверную цифру бухгалтеру).
+3. Пропускай нетоварные строки: "Итого", "Всего", "НДС", "Без НДС", "К оплате", услуги ("Доставка", "Погрузка", "Транспортные").
+4. Пропускай строки заголовков таблицы.
+5. Имя поставщика — именно продавец, не покупатель и не грузополучатель.
+6. OCR может путать похожие символы (О↔0, З↔3, рус/лат). Если число выглядит абсурдно (qty=100500, price=0.01) — пропусти строку, не угадывай.
+
+ВЕРНИ ТОЛЬКО ВАЛИДНЫЙ JSON БЕЗ MARKDOWN И БЕЗ КОММЕНТАРИЕВ:
+{{"supplier":"название","total_sum":число,"items":[{{"name":"название","qty":число,"qty_str":"5 шт","price":число}}]}}
+
+=== ТЕКСТ НАКЛАДНОЙ (OCR) ===
+{ocr_text}
+=== КОНЕЦ ТЕКСТА ==="""
+
+    # Fallback-цепочка: если модель rate-limited, пробуем следующую
+    MODELS = [
+        "openai/gpt-oss-120b:free",
+        "minimax/minimax-m2.5:free",
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        "openai/gpt-oss-20b:free",
+        "z-ai/glm-4.5-air:free",
+    ]
+
+    raw = None
+    last_error = None
+    async with httpx.AsyncClient(timeout=90) as client:
+        for model in MODELS:
+            try:
+                resp = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {OPENROUTER_KEY}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "https://github.com/tripmusicrussia-hub/Triple",
+                    },
+                    json={
+                        "model": model,
+                        "max_tokens": 3000,
+                        "temperature": 0,
+                        "messages": [{"role": "user", "content": prompt}],
+                    },
+                )
+                j = resp.json()
+                if "error" in j:
+                    err_msg = j["error"].get("message", str(j["error"]))
+                    logger.warning("LLM %s error: %s — пробую следующую", model, err_msg)
+                    last_error = err_msg
+                    continue
+                content = j["choices"][0]["message"].get("content") or ""
+                if not content.strip():
+                    logger.warning("LLM %s вернул пустой content — пробую следующую", model)
+                    continue
+                logger.info("LLM %s: ok, %d символов ответа", model, len(content))
+                raw = content
+                break
+            except Exception as e:
+                logger.warning("LLM %s exception: %s — пробую следующую", model, e)
+                last_error = str(e)
+                continue
+
+    if raw is None:
+        raise Exception(f"Все LLM недоступны. Последняя ошибка: {last_error}")
+
+    # ── Очистка и парсинг JSON ─────────────────────────────────────────────────
+    raw_clean = _re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', raw)
     raw_clean = raw_clean.replace("```json", "").replace("```", "").strip()
     match = _re.search(r'\{.*\}', raw_clean, _re.DOTALL)
     if match:

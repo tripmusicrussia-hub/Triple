@@ -9,15 +9,25 @@ import sys
 import json
 sys.stdout.reconfigure(encoding='utf-8')
 
-os.environ["SIGMA_LOGIN"] = "+79174854325"
-os.environ["SIGMA_PASSWORD"] = "IfrbIfrb680"
-os.environ["OPENROUTER_KEY"] = "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"
+# Загружаем .env (без зависимости от python-dotenv)
+_env_path = os.path.join(os.path.dirname(__file__), ".env")
+if os.path.exists(_env_path):
+    with open(_env_path, encoding="utf-8") as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if not _line or _line.startswith("#") or "=" not in _line:
+                continue
+            _k, _v = _line.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
 
 from sigma_api import recognize_invoice
 
 IMAGES = [
     ("photo_2026-04-06_19-11-36.jpg", "Прайс-лист с Заказом (Центропродукт)"),
     ("test_milk.jpg",                 "Расходная накладная (Молочный Переулок)"),
+    ("test_elita.jpg",                "Накладная со скидкой (ИП Насруллаев/Элита)"),
+    ("test_tovcheck.jpg",             "Товарный чек (крупы)"),
+    ("test_mkf.jpg",                  "Накладная МКФ (семечки/конфеты)"),
 ]
 
 
