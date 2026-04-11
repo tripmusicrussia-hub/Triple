@@ -1181,7 +1181,17 @@ async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYP
 
     except Exception as e:
         logger.error(f"Invoice error: {e}")
-        await msg.edit_text(f"Ошибка распознавания: {str(e)[:200]}")
+        err_text = str(e)
+        if "слишком мало текста" in err_text:
+            await msg.edit_text(
+                "📷 Фото нечёткое — OCR почти ничего не разобрал.\n"
+                "Попробуй переснять при хорошем освещении, держи камеру ровно, "
+                "чтобы текст был крупным и в фокусе."
+            )
+        elif "rate quota limit exceed" in err_text:
+            await msg.edit_text("⏳ Yandex OCR занят. Подожди 2 секунды и пришли фото снова.")
+        else:
+            await msg.edit_text(f"Ошибка распознавания: {err_text[:200]}")
 
 async def handle_invoice_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Handle 'ok' confirmation to upload to sigma"""

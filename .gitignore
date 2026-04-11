@@ -18,6 +18,9 @@ test_*.jpeg
 photo_*.jpg
 debug_*.jpg
 *.log
+# OCR-дампы из batch-тестов содержат реальные данные поставщиков
+test_ocr_out/
+*.raw.json
 
 # OS
 .DS_Store
