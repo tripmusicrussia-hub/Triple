@@ -1,0 +1,755 @@
+{
+  "topic": "stopwords",
+  "entries": [
+    {
+      "key": "башк",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "башкир",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "без",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "безалк",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "безалкогольный",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "бут",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "бутылка",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "вак",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "вакуумная",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "вкус",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "вкусом",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "вкусы",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "газ",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "газир",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "газированный",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "гофро",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "гофрокор",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "гофрокороб",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "гофрокороба",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "гр",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "грамм",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "детская",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "детский",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "детское",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "для",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "из",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "источник",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "источников",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "картон",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "картонн",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "картонная",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "картоф",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "картофельные",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "картофельный",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "категория",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "кг",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "килограмм",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "кор",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "коробка",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "литр",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "лотке",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "лотки",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "лоток",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "мешке",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "мешки",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "мешок",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "миллилитр",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "мл",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "на",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "напитки",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "напиток",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "натуральная",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "натуральное",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "натуральный",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "негаз",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "негазированный",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "новая",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "новинка",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "новое",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "новый",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "от",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "отборная",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "отборное",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "отборный",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "пак",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "пакет",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "пастер",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "пастеризованный",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "пачка",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "пер",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "пет",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "питание",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "питанием",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "питания",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "питьевая",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "питьевое",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "питьевой",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "по",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "подземные",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "подземный",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "подземных",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "при",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "природная",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "природное",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "природный",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "продукт",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "продукты",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "пэт",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "ржан",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "ржаной",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "ржаные",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "рос",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "рул",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "рулон",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "рулоне",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "рф",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "со",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "сорт",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "сорта",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "сортов",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "среднегазированный",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "стак",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "стакан",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "стек",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "стерилизованный",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "сух",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "сухарик",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "сухарики",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "сухариков",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "тат",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "татар",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "татарстан",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "термо",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "термоусадка",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "товар",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "удм",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "удмурт",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "ультрапастер",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "упак",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "упаковка",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "хит",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "шт",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "ящик",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "ящике",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "ящики",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    }
+  ]
+}

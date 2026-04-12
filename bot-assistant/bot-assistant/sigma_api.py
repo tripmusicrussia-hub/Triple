@@ -6,9 +6,12 @@ import json
 import os
 import re
 import math
+import time
 import logging
 from typing import Optional
 from urllib.parse import quote
+
+import wiki_store
 
 logger = logging.getLogger(__name__)
 
@@ -17,60 +20,282 @@ SIGMA_PASSWORD = os.getenv("SIGMA_PASSWORD", "")
 SIGMA_AUTH_HEADER = "Basic cWFzbGFwcDpteVNlY3JldE9BdXRoU2VjcmV0"
 BASE_URL = "https://api-s07.sigma.ru"
 
-# Кэш товаров на уровне модуля
+# Кэш товаров на уровне модуля (legacy — используется только диагностикой и
+# как самый последний fallback в find_product). Источник истины — живые запросы
+# в Sigma API через _sigma_search.
 _products_cache = []
 _cache_loaded = False
+
+# Memo для повторных запросов к /products/simple в рамках одного процесса.
+# Накладные часто содержат много товаров одного бренда — single-word search
+# по «зеленое» используется десятки раз, и без memo это десятки сетевых вызовов.
+# query → (timestamp, [products])
+_search_memo: dict = {}
+_SEARCH_MEMO_TTL = 300  # 5 минут — короче, чем сессия редактирования накладной
 
 LOW_MARGIN_KEYWORDS = [
     "хлеб", "булка", "батон", "лаваш", "пита", "багет", "буханка",
     "молоко", "молоке", "молока",
 ]
 
-# Словарь аббревиатур — расшифровки для поиска в Sigma
-ABBREVIATIONS = {
-    "овк": "очень важная корова",
-    "овс": "очень важная свинка",
-    "мп": "молочный переулок",
-    "коктейль топтыжка": "молочный коктейль топтыжка",
-    "сгущ.карламан": "сгущ.карламан",
-    "сгущ карламан": "сгущ.карламан",
-}
+# Словари аббревиатур и замен — загружаются из wiki/ (с fallback на хардкод).
+# Ленивая инициализация: при первом обращении читаем wiki_store.
+_abbreviations_cache = None
+_name_fixes_cache = None
 
-# Замены для конкретных несовпадений между накладной и Sigma
-PRODUCT_NAME_FIXES = {
-    "карламан какао 7,5": "карламан какао 7",
-    "карламан какао 7.5": "карламан какао 7",
-    "вас. счас.": "васькино счастье",
-    "вас счас": "васькино счастье",
-}
+def _get_abbreviations() -> dict:
+    global _abbreviations_cache
+    if _abbreviations_cache is None:
+        _abbreviations_cache = wiki_store.get_abbreviations()
+    return _abbreviations_cache
 
-# Словарь для определения категории по ключевым словам
-CATEGORY_KEYWORDS = {
-    "МОЛОЧКА": ["молоко", "сметана", "кефир", "ряженка", "йогурт", "творог", "масло слив", "сливки", "простокваша", "варенец", "коктейль молоч", "топтыжка", "овк", "очень важная", "васькино", "деревенский"],
-    "БАКАЛЕЯ": ["крупа", "рис", "гречка", "макарон", "мука", "сахар", "соль", "масло раст", "уксус", "соус", "майонез", "кетчуп"],
-    "КОНСЕРВЫ": ["сгущ", "тушен", "консерв", "рыбн", "горошек", "кукуруза", "фасоль"],
-    "ВЫПЕЧКА": ["хлеб", "батон", "булка", "лаваш", "багет", "пита", "лепешка"],
-    "ЗАМОРОЗКА": ["замороженн", "пельмен", "вареник", "котлет заморож"],
-    "СЛАДОСТИ": ["конфет", "шоколад", "печенье", "вафл", "торт", "пряник", "зефир", "мармелад", "халва"],
-    "МЯСО, КОЛБАСА": ["колбас", "сосиск", "сардельк", "ветчин", "окорок", "бекон", "мясо", "курин", "свинин", "говядин"],
-    "СОКИ, ВОДА": ["сок", "вода", "нектар", "морс", "компот", "лимонад", "квас"],
-    "СЕМЕЧКИ, ЧИПСЫ, СУХ": ["семечк", "чипс", "сухар", "снек", "орех", "попкорн"],
-    "МАЙОНЕЗЫ, СОУСЫ, КЕ": ["майонез", "кетчуп", "соус", "горчиц", "хрен"],
-    "МАСЛА": ["масло раст", "масло олив", "масло подсолн"],
-    "КРУПЫ": ["крупа", "рис", "гречк", "перловк", "пшен", "овсян", "манн"],
-    "МАКАРОНЫ": ["макарон", "спагетт", "вермишел", "лапш"],
-    "МУКА": ["мука", "крахмал", "дрожж"],
-    "ПРИПРАВЫ И СПЕЦИИ": ["специ", "приправ", "перец молот", "лавров", "куркум", "паприк"],
-    "ФРУКТЫ, ОВОЩИ": ["яблок", "груш", "банан", "апельсин", "морковь", "картофел", "помидор", "огурец", "капуст"],
-    "ЧАЙ, КОФЕ": ["чай", "кофе", "какао", "цикори"],
-    "БЫТОВАЯ ХИМИЯ": ["шампун", "гель", "мыло", "порошок", "средство", "дезодорант", "зубная"],
-}
+def _get_name_fixes() -> dict:
+    global _name_fixes_cache
+    if _name_fixes_cache is None:
+        _name_fixes_cache = wiki_store.get_name_fixes()
+    return _name_fixes_cache
+
+
+def _normalize_for_match(s: str) -> str:
+    """Нормализация для поиска в каталоге: убирает шум, который ломает поиск,
+    но сохраняет бренд + фасовку + жирность."""
+    s = s.lower()
+    # ё → е: каталог и накладные используют оба, стем не должен ломаться
+    s = s.replace('ё', 'е')
+    s = expand_abbreviations(s)
+    for old, new in _get_name_fixes().items():
+        s = s.replace(old, new)
+    # Стрипаем кавычки — "Красный Ключ" vs Красный Ключ ломает токенизацию
+    s = re.sub(r'["«»\u2018\u2019\u201c\u201d`]', ' ', s)
+    # Нормализуем "гр" → "г" (180гр / 180 гр → 180г)
+    s = re.sub(r'(\d+(?:[.,]\d+)?)\s*гр(?![а-яё])', r'\1г', s)
+    # Стрипаем box-count после единицы: "40г/60" → "40г", "45г/24" → "45г"
+    s = re.sub(r'(\d+(?:[.,]\d+)?\s*(?:г|кг|мл|л|шт))\s*/\s*\d+', r'\1', s)
+    # Стрипаем "1/12", "1/6" (фасовка коробки без единицы)
+    s = re.sub(r'\b\d+/\d+\b', ' ', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+
+# Стоп-слова — загружаются из wiki/ (с fallback на хардкод).
+_stopwords_cache = None
+
+def _get_stopwords() -> set:
+    global _stopwords_cache
+    if _stopwords_cache is None:
+        _stopwords_cache = wiki_store.get_stopwords()
+    return _stopwords_cache
+
+
+_NUM_UNIT_TOKEN = re.compile(r'^\d+(?:[.,]\d+)?[а-яёa-z]*$')
+_TOKEN_SPLIT = re.compile(r'[\s,./\\%\-"«»()+*;:!?]+')
+
+
+def _pick_search_words(name_norm: str, n: int = 2) -> list:
+    """Выбрать до n самых отличительных слов для подстрочного поиска в Sigma.
+    Отличительное = длинное (>=3), не из стоп-листа, не число/число-с-единицей."""
+    cands = []
+    seen = set()
+    for w in _TOKEN_SPLIT.split(name_norm):
+        w = w.strip()
+        if not w or len(w) < 3:
+            continue
+        if w in _get_stopwords():
+            continue
+        if _NUM_UNIT_TOKEN.match(w):
+            continue
+        if w in seen:
+            continue
+        seen.add(w)
+        cands.append(w)
+    # Сортируем по длине убыв — длинные слова обычно отличительные (бренд/вкус)
+    cands.sort(key=len, reverse=True)
+    return cands[:n]
+
+
+def _extract_attrs(name_norm: str) -> dict:
+    """Достаёт жёсткие атрибуты и отличительные токены из нормализованного имени."""
+    # Проценты жирности (3.2%, 20%, 4%)
+    pcts = {m.replace(',', '.') for m in re.findall(r'(\d+(?:[.,]\d+)?)\s*%', name_norm)}
+    # Числа с единицами: 0.5л, 930г, 180г, 45г, 30шт
+    measures = set()
+    for num, unit in re.findall(r'(\d+(?:[.,]\d+)?)\s*(кг|мл|л|г|шт)(?![а-яёa-z])', name_norm):
+        measures.add((num.replace(',', '.'), unit))
+    # Отличительные токены для скоринга
+    tokens = []
+    for w in _TOKEN_SPLIT.split(name_norm):
+        w = w.strip()
+        if not w or len(w) < 3:
+            continue
+        if w in _get_stopwords():
+            continue
+        if _NUM_UNIT_TOKEN.match(w):
+            continue
+        tokens.append(w)
+    return {"pcts": pcts, "measures": measures, "tokens": tokens}
+
+
+def _measures_compatible(q_measures: set, p_measures: set) -> bool:
+    """Каждая мера из запроса должна найтись в кандидате (с учётом альт. единиц).
+    Если запрос без мер — ок. Если кандидат без мер — тоже ок (товар обобщённый)."""
+    if not q_measures:
+        return True
+    if not p_measures:
+        return True
+    for num, unit in q_measures:
+        if (num, unit) in p_measures:
+            continue
+        alt = None
+        try:
+            f = float(num)
+            if unit == "л":
+                alt = (f"{f*1000:g}", "мл")
+            elif unit == "мл":
+                alt = (f"{f/1000:g}", "л")
+            elif unit == "кг":
+                alt = (f"{f*1000:g}", "г")
+            elif unit == "г" and f >= 1000:
+                alt = (f"{f/1000:g}", "кг")
+        except ValueError:
+            pass
+        if alt and alt in p_measures:
+            continue
+        return False
+    return True
+
+
+def _pcts_compatible(q_pcts: set, p_pcts: set) -> bool:
+    """Если в запросе есть %, в кандидате должен быть тот же %.
+    Если запрос без % — ок (товар не молочный)."""
+    if not q_pcts:
+        return True
+    if not p_pcts:
+        return False
+    return q_pcts == p_pcts
+
+
+def _token_stem(t: str) -> str:
+    """Стем для substring-матчинга: первые 5 букв с обрезкой типичных русских
+    падежных окончаний (а/я) на границе стема — фикс для генитива:
+    «лайма» → «лайм», «мандарина» → «манд», «зеленое» → «зелен»."""
+    if len(t) < 4:
+        return t
+    stem = t[:5] if len(t) >= 5 else t
+    if len(stem) == 5 and stem[-1] in "аяо":
+        stem = stem[:-1]
+    return stem
+
+
+def _pick_best_candidate(query: str, candidates: list) -> Optional[dict]:
+    """Выбрать лучший товар из списка кандидатов по атрибутному фильтру + токен-скорингу.
+    Шаги (повторяют ручной workflow в Sigma):
+      1. Фильтр по жёстким атрибутам: % жирности + числа с единицами
+      2. Фильтр по ratio совпавших значимых токенов: ≥ 50% должны найтись
+      3. Скоринг: (число совпавших токенов, бонус за меру, длина совпавшего текста)
+      4. Tie-reject: если лидер равен runner-up по всем метрикам — возвращаем None
+    """
+    if not candidates:
+        return None
+    q_norm = _normalize_for_match(query)
+    q = _extract_attrs(q_norm)
+    q_pcts = q["pcts"]
+    q_measures = q["measures"]
+    q_tokens = q["tokens"]
+
+    if not q_tokens and not q_measures and not q_pcts:
+        return None
+
+    # Стемы для нечувствительности к падежам: «бекона» → «бекон», «сметаны» → «смета»
+    q_stems = [_token_stem(t) for t in q_tokens]
+    # Значимые стемы: те, чей исходный токен был ≥ 5 букв (бренд/тип/вкус)
+    sig_stems = [s for s, t in zip(q_stems, q_tokens) if len(t) >= 5]
+    # СТРОГИЙ порог: ВСЕ значимые стемы должны найтись в кандидате.
+    # Бухгалтерский принцип — лучше «не нашли, создаём» чем «подобрали похожее».
+    # Это отсеивает «Сметана СЕЛО ЗЕЛЕНОЕ → НЫТВЕН СМЕТАНА» (зелен не попало),
+    # «СФАД ЧЁРНЫЙ → СФАД БЕЛЫЙ» (чёрны не попало) и т.п.
+    min_sig_matches = len(sig_stems) if sig_stems else 0
+
+    # Для measure_bonus: «0.5» как substring в имени кандидата
+    q_measure_nums = {num for num, _ in q_measures}
+
+    # Категориальная защита: первый значимый стем (молок/кефир/смета/чипсы/...)
+    # должен встретиться в кандидате. Иначе мы подменяем категорию — для
+    # бухгалтера это означает «такого товара нет, надо создавать новый», а не
+    # «возьмём похожий другой категории по тем же атрибутам».
+    category_stem = q_stems[0] if q_stems else None
+
+    filtered = []
+    for product in candidates:
+        p_raw = product.get("name", "")
+        if not p_raw:
+            continue
+        p_norm = _normalize_for_match(p_raw)
+        p_attrs = _extract_attrs(p_norm)
+        if category_stem and category_stem not in p_norm:
+            continue
+        if not _pcts_compatible(q_pcts, p_attrs["pcts"]):
+            continue
+        if not _measures_compatible(q_measures, p_attrs["measures"]):
+            continue
+        # Сколько значимых стемов нашлось в кандидате?
+        if sig_stems:
+            sig_hits = sum(1 for s in sig_stems if s in p_norm)
+            if sig_hits < min_sig_matches:
+                continue
+        filtered.append((product, p_norm, p_attrs))
+
+    if not filtered:
+        return None
+
+    scored = []
+    for product, p_norm, p_attrs in filtered:
+        matched = [s for s in q_stems if s in p_norm]
+        score = len(matched)
+        matched_len = sum(len(s) for s in matched)
+        # Бонус за буквальное совпадение числа меры в имени кандидата
+        # («0.5» в «красный ключ мохито 0.5л» → +1; отсеивает мохитос без объёма)
+        measure_bonus = sum(1 for num in q_measure_nums if num in p_norm)
+        scored.append({
+            "product": product,
+            "p_name": product.get("name", ""),
+            "score": score,
+            "measure_bonus": measure_bonus,
+            "matched_len": matched_len,
+        })
+    scored.sort(key=lambda s: (-s["score"], -s["measure_bonus"], -s["matched_len"]))
+
+    best = scored[0]
+    # Требуем хотя бы 1 совпавший токен
+    if q_tokens and best["score"] == 0:
+        return None
+    # Tie-reject: лидер полностью равен runner-up по (score, bonus, matched_len)
+    if len(scored) > 1:
+        second = scored[1]
+        if (best["score"] == second["score"]
+                and best["measure_bonus"] == second["measure_bonus"]
+                and best["matched_len"] == second["matched_len"]):
+            logger.info(
+                f"Ambiguous match '{query[:40]}': "
+                f"{best['p_name'][:35]} vs {second['p_name'][:35]}"
+            )
+            return None
+
+    return best["product"]
+
+# Категории — загружаются из wiki/ (с fallback на хардкод).
+_categories_cache = None
+
+def _get_categories() -> dict:
+    global _categories_cache
+    if _categories_cache is None:
+        _categories_cache = wiki_store.get_categories()
+    return _categories_cache
 
 
 def detect_category(name: str) -> str:
     """Определить категорию товара по названию"""
     name_lower = name.lower()
-    for category, keywords in CATEGORY_KEYWORDS.items():
+    for category, keywords in _get_categories().items():
         for kw in keywords:
             if kw in name_lower:
                 return category
@@ -80,7 +305,7 @@ def detect_category(name: str) -> str:
 def expand_abbreviations(name: str) -> str:
     """Заменяем аббревиатуры на полные названия для лучшего поиска"""
     name_lower = name.lower()
-    for abbr, full in ABBREVIATIONS.items():
+    for abbr, full in _get_abbreviations().items():
         # Заменяем аббревиатуру — ищем как отдельное слово (кириллица не поддерживает \b)
         name_lower = re.sub(r'(?<![а-яёa-z])' + abbr + r'(?![а-яёa-z])', full, name_lower)
     return name_lower
@@ -284,7 +509,7 @@ class SigmaAPI:
                     f"{BASE_URL}/rest/v4/products/simple",
                     headers=self._headers(),
                     params={"page": 0},
-                    json={"storehouseId": self.storehouse_id, "isProduced": None, "waybillId": None}
+                    json={"storehouseId": None, "isProduced": None, "waybillId": None}
                 )
                 if r.status_code == 200:
                     total_in_sigma = r.json().get("productsInfo", {}).get("totalElements", 0)
@@ -311,7 +536,7 @@ class SigmaAPI:
                     f"{BASE_URL}/rest/v4/products/simple",
                     headers=self._headers(),
                     params={"page": page},
-                    json={"storehouseId": self.storehouse_id, "isProduced": None, "waybillId": None}
+                    json={"storehouseId": None, "isProduced": None, "waybillId": None}
                 )
                 if r.status_code != 200:
                     logger.error(f"load_all_products page {page}: {r.status_code}")
@@ -333,118 +558,134 @@ class SigmaAPI:
         return total
 
     def find_product_in_cache(self, name: str, cache: list = None) -> Optional[dict]:
-        """Нечёткий поиск товара в кэше по словам"""
+        """Матчинг товара по заданному списку кандидатов (или по полному кэшу)."""
         if cache is None:
             cache = _products_cache
         if not cache:
             return None
+        match = _pick_best_candidate(name, cache)
+        if match:
+            logger.info(f"Cache hit: '{name[:30]}' → '{match.get('name', '')[:40]}'")
+        return match
 
-        name_lower = expand_abbreviations(name.lower())
-        for old, new in PRODUCT_NAME_FIXES.items():
-            name_lower = name_lower.replace(old, new)
-        name_lower = re.sub(r'(\d+)гр\b', r'\1г', name_lower)
-        name_lower = re.sub(r'\b\d+/\d+\b', '', name_lower)
-
-        # Числа >= 20 из запроса — обязательны
-        numbers = set(n.replace(',', '.') for n in re.findall(r'\d+(?:[.,]\d+)?', name_lower))
-        numbers = {n for n in numbers if float(n) >= 20}
-
-        # Процент жирности (3.2%, 9%, 15% и т.д.) — обязателен для точного совпадения
-        # Если и в запросе, и в товаре Sigma указан %, они должны совпадать
-        query_pcts = {m.replace(',', '.') for m in re.findall(r'(\d+(?:[.,]\d+)?)\s*%', name_lower)}
-
-        # Слова для нечёткого поиска
-        tokens = [w for w in re.split(r'[\s,./\\%\-]+', name_lower) if len(w) >= 3 and not re.match(r'^\d+$', w)]
-
-        if not tokens and not numbers:
-            return None
-
-        best_match = None
-        best_score = 0
-
-        for product in cache:
-            p_name = expand_abbreviations(product.get("name", "").lower())
-            p_numbers = set(n.replace(',', '.') for n in re.findall(r'\d+(?:[.,]\d+)?', p_name))
-            p_pcts = {m.replace(',', '.') for m in re.findall(r'(\d+(?:[.,]\d+)?)\s*%', p_name)}
-            p_tokens = [w for w in re.split(r'[\s,./\\%\-]+', p_name) if len(w) >= 3 and not re.match(r'^\d+$', w)]
-
-            # Каждое обязательное число должно быть в товаре
-            num_mismatch = False
-            for num in numbers:
-                if num not in p_numbers:
-                    num_mismatch = True
-                    break
-            if num_mismatch:
-                continue
-
-            # Если в запросе указан % жирности И в товаре тоже — они должны совпадать
-            # Предотвращает матч Молоко 3.2% → Молоко 2.5%, Сметана 15% → Сметана 20% и т.д.
-            if query_pcts and p_pcts and query_pcts != p_pcts:
-                continue
-
-            # Если в запросе есть % — не матчиться к товарам без % (снеки, чипсы со вкусом)
-            if query_pcts and not p_pcts:
-                continue
-
-            # Если запрос специфичный (> 1 токена) — проверяем что товар Sigma тоже "вписывается"
-            # Предотвращает матч "Сметана ОВК 20% 180г" → "Сметана КАРЛАМАН 20% 180г"
-            if len(tokens) > 1 and p_tokens:
-                p_reverse = sum(1 for pt in p_tokens if pt in name_lower) / len(p_tokens)
-                if p_reverse < 0.35:
-                    continue
-
-            matched = sum(1 for t in tokens if t in p_name)
-            score = sum(len(t) for t in tokens if t in p_name)
-            if matched > 0:
-                ratio = matched / len(tokens) if tokens else 1
-                if ratio >= 0.35 and score > best_score:
-                    best_score = score
-                    best_match = product
-
-        if best_match:
-            logger.info(f"Cache hit: '{name[:30]}' → '{best_match.get('name', '')[:40]}'")
-        else:
-            logger.info(f"Cache miss: '{name[:30]}' | required={numbers} | pct={query_pcts} | tokens={tokens[:4]}")
-        return best_match
-
-
-    async def find_product(self, name: str) -> Optional[dict]:
-        """Поиск товара в Sigma.
-        Основной путь: API-поиск по ключевым словам (как вручную в строке поиска Sigma).
-        Запасной: кэш всех товаров (если API ничего не вернул).
-        """
-        # ── 1. API-поиск по ключевым словам ──────────────────────────────────
-        # Берём производителя + тип товара из названия → Sigma возвращает 3-10 результатов
-        name_expanded = expand_abbreviations(name.lower())
-        for old, new in PRODUCT_NAME_FIXES.items():
-            name_expanded = name_expanded.replace(old, new)
-        words = [w for w in re.split(r'[\s,./\\%\-]+', name_expanded)
-                 if len(w) >= 3 and not re.match(r'^\d+$', w)]
-        if words:
-            search_query = ' '.join(words[:3])[:30]
+    async def _sigma_search(self, query: str, limit: int = 200) -> list:
+        """Одиночный запрос к /rest/v4/products/simple с {name: query}.
+        Возвращает список товаров (content). Memo на 5 минут — повторные
+        single-word запросы (того же бренда) идут из памяти, не в сеть."""
+        now = time.time()
+        cached = _search_memo.get(query)
+        if cached and now - cached[0] < _SEARCH_MEMO_TTL:
+            return cached[1]
+        try:
             async with httpx.AsyncClient(timeout=15) as client:
                 r = await client.post(
                     f"{BASE_URL}/rest/v4/products/simple",
                     headers=self._headers(),
-                    params={"page": 0},
-                    json={"name": search_query, "storehouseId": None, "isProduced": None, "waybillId": None}
+                    params={"page": 0, "size": limit},
+                    json={"name": query, "storehouseId": None, "isProduced": None, "waybillId": None},
                 )
-                logger.info(f"API search '{search_query}': {r.status_code}")
-                if r.status_code == 200:
-                    content = r.json().get("productsInfo", {}).get("content", [])
-                    if content:
-                        match = self.find_product_in_cache(name, cache=content)
-                        if match:
-                            logger.info(f"Found via API search: '{match.get('name', '')[:40]}'")
-                            return match
+                if r.status_code != 200:
+                    logger.warning(f"Sigma search '{query}': {r.status_code}")
+                    return []
+                results = r.json().get("productsInfo", {}).get("content", [])
+                _search_memo[query] = (now, results)
+                return results
+        except Exception as e:
+            logger.error(f"Sigma search '{query}' failed: {e}")
+            return []
 
-        # ── 2. Кэш как запасной путь ─────────────────────────────────────────
-        if _cache_loaded:
-            cached = self.find_product_in_cache(name)
+    @staticmethod
+    def _two_words_in_query_order(q_norm: str, words: list) -> Optional[list]:
+        """Возвращает первые 2 слова из words в том порядке, в котором они
+        встречаются в q_norm — для substring-search Sigma порядок имеет значение."""
+        if len(words) < 2:
+            return None
+        positions = []
+        for w in words[:2]:
+            pos = q_norm.find(w)
+            if pos < 0:
+                return None
+            positions.append((pos, w))
+        positions.sort()
+        return [w for _, w in positions]
+
+    async def find_product(self, name: str) -> Optional[dict]:
+        """API-first поиск товара в Sigma. Каталог в Sigma живой — пользователь
+        добавляет/удаляет товары, статичный кэш всегда устаревает (мы только что
+        видели: 6 МОЛОКО СЕЛО ЗЕЛЕНОЕ в UI vs 1 в нашем кэше). Поэтому источник
+        истины — живые запросы в /products/simple.
+
+        Стратегия — повторяет ручной workflow в Sigma UI:
+          0. Wiki lookup — если есть выученный маппинг с confidence >= 0.8,
+             используем его напрямую (skip API search).
+          1. Single-word search по 1-2 самым отличительным словам (длинные не-стоп-
+             слова: бренд/категория). Single-word — самый надёжный, потому что
+             substring-search Sigma не страдает от перестановок порядка слов.
+          2. Если 2 слова — добавляем joined-запрос в правильном порядке (как они
+             идут в исходном названии) — для редких случаев, когда single-word
+             даёт слишком много результатов.
+          3. Aggregate dedup → _pick_best_candidate (фильтр по атрибутам +
+             категориальная защита + токен-скоринг).
+          4. Финальный fallback — устаревший _products_cache, если вдруг
+             загружен (только для оффлайн-диагностики).
+        """
+        # Этап 0: wiki lookup — выученные маппинги из коррекций
+        q_key = name.lower().strip()
+        mappings = wiki_store.get_product_mappings()
+        mapping = mappings.get(q_key)
+        if mapping and mapping.get("confidence", 0) >= 0.8:
+            sigma_name = mapping.get("sigma_name", "")
+            sigma_id = mapping.get("sigma_id")
+            if sigma_id:
+                logger.info(f"Wiki hit: '{name[:30]}' → '{sigma_name[:40]}' (conf={mapping['confidence']:.2f})")
+                return {"id": sigma_id, "name": sigma_name}
+
+        q_norm = _normalize_for_match(name)
+        search_words = _pick_search_words(q_norm, n=2)
+        if not search_words:
+            logger.info(f"find_product '{name[:40]}': no distinctive words")
+            return None
+
+        logger.info(f"find_product '{name[:40]}' → search_words={search_words}")
+
+        candidates = []
+        seen_ids = set()
+
+        def _add(items):
+            for p in items:
+                pid = p.get("id") or p.get("name")
+                if pid in seen_ids:
+                    continue
+                seen_ids.add(pid)
+                candidates.append(p)
+
+        # Этап 1: каждое слово отдельно — независимо от порядка
+        for word in search_words:
+            _add(await self._sigma_search(word, limit=200))
+
+        # Этап 2: 2-словный запрос в правильном порядке (на случай редкого хвоста)
+        if len(search_words) >= 2:
+            ordered = self._two_words_in_query_order(q_norm, search_words)
+            if ordered:
+                _add(await self._sigma_search(" ".join(ordered), limit=200))
+
+        if candidates:
+            match = _pick_best_candidate(name, candidates)
+            if match:
+                logger.info(
+                    f"API match: '{name[:30]}' → '{match.get('name', '')[:45]}' "
+                    f"(из {len(candidates)} кандидатов)"
+                )
+                return match
+
+        # Финальный fallback — старый кэш (если оффлайн-диагностика загрузила)
+        if _cache_loaded and _products_cache:
+            cached = _pick_best_candidate(name, _products_cache)
             if cached:
-                logger.info(f"Found in cache: '{cached.get('name', '')[:40]}'")
+                logger.info(f"Cache fallback: '{name[:30]}' → '{cached.get('name', '')[:40]}'")
                 return cached
 
+        logger.info(f"Product not found: '{name[:40]}'")
         return None
 
     async def create_product(self, name: str, buy_price: float, sell_price: float) -> Optional[dict]:
@@ -642,6 +883,22 @@ class SigmaAPI:
                     skipped.append(item["name"])
                     continue
                 logger.info(f"Created new product: {item['name']}")
+            else:
+                # Имплицитное обучение: записываем маппинг OCR→Sigma в wiki.
+                # Если имена отличаются существенно — это ценный сигнал для будущих матчей.
+                ocr_name = item["name"]
+                sigma_name = product.get("name", "")
+                if ocr_name and sigma_name and ocr_name.lower().strip() != sigma_name.lower().strip():
+                    try:
+                        wiki_store.record_correction(
+                            ocr_name=ocr_name,
+                            sigma_name=sigma_name,
+                            sigma_id=product.get("id"),
+                            confidence=0.7,
+                            source="auto_match",
+                        )
+                    except Exception as e:
+                        logger.warning(f"wiki record_correction failed: {e}")
             markup = get_markup(item["name"])
             sell_price = calc_price(item["price"], markup)
             success = await self.add_product_to_income(
@@ -655,6 +912,12 @@ class SigmaAPI:
                 added += 1
             else:
                 skipped.append(item["name"])
+
+        # Flush wiki corrections after processing the whole invoice (natural batch boundary)
+        try:
+            wiki_store.flush_pending()
+        except Exception as e:
+            logger.warning(f"wiki flush_pending failed: {e}")
 
         return {
             "ok": True,

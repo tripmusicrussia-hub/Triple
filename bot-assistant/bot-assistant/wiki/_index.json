@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "last_updated": "2026-04-12T18:55:06Z",
+  "topics": {
+    "abbreviations": {
+      "path": "abbreviations.json",
+      "description": "OCR abbreviation expansions",
+      "entry_count": 6,
+      "updated": "2026-04-12T18:55:06Z"
+    },
+    "name_fixes": {
+      "path": "name_fixes.json",
+      "description": "Exact string replacements for invoice→Sigma name mismatches",
+      "entry_count": 5,
+      "updated": "2026-04-12T18:55:06Z"
+    },
+    "stopwords": {
+      "path": "stopwords.json",
+      "description": "Words to ignore during Sigma product search",
+      "entry_count": 125,
+      "updated": "2026-04-12T18:55:06Z"
+    },
+    "categories": {
+      "path": "categories.json",
+      "description": "Keyword→category mappings for new product creation",
+      "entry_count": 18,
+      "updated": "2026-04-12T18:55:06Z"
+    },
+    "product_mappings": {
+      "path": "product_mappings.json",
+      "description": "Learned OCR→Sigma product mappings from corrections",
+      "entry_count": 0,
+      "updated": "2026-04-12T18:55:06Z"
+    }
+  }
+}

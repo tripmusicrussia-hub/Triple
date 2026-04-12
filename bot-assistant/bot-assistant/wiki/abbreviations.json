@@ -1,0 +1,47 @@
+{
+  "topic": "abbreviations",
+  "entries": [
+    {
+      "key": "овк",
+      "value": "очень важная корова",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "овс",
+      "value": "очень важная свинка",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "мп",
+      "value": "молочный переулок",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "коктейль топтыжка",
+      "value": "молочный коктейль топтыжка",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "сгущ.карламан",
+      "value": "сгущ.карламан",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "сгущ карламан",
+      "value": "сгущ.карламан",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    }
+  ]
+}

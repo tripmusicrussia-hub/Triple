@@ -895,7 +895,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Что исправить?\n{item['name'][:50]}\nКол-во: {item['qty']} шт | Цена: {item['price']} р.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("Кол-во", callback_data=f"inv_qty_{idx}"),
-                 InlineKeyboardButton("Цену", callback_data=f"inv_price_{idx}")]
+                 InlineKeyboardButton("Цену", callback_data=f"inv_price_{idx}")],
+                [InlineKeyboardButton("Название", callback_data=f"inv_name_{idx}")],
             ])
         )
         return
@@ -919,6 +920,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         editing_qty[user_id] = ("price", idx)
         await query.message.edit_text(
             f"Введи новую цену для:\n{item['name'][:50]}\nСейчас: {item['price']} р."
+        )
+        return
+
+    if data.startswith("inv_name_"):
+        if user_id != ADMIN_ID: return
+        idx = int(data.split("_")[2])
+        if user_id not in pending_invoices: return
+        item = pending_invoices[user_id]["items"][idx]
+        editing_qty[user_id] = ("name", idx)
+        await query.message.edit_text(
+            f"Введи новое название для:\n{item['name'][:80]}\n\n"
+            f"Бот пересчитает матч в Sigma и запомнит коррекцию."
         )
         return
 
@@ -1354,13 +1367,58 @@ async def handle_assistant(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
     if not text.strip() or text.startswith("/"): return
 
-    # Редактирование количества или цены товара в накладной
+    # Редактирование количества, цены или названия товара в накладной
     if user_id in editing_qty and user_id in pending_invoices:
+        field, idx = editing_qty[user_id]
+        invoice = pending_invoices[user_id]
+        if field == "name":
+            new_name = text.strip()
+            if not new_name:
+                await update.message.reply_text("Название не может быть пустым")
+                return
+            editing_qty.pop(user_id, None)
+            old_name = invoice["items"][idx]["name"]
+            invoice["items"][idx]["name"] = new_name
+            # Перепоиск в Sigma и запись корректировки в wiki
+            try:
+                api = _sigma_instance
+                if not api.token:
+                    await api.login()
+                product = await api.find_product(new_name)
+                if product:
+                    sigma_name = product.get("name", "")
+                    sigma_id = product.get("id")
+                    # Записываем две коррекции: old_name → sigma_name (пользователь подтвердил)
+                    # и new_name → sigma_name (чтобы в следующий раз отрабатывало имплицитно)
+                    try:
+                        sigma_api.wiki_store.record_correction(
+                            ocr_name=old_name, sigma_name=sigma_name,
+                            sigma_id=sigma_id, confidence=0.9, source="user_correction",
+                        )
+                        sigma_api.wiki_store.record_correction(
+                            ocr_name=new_name, sigma_name=sigma_name,
+                            sigma_id=sigma_id, confidence=0.9, source="user_correction",
+                        )
+                        sigma_api.wiki_store.flush_pending()
+                    except Exception as e:
+                        logger.warning(f"wiki correction failed: {e}")
+                    await update.message.reply_text(
+                        f"✅ Найдено в Sigma: {sigma_name[:60]}\nКоррекция сохранена в wiki."
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"⚠️ В Sigma не найдено: '{new_name[:50]}'\n"
+                        f"При загрузке накладной будет создан новый товар."
+                    )
+            except Exception as e:
+                await update.message.reply_text(f"Ошибка поиска в Sigma: {str(e)[:100]}")
+            text_summary = format_invoice_final(invoice["supplier"], invoice["items"])
+            await update.message.reply_text(text_summary, reply_markup=kb_invoice_edit(invoice["items"]))
+            return
         try:
             new_val = float(text.strip().replace(",", "."))
-            field, idx = editing_qty.pop(user_id)
-            pending_invoices[user_id]["items"][idx][field] = new_val
-            invoice = pending_invoices[user_id]
+            editing_qty.pop(user_id, None)
+            invoice["items"][idx][field] = new_val
             item_name = invoice["items"][idx]["name"][:35]
             label = "кол-во" if field == "qty" else "цена"
             await update.message.reply_text(f"✅ {item_name}\n{label} обновлено: {new_val}")
@@ -1395,6 +1453,67 @@ async def process_ai(user_id, text):
     if len(history) > 20:
         conversation_history[user_id] = history[-20:]
     return parsed.get("response", "Готово")
+
+async def cmd_wiki(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /wiki stats  — сколько записей в каждом топике
+    /wiki review — список невалидированных product_mappings
+    /wiki push   — commit + push wiki/ в git (персистентность на Render)
+    """
+    if not update.effective_user: return
+    if update.effective_user.id != ADMIN_ID: return
+    args = context.args or []
+    subcmd = args[0].lower() if args else "stats"
+    ws = sigma_api.wiki_store
+
+    if subcmd == "stats":
+        stats = ws.get_stats()
+        lines = ["📚 Wiki статистика\n"]
+        for name, count in stats["topics"].items():
+            lines.append(f"• {name}: {count}")
+        lines.append(f"\nPending (не сброшено): {stats['pending']}")
+        lines.append(f"Changelog записей: {stats['changelog_entries']}")
+        lines.append(f"Последнее обновление: {stats['last_updated']}")
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    if subcmd == "review":
+        items = ws.get_unverified_mappings(limit=20)
+        if not items:
+            await update.message.reply_text("Нет невалидированных маппингов.")
+            return
+        lines = ["⚠️ Невалидированные product_mappings:\n"]
+        for e in items:
+            v = e.get("value", {})
+            lines.append(
+                f"• {e['key'][:35]} → {v.get('sigma_name', '')[:35]}\n"
+                f"  conf={v.get('confidence', 0):.2f} use={v.get('use_count', 0)}"
+            )
+        await update.message.reply_text("\n".join(lines)[:4000])
+        return
+
+    if subcmd == "push":
+        import subprocess
+        try:
+            subprocess.run(["git", "add", "wiki/"], cwd=os.path.dirname(os.path.abspath(__file__)), check=True)
+            result = subprocess.run(
+                ["git", "commit", "-m", "wiki: update from bot corrections"],
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0 and "nothing to commit" in (result.stdout + result.stderr):
+                await update.message.reply_text("Нечего коммитить — wiki актуальна.")
+                return
+            subprocess.run(["git", "push"], cwd=os.path.dirname(os.path.abspath(__file__)), check=True)
+            await update.message.reply_text("✅ Wiki запушена в git.")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка push: {str(e)[:300]}")
+        return
+
+    await update.message.reply_text(
+        "Подкоманды: /wiki stats | /wiki review | /wiki push"
+    )
+
 
 async def cmd_my(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user: return
@@ -1512,6 +1631,7 @@ async def run_bot():
     app.add_handler(CommandHandler("giveaway", cmd_giveaway))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(CommandHandler("my", cmd_my))
+    app.add_handler(CommandHandler("wiki", cmd_wiki))
     app.add_handler(MessageHandler(filters.PHOTO, handle_invoice_photo))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_assistant))

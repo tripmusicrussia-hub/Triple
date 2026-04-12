@@ -1,0 +1,40 @@
+{
+  "topic": "name_fixes",
+  "entries": [
+    {
+      "key": "карламан какао 7,5",
+      "value": "карламан какао 7",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "карламан какао 7.5",
+      "value": "карламан какао 7",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "вас. счас.",
+      "value": "васькино счастье",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "вас счас",
+      "value": "васькино счастье",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    },
+    {
+      "key": "спред октябрьский",
+      "value": "масло крестьянское октябрьский",
+      "source": "hardcoded_migration",
+      "confidence": 1.0,
+      "added": "2026-04-12T18:55:06Z"
+    }
+  ]
+}
