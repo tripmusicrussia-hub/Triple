@@ -1246,13 +1246,42 @@ async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYP
 
         page_num = invoice_pages[user_id]["page_count"]
         total_so_far = len(invoice_pages[user_id]["items"])
-        lines = [f"📋 Лист {page_num} распознан! Товаров на листе: {len(items)}"]
+        lines = [f"📋 Лист {page_num} распознан! Товаров на листе: {len(items)}\n"]
         uncertain_indices = []
+        computed_total = 0.0
         for i, item in enumerate(items, 1):
             mark = "⚠️ " if item.get("uncertain") else ""
-            lines.append(f"{mark}{i}. {item['name'][:35]} — {item['qty']} шт")
+            try:
+                qty_f = float(item.get("qty") or 0)
+            except (TypeError, ValueError):
+                qty_f = 0.0
+            try:
+                price_f = float(item.get("price") or 0)
+            except (TypeError, ValueError):
+                price_f = 0.0
+            line_sum = qty_f * price_f
+            computed_total += line_sum
+            qty_disp = int(qty_f) if qty_f.is_integer() else qty_f
+            price_disp = f"{price_f:.2f}".rstrip("0").rstrip(".")
+            sum_disp = f"{line_sum:,.2f}".rstrip("0").rstrip(".").replace(",", " ")
+            lines.append(f"{mark}{i}. {item['name']}")
+            lines.append(f"   {qty_disp} × {price_disp} ₽ = {sum_disp} ₽")
             if item.get("uncertain"):
                 uncertain_indices.append(i)
+
+        # Итог по листу + сверка с напечатанным на накладной
+        printed = result.get("total_sum")
+        computed_disp = f"{round(computed_total, 2):,.2f}".rstrip("0").rstrip(".").replace(",", " ")
+        lines.append(f"\n💰 Итого по листу: {computed_disp} ₽")
+        if isinstance(printed, (int, float)) and printed > 0:
+            printed_disp = f"{float(printed):,.2f}".rstrip("0").rstrip(".").replace(",", " ")
+            delta = round(computed_total - float(printed), 2)
+            if abs(delta) <= 1.0:
+                lines.append(f"   В накладной:    {printed_disp} ₽ ✓")
+            else:
+                sign = "+" if delta > 0 else "−"
+                lines.append(f"   В накладной:    {printed_disp} ₽  ⚠️ расхождение {sign}{abs(delta):.2f} ₽")
+
         if total_so_far > len(items):
             lines.append(f"\nВсего накоплено: {total_so_far} товаров")
         # Предупреждение о неуверенных позициях
@@ -1262,17 +1291,6 @@ async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYP
                 f"\n⚠️ Проверь глазами позиции: {idx_str}\n"
                 f"   (в этих строках я не уверен — мог неправильно "
                 f"прочитать цену, количество или название)"
-            )
-        # Предупреждение о расхождении напечатанного и вычисленного итога
-        mismatch = result.get("total_mismatch")
-        if mismatch:
-            delta = mismatch["delta"]
-            sign = "больше" if delta > 0 else "меньше"
-            lines.append(
-                f"\n⚠️ Итог не сходится:\n"
-                f"   В накладной: {mismatch['printed']} ₽\n"
-                f"   Посчитал я: {mismatch['computed']} ₽ (на {abs(delta)} ₽ {sign})\n"
-                f"   Проверь позиции — возможно ошибка в одной из цен или количеств."
             )
         lines.append(
             f"\nЕщё листы есть? Если тишина {INVOICE_AUTOFINISH_SECONDS} сек — "
