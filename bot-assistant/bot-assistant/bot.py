@@ -1606,6 +1606,41 @@ async def reminder_scheduler(bot, admin_id):
             logger.error("Reminder error: " + str(e))
         await asyncio.sleep(60)
 
+async def wiki_autopush_scheduler():
+    """Раз в сутки в 04:00 флашит pending и пушит wiki/ в git.
+    Один редеплой Render в тихий час вместо постоянных пушей в течение дня."""
+    import subprocess
+    cwd = os.path.dirname(os.path.abspath(__file__))
+    while True:
+        try:
+            now = datetime.now()
+            target = now.replace(hour=4, minute=0, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+            await asyncio.sleep((target - now).total_seconds())
+
+            # 1) Сброс накопленных коррекций в product_mappings.json
+            try:
+                sigma_api.wiki_store.flush_pending()
+            except Exception as e:
+                logger.error("wiki autopush flush error: " + str(e))
+
+            # 2) git add wiki/ + commit + push
+            subprocess.run(["git", "add", "wiki/"], cwd=cwd, check=True)
+            result = subprocess.run(
+                ["git", "commit", "-m", "wiki: daily autopush"],
+                cwd=cwd, capture_output=True, text=True,
+            )
+            if result.returncode != 0 and "nothing to commit" in (result.stdout + result.stderr):
+                logger.info("wiki autopush: nothing to commit")
+                continue
+            subprocess.run(["git", "push"], cwd=cwd, check=True)
+            logger.info("wiki autopush: pushed to git")
+        except Exception as e:
+            logger.error("wiki autopush error: " + str(e))
+            await asyncio.sleep(3600)
+
+
 async def daily_report_scheduler(bot, admin_id):
     while True:
         try:
@@ -1642,6 +1677,7 @@ async def run_bot():
     await app.updater.start_polling(drop_pending_updates=True)
     asyncio.create_task(reminder_scheduler(app.bot, ADMIN_ID))
     asyncio.create_task(daily_report_scheduler(app.bot, ADMIN_ID))
+    asyncio.create_task(wiki_autopush_scheduler())
     await asyncio.Event().wait()
 
 
