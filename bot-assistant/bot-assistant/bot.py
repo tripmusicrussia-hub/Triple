@@ -368,6 +368,32 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🎛 Панель управления:", reply_markup=kb_admin())
 
 
+# ── /diag ─────────────────────────────────────────────────────
+
+async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    import os as _os
+    from collections import Counter as _Counter
+    path = beats_db.BEATS_FILE
+    exists = _os.path.exists(path)
+    size = _os.path.getsize(path) if exists else 0
+    cwd = _os.getcwd()
+    before = len(beats_db.BEATS_CACHE)
+    beats_db.load_beats()
+    after = len(beats_db.BEATS_CACHE)
+    types = dict(_Counter(b.get("content_type", "?") for b in beats_db.BEATS_CACHE))
+    msg = (
+        "🔧 Diag\n"
+        f"cwd: {cwd}\n"
+        f"BEATS_FILE: {path}\n"
+        f"exists: {exists}, size: {size} bytes\n"
+        f"BEATS_CACHE before/after reload: {before} → {after}\n"
+        f"types: {types}"
+    )
+    await update.message.reply_text(msg)
+
+
 # ── /search ───────────────────────────────────────────────────
 
 async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1682,6 +1708,7 @@ async def run_bot():
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("admin", cmd_admin))
+    app.add_handler(CommandHandler("diag", cmd_diag))
     app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("giveaway", cmd_giveaway))
     app.add_handler(CallbackQueryHandler(handle_callback))
