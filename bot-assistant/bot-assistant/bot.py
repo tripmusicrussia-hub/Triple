@@ -16,6 +16,8 @@ from config import BOT_TOKEN, CHANNEL_ID, CHANNEL_LINK, SAMPLE_PACK_PATH, SAMPLE
 import beats_db
 import assistant_ai
 import sigma_api
+import post_generator
+import uuid
 
 # Глобальный экземпляр SigmaAPI — кэш товаров сохраняется между накладными
 _sigma_instance = sigma_api.SigmaAPI()
@@ -40,6 +42,11 @@ batch_report_task = None  # текущий таймер отчёта
 beat_plays = {}
 beat_plays_users = {}
 giveaway = {"active": False, "prize_file": None, "prize_name": "", "end_time": None, "participants": {}}
+
+# Превью автопостов в канал: token → payload (rubric, kind, text, beat)
+# Живёт в RAM; если бот перезапустится до подтверждения — превью теряется (ок, сгенерится снова по таймеру)
+pending_posts: dict[str, dict] = {}
+CHANNEL_POST_HOUR = 16  # МСК
 
 ARTIST_TAGS = [
     "keyglock", "bossmandlow", "bossman", "obladaet", "nardowick",
@@ -236,7 +243,35 @@ def kb_admin():
          InlineKeyboardButton("🗑 Очистить", callback_data="admin_clearbeats")],
         [InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast")],
         [InlineKeyboardButton("🎵 Бит дня сейчас", callback_data="admin_beatofday")],
+        [InlineKeyboardButton("📡 Автопост в канал", callback_data="admin_channelpost")],
         [InlineKeyboardButton("🎁 Розыгрыш: " + ("🟢 Активен" if giveaway["active"] else "🔴 Нет"), callback_data="admin_giveaway")],
+    ])
+
+
+def kb_admin_channel():
+    dry = "🧪 DRY " if os.getenv("POST_DRY_RUN") == "1" else ""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"⚡ {dry}Сгенерить на сегодня", callback_data="admin_postnow_today")],
+        [InlineKeyboardButton("Пн Memphis Monday", callback_data="admin_postnow_0"),
+         InlineKeyboardButton("Пт Hard Friday", callback_data="admin_postnow_4")],
+        [InlineKeyboardButton("Вт Quick Tip", callback_data="admin_postnow_1"),
+         InlineKeyboardButton("Ср Hard Lifehack", callback_data="admin_postnow_2")],
+        [InlineKeyboardButton("Чт Studio Story", callback_data="admin_postnow_3"),
+         InlineKeyboardButton("Сб За кулисами", callback_data="admin_postnow_5")],
+        [InlineKeyboardButton("Вс Итог + вопрос", callback_data="admin_postnow_6")],
+        [InlineKeyboardButton("➕ Добавить тему в бэклог", callback_data="admin_idea_menu")],
+        [InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")],
+    ])
+
+
+def kb_admin_idea_day():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Вт Quick Tip", callback_data="admin_idea_1"),
+         InlineKeyboardButton("Ср Hard Lifehack", callback_data="admin_idea_2")],
+        [InlineKeyboardButton("Чт Studio Story", callback_data="admin_idea_3"),
+         InlineKeyboardButton("Сб За кулисами", callback_data="admin_idea_5")],
+        [InlineKeyboardButton("Вс Итог + вопрос", callback_data="admin_idea_6")],
+        [InlineKeyboardButton("◀️ Назад", callback_data="admin_channelpost")],
     ])
 
 def kb_admin_giveaway():
@@ -394,6 +429,83 @@ async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 
+# ── /postnow и /idea — автопостинг в канал ────────────────────
+
+RUBRIC_ALIASES = {
+    "пн": 0, "mon": 0, "0": 0,
+    "вт": 1, "tue": 1, "1": 1,
+    "ср": 2, "wed": 2, "2": 2,
+    "чт": 3, "thu": 3, "3": 3,
+    "пт": 4, "fri": 4, "4": 4,
+    "сб": 5, "sat": 5, "5": 5,
+    "вс": 6, "sun": 6, "6": 6,
+}
+
+
+async def cmd_postnow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сгенерировать preview автопоста сейчас. /postnow [день]. Только админ."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    weekday = None
+    if context.args:
+        arg = context.args[0].lower()
+        if arg in RUBRIC_ALIASES:
+            weekday = RUBRIC_ALIASES[arg]
+        else:
+            await update.message.reply_text("Рубрика: пн/вт/ср/чт/пт/сб/вс или 0-6")
+            return
+    await update.message.reply_text("⏳ Генерирую превью...")
+    await preview_daily_post(context.bot, ADMIN_ID, weekday=weekday)
+
+
+async def _append_idea(update: Update, wd: int, topic: str) -> None:
+    if wd not in (1, 2, 3, 5, 6):
+        await update.message.reply_text("Только текстовые рубрики: вт/ср/чт/сб/вс")
+        return
+    section = post_generator.RUBRIC_SCHEDULE[wd]["section"]
+    ideas_path = post_generator.POST_IDEAS_PATH
+    try:
+        text = ideas_path.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        insert_idx = None
+        for i, line in enumerate(lines):
+            if line.startswith("## ") and section in line:
+                j = i + 1
+                while j < len(lines) and not lines[j].startswith("## "):
+                    j += 1
+                while j > i + 1 and lines[j - 1].strip() == "":
+                    j -= 1
+                insert_idx = j
+                break
+        if insert_idx is None:
+            await update.message.reply_text(f"⚠️ Раздел не найден: {section}")
+            return
+        lines.insert(insert_idx, f"- [ ] {topic}")
+        ideas_path.write_text("\n".join(lines) + ("\n" if text.endswith("\n") else ""), encoding="utf-8")
+        await update.message.reply_text(f"✅ Добавлено в «{section}»:\n- [ ] {topic}")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Ошибка: {e}")
+
+
+async def cmd_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Добавить тему в post_ideas.md. Формат: /idea <день> <тема>. Только админ."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Формат: /idea <день> <тема>\n"
+            "Дни: вт, ср, чт, сб, вс"
+        )
+        return
+    day = context.args[0].lower()
+    topic = " ".join(context.args[1:]).strip()
+    wd = RUBRIC_ALIASES.get(day)
+    if wd is None:
+        await update.message.reply_text("Неизвестный день. Дни: вт/ср/чт/сб/вс")
+        return
+    await _append_idea(update, wd, topic)
+
+
 # ── /search ───────────────────────────────────────────────────
 
 async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -471,6 +583,95 @@ async def daily_beat_scheduler(bot):
         await send_beat_of_day(bot)
 
 
+# ── Автопостинг в канал @iiiplfiii ────────────────────────────
+WEEKDAY_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+
+def _post_preview_keyboard(token: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Опубликовать", callback_data="pub_" + token),
+         InlineKeyboardButton("🔄 Перегенерировать", callback_data="regen_" + token)],
+        [InlineKeyboardButton("❌ Отмена", callback_data="cancel_" + token)],
+    ])
+
+
+async def send_preview(bot, admin_id: int, payload: dict) -> None:
+    """Показывает preview админу в ЛС с кнопками."""
+    token = uuid.uuid4().hex[:12]
+    pending_posts[token] = payload
+    wd = datetime.now().weekday()
+    header = f"📅 {WEEKDAY_RU[wd]} — {payload['rubric']} [{payload['kind']}]"
+    kb = _post_preview_keyboard(token)
+    try:
+        if payload["kind"] == "audio" and payload.get("beat"):
+            beat = payload["beat"]
+            caption = header + "\n\n" + payload["text"]
+            if len(caption) > 1024:
+                caption = caption[:1020] + "..."
+            await bot.send_audio(admin_id, audio=beat["file_id"], caption=caption, reply_markup=kb)
+        else:
+            await bot.send_message(admin_id, header + "\n\n" + payload["text"], reply_markup=kb)
+    except Exception as e:
+        logger.error("send_preview error: %s", e)
+        await bot.send_message(admin_id, f"⚠️ Ошибка preview: {e}")
+
+
+async def preview_daily_post(bot, admin_id: int, weekday: int | None = None) -> None:
+    try:
+        payload = await post_generator.generate_today_post(weekday=weekday)
+    except Exception as e:
+        logger.error("generate_today_post failed: %s", e)
+        await bot.send_message(admin_id, f"⚠️ Генерация упала: {e}")
+        return
+    await send_preview(bot, admin_id, payload)
+
+
+async def daily_channel_scheduler(bot, admin_id: int):
+    """Каждый день в 16:00 МСК готовит preview автопоста и шлёт админу в ЛС."""
+    while True:
+        try:
+            now = datetime.now()
+            target = now.replace(hour=CHANNEL_POST_HOUR, minute=0, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+            await asyncio.sleep((target - now).total_seconds())
+            if admin_id:
+                await preview_daily_post(bot, admin_id)
+        except Exception as e:
+            logger.error("daily_channel_scheduler: %s", e)
+            await asyncio.sleep(60)
+
+
+async def publish_to_channel(bot, payload: dict) -> bool:
+    """Публикует payload в CHANNEL_ID. Возвращает True при успехе.
+    Если POST_DRY_RUN=1 — шлёт в ЛС админа с пометкой и НЕ трогает cooldown/темы."""
+    dry_run = os.getenv("POST_DRY_RUN") == "1"
+    target = ADMIN_ID if dry_run else CHANNEL_ID
+    if not target:
+        logger.error("Не задан target (CHANNEL_ID или ADMIN_ID)")
+        return False
+    prefix = "🧪 [DRY RUN — было бы в канале]\n\n" if dry_run else ""
+    try:
+        if payload["kind"] == "audio" and payload.get("beat"):
+            beat = payload["beat"]
+            caption = prefix + payload["text"]
+            if len(caption) > 1024:
+                caption = caption[:1020] + "..."
+            await bot.send_audio(target, audio=beat["file_id"], caption=caption)
+            if not dry_run:
+                post_generator.mark_beat_posted(beat["id"])
+        else:
+            await bot.send_message(target, prefix + payload["text"])
+            if not dry_run:
+                topic = payload.get("topic")
+                if topic:
+                    post_generator.mark_topic_used(topic)
+        return True
+    except Exception as e:
+        logger.error("publish_to_channel error: %s", e)
+        return False
+
+
 # ── Розыгрыш ──────────────────────────────────────────────────
 
 async def auto_end_giveaway(bot, delay):
@@ -514,6 +715,89 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     write_heartbeat()
 
     await query.answer()
+
+    if data == "admin_channelpost":
+        if user_id != ADMIN_ID:
+            return
+        dry_hint = "\n🧪 DRY_RUN включён — публикация пойдёт тебе в ЛС" if os.getenv("POST_DRY_RUN") == "1" else ""
+        await query.message.reply_text("📡 Автопост в канал:" + dry_hint, reply_markup=kb_admin_channel())
+        return
+
+    if data.startswith("admin_postnow_"):
+        if user_id != ADMIN_ID:
+            return
+        arg = data[len("admin_postnow_"):]
+        wd = None if arg == "today" else int(arg)
+        await query.message.reply_text("⏳ Генерирую превью...")
+        await preview_daily_post(bot, ADMIN_ID, weekday=wd)
+        return
+
+    if data == "admin_idea_menu":
+        if user_id != ADMIN_ID:
+            return
+        await query.message.reply_text(
+            "➕ Выбери рубрику для новой темы:", reply_markup=kb_admin_idea_day()
+        )
+        return
+
+    if data.startswith("admin_idea_") and data != "admin_idea_menu":
+        if user_id != ADMIN_ID:
+            return
+        wd = int(data[len("admin_idea_"):])
+        bulk_add_mode[str(ADMIN_ID) + "_idea"] = wd
+        section = post_generator.RUBRIC_SCHEDULE[wd]["section"]
+        await query.message.reply_text(
+            f"✍️ Пришли следующим сообщением текст темы для «{section}».\n"
+            "Пример: «Pro-Q 3 dynamic EQ на 200 Hz у 808»\n\n"
+            "Отменить — /cancel"
+        )
+        return
+
+    if data.startswith(("pub_", "regen_", "cancel_")):
+        if user_id != ADMIN_ID:
+            await query.answer("Только админ", show_alert=True)
+            return
+        action, token = data.split("_", 1)
+        payload = pending_posts.get(token)
+        if not payload:
+            await query.answer("Превью уже обработано или устарело", show_alert=True)
+            try:
+                await query.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            return
+
+        if action == "pub":
+            ok = await publish_to_channel(bot, payload)
+            pending_posts.pop(token, None)
+            try:
+                await query.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            if ok:
+                await bot.send_message(user_id, f"✅ Опубликовано в канал ({payload['rubric']})")
+            else:
+                await bot.send_message(user_id, "⚠️ Не удалось опубликовать — смотри логи")
+            return
+
+        if action == "regen":
+            pending_posts.pop(token, None)
+            try:
+                await query.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await bot.send_message(user_id, "🔄 Перегенерирую...")
+            await preview_daily_post(bot, user_id, weekday=payload.get("weekday"))
+            return
+
+        if action == "cancel":
+            pending_posts.pop(token, None)
+            try:
+                await query.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await bot.send_message(user_id, "❌ Отменено")
+            return
 
     if data == "check_sub":
         subscribed_users.discard(user_id)
@@ -1410,6 +1694,21 @@ async def handle_assistant(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id != ADMIN_ID: return
     if ADMIN_ID in bulk_add_mode and bulk_add_mode.get(ADMIN_ID) in ("beat","track","remix"): return
     if str(ADMIN_ID) + "_broadcast" in bulk_add_mode: return
+
+    # Ввод новой темы в post_ideas.md (из inline-меню)
+    idea_key = str(ADMIN_ID) + "_idea"
+    if idea_key in bulk_add_mode:
+        text = update.message.text or ""
+        if text.strip() == "/cancel":
+            del bulk_add_mode[idea_key]
+            await update.message.reply_text("❌ Отменено")
+            return
+        if not text.strip():
+            return
+        wd = bulk_add_mode.pop(idea_key)
+        await _append_idea(update, wd, text.strip())
+        return
+
     text = update.message.text or ""
     if not text.strip() or text.startswith("/"): return
 
@@ -1601,6 +1900,7 @@ async def post_init(application):
     load_users()
     logger.info("Bot started: " + str(len(beats_db.BEATS_CACHE)) + " beats, " + str(len(all_users)) + " users")
     asyncio.create_task(daily_beat_scheduler(application.bot))
+    asyncio.create_task(daily_channel_scheduler(application.bot, ADMIN_ID))
     asyncio.create_task(heartbeat_scheduler())
     asyncio.create_task(sigma_suppliers_scheduler())
     asyncio.create_task(load_sigma_suppliers())
@@ -1713,6 +2013,8 @@ async def run_bot():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("admin", cmd_admin))
     app.add_handler(CommandHandler("diag", cmd_diag))
+    app.add_handler(CommandHandler("postnow", cmd_postnow))
+    app.add_handler(CommandHandler("idea", cmd_idea))
     app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("giveaway", cmd_giveaway))
     app.add_handler(CallbackQueryHandler(handle_callback))
