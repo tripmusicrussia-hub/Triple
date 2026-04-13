@@ -406,7 +406,8 @@ async def cmd_giveaway(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def do_search(bot, chat_id, query, user_id):
     q = query.lower()
     results = [b for b in beats_db.BEATS_CACHE
-               if q in b["name"].lower() or any(q in t for t in b.get("tags", []))]
+               if b.get("content_type", "beat") != "non_audio"
+               and (q in b["name"].lower() or any(q in t for t in b.get("tags", [])))]
     if not results:
         await bot.send_message(chat_id, "Хм, по запросу \"" + query + "\" ничего не нашёл 🤔\nПопробуй другое слово!")
         return
@@ -419,9 +420,10 @@ async def do_search(bot, chat_id, query, user_id):
 # ── Бит дня ───────────────────────────────────────────────────
 
 async def send_beat_of_day(bot):
-    if not beats_db.BEATS_CACHE:
+    pool = [b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == "beat"]
+    if not pool:
         return 0
-    beat = random.choice(beats_db.BEATS_CACHE)
+    beat = random.choice(pool)
     sent = 0
     for uid in list(all_users.keys()):
         try:

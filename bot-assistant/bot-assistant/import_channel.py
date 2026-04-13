@@ -6,11 +6,19 @@ import asyncio
 import os
 import sys
 import re
+from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / ".env")
+except ImportError:
+    pass
+
 from telegram import Bot
 from telegram.error import TelegramError
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-CHANNEL = "@iiiplkiii"
+CHANNEL = "@iiiplfiii"
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import beats_db
@@ -132,7 +140,8 @@ async def import_all():
                 continue
 
     beats_db.save_beats()
-    print(f"\nГотово! ✅ Добавлено: {added}, пропущено дублей: {skipped}")
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    print(f"\nГотово. Добавлено: {added}, пропущено дублей: {skipped}")
     print(f"Всего в базе: {len(beats_db.BEATS_CACHE)}")
 
 if __name__ == "__main__":
