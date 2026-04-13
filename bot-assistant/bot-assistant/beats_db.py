@@ -30,17 +30,21 @@ def save_beats():
 
 
 def load_beats():
+    import traceback
     global BEATS_CACHE
     try:
         if os.path.exists(BEATS_FILE):
+            size = os.path.getsize(BEATS_FILE)
+            logger.info(f"load_beats: reading {BEATS_FILE} ({size} bytes)")
             with open(BEATS_FILE, "r", encoding="utf-8") as f:
                 BEATS_CACHE = json.load(f)
             _rebuild_index()
             logger.info("Beats loaded: " + str(len(BEATS_CACHE)))
         else:
+            logger.warning(f"load_beats: file not found at {BEATS_FILE}")
             BEATS_CACHE = []
     except Exception as e:
-        logger.error("Load error: " + str(e))
+        logger.error(f"Load error: {e}\n{traceback.format_exc()}")
         BEATS_CACHE = []
 
 

@@ -1594,6 +1594,10 @@ async def sigma_suppliers_scheduler():
 
 async def post_init(application):
     beats_db.load_beats()
+    if not beats_db.BEATS_CACHE and os.path.exists(beats_db.BEATS_FILE) and os.path.getsize(beats_db.BEATS_FILE) > 1024:
+        logger.warning("post_init: cache empty but file has content — retrying load_beats after 2s")
+        await asyncio.sleep(2)
+        beats_db.load_beats()
     load_users()
     logger.info("Bot started: " + str(len(beats_db.BEATS_CACHE)) + " beats, " + str(len(all_users)) + " users")
     asyncio.create_task(daily_beat_scheduler(application.bot))
