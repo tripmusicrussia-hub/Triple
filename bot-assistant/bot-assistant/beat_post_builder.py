@@ -225,21 +225,24 @@ def build_tg_caption(beat: BeatMeta) -> str:
 
 
 # Стили для рандомизации LLM-генерации каждого нового бита.
+# Порядок синхронизирован с post_analytics.STYLE_LABELS для индексации.
 TG_CAPTION_STYLES = [
-    "короткий хук в одну строку + BPM/key + контакт. Без воды.",
-    "минимал — почти без слов, голые факты (имя, артист-тип, BPM/key, @iiiplfiii). 3-4 строки.",
-    "сторителл — 3-4 строки про настроение бита и под что зайдёт. Затем BPM/key + контакт.",
-    "вопрос аудитории в конце — 2-3 строки, потом BPM/key, потом вопрос («кто пишет такое?» / «кому в работу?»).",
-    "эмоциональный — короткие фразы, восклицание, скобки)) или многоточие… BPM/key + контакт.",
+    ("short_hook", "короткий хук в одну строку + BPM/key + контакт. Без воды."),
+    ("minimal", "минимал — почти без слов, голые факты (имя, артист-тип, BPM/key, @iiiplfiii). 3-4 строки."),
+    ("storytelling", "сторителл — 3-4 строки про настроение бита и под что зайдёт. Затем BPM/key + контакт."),
+    ("question", "вопрос аудитории в конце — 2-3 строки, потом BPM/key, потом вопрос («кто пишет такое?» / «кому в работу?»)."),
+    ("emotional", "эмоциональный — короткие фразы, восклицание, скобки)) или многоточие… BPM/key + контакт."),
 ]
 
 
-async def build_tg_caption_async(beat: BeatMeta) -> str:
-    """LLM-генерация подписи в голосе iiiplfiii-voice. При сбое — fallback на шаблон."""
+async def build_tg_caption_async(beat: BeatMeta) -> tuple[str, str]:
+    """LLM-генерация подписи в голосе iiiplfiii-voice.
+    Возвращает (text, style_label). При сбое — fallback на шаблон с label 'fallback'.
+    """
     try:
         import post_generator
         prof = _get_profile(beat.artist_raw)
-        style = random.choice(TG_CAPTION_STYLES)
+        style_label, style = random.choice(TG_CAPTION_STYLES)
         user_msg = (
             f"Сгенерируй подпись к АУДИО-посту в канал @iiiplfiii для свежего бита.\n\n"
             f"Метаданные:\n"
@@ -266,11 +269,11 @@ async def build_tg_caption_async(beat: BeatMeta) -> str:
         text = re.sub(r"\n+#[\w_]+(\s+#[\w_]+)*\s*$", "", text).rstrip()
         if beat.name.lower() not in text.lower():
             logger.warning("LLM caption не содержит имя бита, fallback. Got: %r", text[:120])
-            return build_tg_caption(beat)
-        return text
+            return build_tg_caption(beat), "fallback"
+        return text, style_label
     except Exception as e:
         logger.warning("build_tg_caption_async failed: %s — fallback", e)
-        return build_tg_caption(beat)
+        return build_tg_caption(beat), "fallback"
 
 
 @dataclass

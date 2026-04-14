@@ -36,3 +36,4 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+bot-assistant/bot-assistant/post_events.jsonl

@@ -798,12 +798,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             import beat_post_builder
             meta = payload["meta"]
             try:
-                new_caption = await beat_post_builder.build_tg_caption_async(meta)
+                new_caption, new_style = await beat_post_builder.build_tg_caption_async(meta)
             except Exception as e:
                 logger.exception("regen caption failed")
                 await query.answer(f"❌ LLM: {e}", show_alert=True)
                 return
             payload["tg_caption"] = new_caption
+            payload["tg_style"] = new_style
             chat_id = payload.get("tg_preview_chat_id")
             msg_id = payload.get("tg_preview_msg_id")
             if chat_id and msg_id:
@@ -831,6 +832,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         yt_ok = None
         tg_ok = None
         yt_url = None
+        yt_video_id = None
+        tg_message_id = None
 
         if action in ("yt", "all"):
             await query.message.reply_text("⏳ Гружу на YouTube...")
@@ -844,6 +847,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         yt_post.tags, thumb_path,
                     ),
                 )
+                yt_video_id = video_id
                 yt_url = f"https://youtu.be/{video_id}"
                 yt_ok = True
                 # Добавляем в каталог
@@ -880,6 +884,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     audio=payload["tg_file_id"],
                     caption=tg_caption,
                 )
+                tg_message_id = sent.message_id
                 logger.info(
                     "tg send_audio OK: target=%r landed chat_id=%s type=%s username=@%s title=%r message_id=%s",
                     CHANNEL_ID, sent.chat.id, sent.chat.type, sent.chat.username, sent.chat.title, sent.message_id,
@@ -889,6 +894,25 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.exception("tg send failed")
                 tg_ok = False
                 await query.message.reply_text(f"❌ TG ошибка: {e}")
+
+        # Лог публикации для будущего анализа «какой стиль подписи заходит».
+        if yt_ok or tg_ok:
+            try:
+                import post_analytics
+                post_analytics.log_event(
+                    kind="upload",
+                    beat_name=meta.name,
+                    artist=meta.artist_display,
+                    bpm=meta.bpm,
+                    key=meta.key,
+                    style=payload.get("tg_style", "unknown"),
+                    caption=tg_caption,
+                    yt_video_id=yt_video_id,
+                    tg_message_id=tg_message_id,
+                    yt_title=yt_post.title,
+                )
+            except Exception:
+                logger.exception("post_analytics log_event failed (non-fatal)")
 
         parts_msg = []
         if yt_ok:
@@ -1926,7 +1950,7 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
         logger.info("upload: ffmpeg done, building post meta")
 
         yt_post = beat_post_builder.build_yt_post(meta)
-        tg_caption = await beat_post_builder.build_tg_caption_async(meta)
+        tg_caption, tg_style = await beat_post_builder.build_tg_caption_async(meta)
 
         pending_uploads[token] = {
             "meta": meta,
@@ -1935,6 +1959,7 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
             "thumb_path": thumb_path,
             "yt_post": yt_post,
             "tg_caption": tg_caption,
+            "tg_style": tg_style,
             "tg_file_id": audio.file_id,
         }
 
