@@ -253,6 +253,7 @@ def kb_admin_yt():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Статистика канала", callback_data="admin_yt_stats")],
         [InlineKeyboardButton("🔧 Batch-fix 10 type beats", callback_data="admin_yt_fix_confirm")],
+        [InlineKeyboardButton("🔍 Diag OAuth env", callback_data="admin_yt_diag")],
         [InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")],
     ])
 
@@ -761,6 +762,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.exception("yt stats failed")
             await query.message.reply_text(f"⚠️ Ошибка: {e}")
+        return
+
+    if data == "admin_yt_diag":
+        if user_id != ADMIN_ID:
+            return
+        def _mask(v: str) -> str:
+            if not v:
+                return "(empty)"
+            has_ws = any(c in v for c in (" ", "\n", "\r", "\t"))
+            ws = " ⚠️whitespace" if has_ws else ""
+            return f"len={len(v)} head='{v[:6]}' tail='{v[-6:]}'{ws}"
+        cid = os.getenv("YT_CLIENT_ID", "")
+        cs = os.getenv("YT_CLIENT_SECRET", "")
+        rt = os.getenv("YT_REFRESH_TOKEN", "")
+        expected_cid_tail = ".apps.googleusercontent.com"
+        cid_ok = "✅" if cid.endswith(expected_cid_tail) else "❌ должен кончаться на .apps.googleusercontent.com"
+        cs_ok = "✅" if cs.startswith("GOCSPX-") else "❌ должен начинаться с GOCSPX-"
+        rt_ok = "✅" if rt.startswith("1//") else "❌ должен начинаться с 1//"
+        await query.message.reply_text(
+            f"🔍 YT env diag:\n\n"
+            f"YT_CLIENT_ID: {_mask(cid)}\n  {cid_ok}\n\n"
+            f"YT_CLIENT_SECRET: {_mask(cs)}\n  {cs_ok}\n\n"
+            f"YT_REFRESH_TOKEN: {_mask(rt)}\n  {rt_ok}"
+        )
         return
 
     if data == "admin_yt_fix_confirm":
