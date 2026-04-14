@@ -1,116 +1,75 @@
-# Проект: Triple Bot
+# Triple Bot — музыкальный AI-ассистент IIIPLFIII
 
-Telegram-бот для продуктового магазина. Основная функция — фотографировать накладные от поставщиков и автоматически создавать черновики приходов в системе учёта Sigma.
+Telegram-бот для направления IIIPLFIII (hard trap Memphis/Detroit type beats).
+Персональный ассистент: каталог битов, автопостинг в канал @iiiplfiii, загрузка на YouTube, LLM-подписи в голосе автора.
 
 ## Правила работы
 
 **Обязательно перед каждым пушем:**
 1. Написать тест под конкретное изменение
-2. Прогнать тест локально (`python test_matching.py` или отдельный скрипт)
-3. Убедиться что результат правильный
-4. Только потом `git push`
+2. Прогнать тест локально
+3. Только потом `git push`
 
-Никогда не пушить непроверенный код — бот работает на проде.
+Никогда не пушить непроверенный код — бот в проде на Render.
 
 ## Архитектура
 
 **Стек:**
 - `python-telegram-bot 21.5` — бот
-- Yandex Vision OCR (table mode + handwritten fallback) — извлечение таблиц из фото
-- OpenRouter LLM (`openai/gpt-oss-120b:free`) — структурирование OCR-данных в JSON
-- Sigma API (`api-s07.sigma.ru`) — система учёта товаров/приходов
+- `supabase 2.9.1` — аналитика `post_events` (primary) + локальный jsonl backup
+- OpenRouter LLM (`openai/gpt-oss-120b:free`) — генерация подписей для TG-постов в tone-of-voice IIIPLKIII
+- YouTube Data API — загрузка видео на канал
+- `imageio-ffmpeg` — сборка mp4 из thumbnail + mp3 для YouTube
 - Render — деплой (автодеплой с GitHub при пуше в `main`)
-- GitHub: `https://github.com/tripmusicrussia-hub/Triple`
 
-**Поток обработки накладной:**
-1. Пользователь (только ADMIN_ID) отправляет фото накладной
-2. `recognize_invoice()` → Groq Vision → JSON с товарами
-3. Бот показывает список товаров с кнопками редактирования
-4. Пользователь правит ошибки → "Загрузить в Sigma"
-5. `process_invoice()` → ищет/создаёт товары в Sigma → создаёт DRAFT приход
+**Основные flow:**
+1. **Upload бита**: админ присылает mp3 с именем `<artist> type beat <NAME> <BPM> <KEY>.mp3` →
+   бот парсит → генерит thumbnail/video → LLM-подпись → preview в ЛС → кнопки публикации YT+TG.
+2. **Авто-постинг канала**: scheduler в 16:00 МСК → `post_generator.pick_post_for_today()` (рубрика по дню недели) →
+   preview админу → кнопки "Опубликовать"/"Перегенерить"/"Отмена".
+3. **Каталог битов**: пользователи через `/start` → меню → поиск по BPM/ключу/стилю.
+4. **Розыгрыши**: через `/giveaway` админ заводит приз → пользователи участвуют через репост.
 
 ## Ключевые файлы
 
 | Файл | Назначение |
 |------|-----------|
-| `bot.py` | Главный обработчик бота, инлайн-клавиатуры, flow накладной |
-| `sigma_api.py` | SigmaAPI класс, распознавание, матчинг товаров, создание прихода |
-| `config.py` | Читает все секреты из env vars |
-| `test_sigma_matching_diag.py` | Диагностика матчинга по 13 тестовым накладным — запускать перед каждым пушем |
-| `test_matcher_repro.py` | Быстрый repro: 13 конкретных товаров через реальный `find_product` |
+| `bot.py` | Главный обработчик, callback'и, scheduler'ы, админка |
+| `beats_db.py` | Каталог битов — парсинг, cache, fuzzy поиск |
+| `beat_post_builder.py` | Сборка TG-подписей: 5 стилей через LLM + fallback |
+| `beat_upload.py` | Парсинг имени mp3, подготовка метаданных |
+| `post_generator.py` | LLM-генератор постов для канала (рубрики по дням) |
+| `post_analytics.py` | Dual-write событий в Supabase + jsonl |
+| `thumbnail_generator.py` | PIL-сборка обложки для YouTube |
+| `video_builder.py` | ffmpeg-сборка mp4 из обложки + mp3 |
+| `youtube_uploader.py` | Загрузка на YouTube через OAuth |
+| `config.py` | Env vars |
 
-## Сервисы и ключи
+## Env vars (Render)
 
-Все ключи в env vars на Render (не хардкодить в коде):
-- `BOT_TOKEN` — Telegram бот
-- `ADMIN_ID` — только этот пользователь работает с накладными
-- `YANDEX_KEY` / `YANDEX_FOLDER` — Yandex Vision OCR (API-key + folder ID; имена проверены по `yandex_ocr.py`)
-- `OPENROUTER_API_KEY` — OpenRouter LLM для структурирования OCR
-- `SIGMA_LOGIN` / `SIGMA_PASSWORD` — `+79174854325` / `IfrbIfrb680`
+- `BOT_TOKEN`, `ADMIN_ID` — Telegram
+- `CHANNEL_ID` (=`@iiiplfiii`), `CHANNEL_LINK`
+- `OPENROUTER_API_KEY` — LLM для подписей
+- `SUPABASE_URL`, `SUPABASE_KEY` — аналитика
+- `YT_CLIENT_ID`, `YT_CLIENT_SECRET`, `YT_REFRESH_TOKEN` — YouTube OAuth
 
-`SIGMA_AUTH_HEADER` = `"Basic cWFzbGFwcDpteVNlY3JldE9BdXRoU2VjcmV0"` — хардкод (OAuth client, не менять).
+## Tone-of-voice автора
 
-## Sigma API
-
-- Base URL: `https://api-s07.sigma.ru`
-- Авторизация: `/oauth/token` (password grant) → Bearer token
-- Приход создаётся как DRAFT — пользователь проводит вручную в Sigma
-- Склад: "ИП Хуснутдинова Гульчачак Васимовна"
-
-## Поиск товаров (`find_product`) — API-first
-
-**Источник истины — живые запросы в Sigma API**, а не статичный кэш.
-Каталог Sigma живой: пользователь добавляет/переименовывает/удаляет товары.
-Кэш `_products_cache` используется только как fallback для оффлайн-диагностики.
-
-**ВАЖНО**: `storehouseId: None` в запросах — иначе теряются общефирменные товары.
-Sigma API endpoint `/rest/v4/products/simple` — **substring-search** (LIKE '%query%').
-Регистронезависимый, **порядок слов важен** — «молоко село» найдёт, «село молоко» нет.
-
-**Стратегия поиска** (повторяет ручной workflow в Sigma UI):
-1. Из названия товара берём 1-2 самых отличительных слова (длинные, не-стоп-слова)
-2. Single-word search по каждому слову отдельно (защита от порядка слов)
-3. Дополнительно: 2-словный запрос в правильном порядке
-4. Aggregate dedup → `_pick_best_candidate` (атрибутный фильтр + скоринг)
-5. Memo на 5 минут — повторные запросы одного бренда из памяти, не из сети
-
-**Атрибутный фильтр (hard gates):**
-- `_pcts_compatible`: % жирности (3.2% ≠ 2.5%)
-- `_measures_compatible`: число+единица (930г, 0.5л) с конвертацией (л↔мл, кг↔г)
-- **Категориальная защита**: первый стем запроса (молок/кефир/смета/чипс) должен быть в кандидате — не подменяем категорию
-- **Строгий порог**: ВСЕ значимые стемы (≥5 букв) должны найтись в кандидате
-- **Ambiguity rejection**: если top-1 = top-2 по всем метрикам → `None`
-
-**Стемминг** (`_token_stem`): первые 5 символов + обрезка падежных окончаний (а/я/о).
-«бекона»→«бекон», «лайма»→«лайм», «чёрной»→«чёрн». Нормализация: ё→е.
-
-**`SEARCH_STOPWORDS`** — обширный список: категории напитков, описания упаковки
-(гофрокороб, стак, пэт), регионы (татар, удм), служебные слова накладных.
-
-### Словари замен
-
-**`ABBREVIATIONS`** (расшифровки, применяются к обеим сторонам):
-- `овк` → `очень важная корова`
-- `мп` → `молочный переулок`
-
-**`PRODUCT_NAME_FIXES`** (явные замены в запросе):
-- `вас. счас.` / `вас счас` → `васькино счастье`
-- `карламан какао 7.5` → `карламан какао 7`
-
-### Если товар не найден
-Бот **создаёт новый товар** в Sigma — категория определяется по `CATEGORY_KEYWORDS`.
-Лучше «не нашли → создаём» чем false positive (подмена категории/бренда).
-
-## Особенности Sigma
-
-- **Кэш `load_all_products()` неполный**: постраничная загрузка (5853 шт.) пропускает товары, которые есть через name-search. Доказано: 6 МОЛОКО СЕЛО ЗЕЛЕНОЕ в UI vs 1 в кэше. Поэтому API-first — единственный надёжный путь.
-- Все товары "Очень Важная Корова" в Sigma называются **КОРОВА** (не КОРОВКА) — важно при ручном редактировании
-- `storehouseId: None` — искать по всей компании; с конкретным складом теряются 9+ общефирменных товаров
+Единый источник — `C:\Users\1\.claude\skills\iiiplkiii-voice\SKILL.md` (лежит в репо
+как `SKILL.md` на корне `bot-assistant/` для Render; читается и Claude в сессии, и ботом
+как system-prompt LLM).
 
 ## Деплой
 
 ```bash
-git add sigma_api.py bot.py   # конкретные файлы
+git add <конкретные файлы>
 git commit -m "..."
-git push origin main          # Render подхватит автоматически
+git push origin main          # Render подхватит автодеплоем
 ```
+
+## Супабейз-схема
+
+Таблица `post_events`:
+- `id bigserial`, `ts timestamptz`, `kind text`, `beat_name text`, `artist text`,
+  `bpm int`, `key text`, `style text` (short_hook / minimal / storytelling / question / emotional / fallback),
+  `caption text`, `yt_video_id text`, `tg_message_id bigint`, `yt_title text`

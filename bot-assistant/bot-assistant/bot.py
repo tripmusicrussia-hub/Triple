@@ -17,15 +17,8 @@ from telegram.ext import (
 from telegram.error import TelegramError
 from config import BOT_TOKEN, CHANNEL_ID, CHANNEL_LINK, SAMPLE_PACK_PATH, SAMPLE_PACK_FILE_ID, WELCOME_TEXT, CATALOG_INTRO, ADMIN_ID
 import beats_db
-import assistant_ai
-import sigma_api
 import post_generator
 import uuid
-
-# Глобальный экземпляр SigmaAPI — кэш товаров сохраняется между накладными
-_sigma_instance = sigma_api.SigmaAPI()
-
-conversation_history = {}
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -1389,131 +1382,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="admin_giveaway")]]))
         return
 
-    # ── Накладная: ещё листы ──────────────────────────────────
-    if data == "invoice_more":
-        if user_id != ADMIN_ID: return
-        accumulated = invoice_pages.get(user_id)
-        if not accumulated:
-            await query.message.edit_text(
-                "Эта накладная уже закрыта (авто-завершение по тишине). "
-                "Пришли фото — начну новую."
-            )
-            return
-        _schedule_invoice_autofinish(user_id, query.message.chat_id, context.bot)
-        total = len(accumulated.get("items", []))
-        await query.message.edit_text(
-            f"Ок, жду следующий лист 📸\nУже накоплено товаров: {total}"
-        )
-        return
-
-    if data == "invoice_done":
-        if user_id != ADMIN_ID: return
-        _cancel_invoice_autofinish(user_id)
-        if user_id not in invoice_pages or not invoice_pages[user_id].get("items"):
-            await query.answer("Нет данных!", show_alert=True)
-            return
-        await _finalize_invoice_for_review(
-            user_id, query.message.chat_id, context.bot, auto=False
-        )
-        # Убираем кнопки с предыдущего статусного сообщения, чтобы их не жали повторно
-        try:
-            await query.message.edit_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-        return
-
-    if data.startswith("inv_edit_"):
-        if user_id != ADMIN_ID: return
-        idx = int(data.split("_")[2])
-        if user_id not in pending_invoices: return
-        item = pending_invoices[user_id]["items"][idx]
-        await query.message.reply_text(
-            f"Что исправить?\n{item['name'][:50]}\nКол-во: {item['qty']} шт | Цена: {item['price']} р.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Кол-во", callback_data=f"inv_qty_{idx}"),
-                 InlineKeyboardButton("Цену", callback_data=f"inv_price_{idx}")],
-                [InlineKeyboardButton("Название", callback_data=f"inv_name_{idx}")],
-            ])
-        )
-        return
-
-    if data.startswith("inv_qty_"):
-        if user_id != ADMIN_ID: return
-        idx = int(data.split("_")[2])
-        if user_id not in pending_invoices: return
-        item = pending_invoices[user_id]["items"][idx]
-        editing_qty[user_id] = ("qty", idx)
-        await query.message.edit_text(
-            f"Введи новое количество для:\n{item['name'][:50]}\nСейчас: {item['qty']} шт"
-        )
-        return
-
-    if data.startswith("inv_price_"):
-        if user_id != ADMIN_ID: return
-        idx = int(data.split("_")[2])
-        if user_id not in pending_invoices: return
-        item = pending_invoices[user_id]["items"][idx]
-        editing_qty[user_id] = ("price", idx)
-        await query.message.edit_text(
-            f"Введи новую цену для:\n{item['name'][:50]}\nСейчас: {item['price']} р."
-        )
-        return
-
-    if data.startswith("inv_name_"):
-        if user_id != ADMIN_ID: return
-        idx = int(data.split("_")[2])
-        if user_id not in pending_invoices: return
-        item = pending_invoices[user_id]["items"][idx]
-        editing_qty[user_id] = ("name", idx)
-        await query.message.edit_text(
-            f"Введи новое название для:\n{item['name'][:80]}\n\n"
-            f"Бот пересчитает матч в Sigma и запомнит коррекцию."
-        )
-        return
-
-    if data == "invoice_upload":
-        if user_id != ADMIN_ID: return
-        if user_id not in pending_invoices:
-            await query.answer("Нет данных!", show_alert=True)
-            return
-        invoice = pending_invoices[user_id]
-        await query.message.edit_text("⏳ Загружаю в Sigma...")
-        try:
-            api = _sigma_instance
-            result = await api.process_invoice(
-                items=invoice["items"],
-                supplier_name=invoice["supplier"]
-            )
-            if result["ok"]:
-                del pending_invoices[user_id]
-                num = result.get("waybill_number") or ""
-                num_line = f" №{num}" if num else ""
-                skipped_text = ""
-                if result.get("skipped"):
-                    skipped_text = f"\n\nНе найдено в базе Sigma:\n" + "\n".join(f"- {s}" for s in result["skipped"])
-                await query.message.edit_text(
-                    f"✅ Черновик{num_line} создан в Sigma!\n"
-                    f"Добавлено товаров: {result.get('added', 0)}"
-                    f"{skipped_text}\n\n"
-                    f"Зайди в Sigma → Документы → Приходы → проверь и нажми Провести"
-                )
-            else:
-                await query.message.edit_text(f"❌ Ошибка: {result['error']}")
-        except Exception as e:
-            logger.error(f"Invoice upload error: {e}")
-            await query.message.edit_text(f"❌ Ошибка: {str(e)[:200]}")
-        return
-
-    if data == "invoice_cancel":
-        if user_id != ADMIN_ID: return
-        _cancel_invoice_autofinish(user_id)
-        pending_invoices.pop(user_id, None)
-        invoice_pages.pop(user_id, None)
-        editing_qty.pop(user_id, None)
-        await query.message.edit_text("Накладная отменена.")
-        return
-
-
 # ── Обработка текстовых сообщений ────────────────────────────
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1635,276 +1503,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(send_batch_report())
 
 
-# ── Sigma Invoice Handler ─────────────────────────────────────
-
-pending_invoices = {}
-invoice_pages = {}       # накапливаем страницы до нажатия "это всё"
-editing_qty = {}         # {user_id: item_index} — ждём новое кол-во от пользователя
-invoice_autofinish_tasks = {}  # {user_id: asyncio.Task} — автозавершение по тишине
-INVOICE_AUTOFINISH_SECONDS = 20  # сколько ждать новой страницы перед автозакрытием
-
-def kb_invoice_more_pages():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📄 Да, ещё лист", callback_data="invoice_more")],
-        [InlineKeyboardButton("✅ Нет, это всё", callback_data="invoice_done")],
-    ])
-
-def kb_invoice_edit(items):
-    """Кнопки для редактирования каждого товара + загрузка"""
-    rows = []
-    for i, item in enumerate(items):
-        name_short = item["name"][:22]
-        rows.append([InlineKeyboardButton(
-            f"✏️ {i+1}. {name_short} | {item['qty']}шт x {item['price']}р",
-            callback_data=f"inv_edit_{i}"
-        )])
-    rows.append([InlineKeyboardButton("🚀 Загрузить в Sigma", callback_data="invoice_upload")])
-    rows.append([InlineKeyboardButton("❌ Отмена", callback_data="invoice_cancel")])
-    return InlineKeyboardMarkup(rows)
-
-def format_invoice_final(supplier, items):
-    lines = ["📋 Накладная — проверь и исправь если надо\n"]
-    lines.append(f"🏭 {supplier}")
-    lines.append(f"📦 Товаров: {len(items)}\n")
-    for i, item in enumerate(items, 1):
-        markup = sigma_api.get_markup(item["name"])
-        sell = sigma_api.calc_price(item["price"], markup)
-        pct = int(markup * 100)
-        lines.append(
-            f"{i}. {item['name'][:40]}\n"
-            f"   {item['qty']} шт x {item['price']} р. → продажа {sell} р. (+{pct}%)"
-        )
-    lines.append("\nНажми на товар чтобы исправить кол-во или цену")
-    return "\n".join(lines)
-
-async def _finalize_invoice_for_review(user_id: int, chat_id: int, bot, auto: bool):
-    """Перевод накладной из накопления в режим финального review.
-    Вызывается и руками ('Нет, это всё'), и автоматически по таймауту."""
-    accumulated = invoice_pages.pop(user_id, None)
-    if not accumulated or not accumulated.get("items"):
-        return False
-
-    items, recalc_info = sigma_api.process_weight_products(accumulated["items"])
-    pending_invoices[user_id] = {
-        "supplier": accumulated["supplier"],
-        "items": items,
-    }
-    invoice = pending_invoices[user_id]
-    text = format_invoice_final(invoice["supplier"], invoice["items"])
-    if auto:
-        n_pages = accumulated.get("page_count", 1)
-        pages_word = "лист" if n_pages == 1 else "листа" if 2 <= n_pages <= 4 else "листов"
-        text = (
-            f"⏱ Жду новые страницы {INVOICE_AUTOFINISH_SECONDS} сек — тишина, "
-            f"считаю что накладная кончилась ({n_pages} {pages_word}).\n\n"
-            + text
-        )
-    if recalc_info:
-        text += "\n\n⚖️ Пересчитано как весовой товар:\n" + "\n".join(recalc_info)
-    await bot.send_message(chat_id, text, reply_markup=kb_invoice_edit(invoice["items"]))
-    return True
-
-
-async def _autofinish_invoice_after_delay(user_id: int, chat_id: int, bot):
-    try:
-        await asyncio.sleep(INVOICE_AUTOFINISH_SECONDS)
-    except asyncio.CancelledError:
-        return
-    invoice_autofinish_tasks.pop(user_id, None)
-    # Гонка: если пользователь уже нажал кнопку вручную — invoice_pages уже пуст, no-op.
-    if user_id in pending_invoices:
-        return
-    try:
-        await _finalize_invoice_for_review(user_id, chat_id, bot, auto=True)
-    except Exception as e:
-        logger.error(f"autofinish invoice failed: {e}")
-
-
-def _schedule_invoice_autofinish(user_id: int, chat_id: int, bot):
-    old = invoice_autofinish_tasks.pop(user_id, None)
-    if old and not old.done():
-        old.cancel()
-    invoice_autofinish_tasks[user_id] = asyncio.create_task(
-        _autofinish_invoice_after_delay(user_id, chat_id, bot)
-    )
-
-
-def _cancel_invoice_autofinish(user_id: int):
-    task = invoice_autofinish_tasks.pop(user_id, None)
-    if task and not task.done():
-        task.cancel()
-
-
-async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle photo of invoice - supports multi-page"""
-    if not update.effective_user: return
-    user_id = update.effective_user.id
-    if user_id != ADMIN_ID: return
-    if not update.message.photo: return
-
-    msg = await update.message.reply_text("Читаю лист накладной...")
-    try:
-        photo = update.message.photo[-1]
-        file = await context.bot.get_file(photo.file_id)
-        img_bytes = bytes(await file.download_as_bytearray())
-
-        result = await sigma_api.recognize_invoice(img_bytes)
-        supplier = result.get("supplier", "Не определён")
-        items = result.get("items", [])
-
-        if not items:
-            await msg.edit_text("Не нашёл товаров на этом листе. Попробуй другое фото.")
-            return
-
-        # Накапливаем страницы
-        if user_id not in invoice_pages:
-            invoice_pages[user_id] = {"supplier": supplier, "items": [], "page_count": 0}
-        invoice_pages[user_id]["items"].extend(items)
-        invoice_pages[user_id]["page_count"] = invoice_pages[user_id].get("page_count", 0) + 1
-        if not invoice_pages[user_id]["supplier"] or invoice_pages[user_id]["supplier"] == "Не определён":
-            invoice_pages[user_id]["supplier"] = supplier
-
-        page_num = invoice_pages[user_id]["page_count"]
-        total_so_far = len(invoice_pages[user_id]["items"])
-        lines = [f"📋 Лист {page_num} распознан! Товаров на листе: {len(items)}\n"]
-        uncertain_indices = []
-        computed_total = 0.0
-        for i, item in enumerate(items, 1):
-            mark = "⚠️ " if item.get("uncertain") else ""
-            try:
-                qty_f = float(item.get("qty") or 0)
-            except (TypeError, ValueError):
-                qty_f = 0.0
-            try:
-                price_f = float(item.get("price") or 0)
-            except (TypeError, ValueError):
-                price_f = 0.0
-            line_sum = qty_f * price_f
-            computed_total += line_sum
-            qty_disp = int(qty_f) if qty_f.is_integer() else qty_f
-            price_disp = f"{price_f:.2f}".rstrip("0").rstrip(".")
-            sum_disp = f"{line_sum:,.2f}".rstrip("0").rstrip(".").replace(",", " ")
-            lines.append(f"{mark}{i}. {item['name']}")
-            lines.append(f"   {qty_disp} × {price_disp} ₽ = {sum_disp} ₽")
-            if item.get("uncertain"):
-                uncertain_indices.append(i)
-
-        # Итог по листу + сверка с напечатанным на накладной
-        printed = result.get("total_sum")
-        computed_disp = f"{round(computed_total, 2):,.2f}".rstrip("0").rstrip(".").replace(",", " ")
-        lines.append(f"\n💰 Итого по листу: {computed_disp} ₽")
-        if isinstance(printed, (int, float)) and printed > 0:
-            printed_disp = f"{float(printed):,.2f}".rstrip("0").rstrip(".").replace(",", " ")
-            delta = round(computed_total - float(printed), 2)
-            if abs(delta) <= 1.0:
-                lines.append(f"   В накладной:    {printed_disp} ₽ ✓")
-            else:
-                sign = "+" if delta > 0 else "−"
-                lines.append(f"   В накладной:    {printed_disp} ₽  ⚠️ расхождение {sign}{abs(delta):.2f} ₽")
-
-        if total_so_far > len(items):
-            lines.append(f"\nВсего накоплено: {total_so_far} товаров")
-        # Предупреждение о неуверенных позициях
-        if uncertain_indices:
-            idx_str = ", ".join(str(i) for i in uncertain_indices)
-            lines.append(
-                f"\n⚠️ Проверь глазами позиции: {idx_str}\n"
-                f"   (в этих строках я не уверен — мог неправильно "
-                f"прочитать цену, количество или название)"
-            )
-        lines.append(
-            f"\nЕщё листы есть? Если тишина {INVOICE_AUTOFINISH_SECONDS} сек — "
-            f"считаю накладную завершённой автоматически."
-        )
-        await msg.edit_text("\n".join(lines), reply_markup=kb_invoice_more_pages())
-
-        # Запускаем/обновляем таймер авто-завершения
-        _schedule_invoice_autofinish(user_id, update.effective_chat.id, context.bot)
-
-    except Exception as e:
-        logger.error(f"Invoice error: {e}")
-        err_text = str(e)
-        if "слишком мало текста" in err_text:
-            await msg.edit_text(
-                "📷 Фото нечёткое — OCR почти ничего не разобрал.\n"
-                "Попробуй переснять при хорошем освещении, держи камеру ровно, "
-                "чтобы текст был крупным и в фокусе."
-            )
-        elif "rate quota limit exceed" in err_text:
-            await msg.edit_text("⏳ Yandex OCR занят. Подожди 2 секунды и пришли фото снова.")
-        else:
-            await msg.edit_text(f"Ошибка распознавания: {err_text[:200]}")
-
-async def handle_invoice_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Handle 'ok' confirmation to upload to sigma"""
-    if not update.effective_user: return False
-    user_id = update.effective_user.id
-    if user_id != ADMIN_ID: return False
-
-    text = (update.message.text or "").strip().lower()
-    if text not in ["ок", "ok", "окей", "да", "загрузить", "загружай"]: return False
-    if user_id not in pending_invoices: return False
-
-    invoice = pending_invoices[user_id]
-    msg = await update.message.reply_text("⏳ Загружаю в Sigma...")
-
-    try:
-        api = _sigma_instance
-        result = await api.process_invoice(
-            items=invoice["items"],
-            supplier_name=invoice["supplier"]
-        )
-        if result["ok"]:
-            del pending_invoices[user_id]
-            num = result.get("waybill_number") or ""
-            num_line = f" №{num}" if num else ""
-            skipped_text = ""
-            if result.get("skipped"):
-                skipped_text = f"\n⚠️ Не найдено в базе Sigma: {', '.join(result['skipped'])}"
-            await msg.edit_text(
-                f"✅ Готово! Приход{num_line} создан в Sigma\n"
-                f"Добавлено товаров: {result.get('added', 0)}"
-                f"{skipped_text}"
-            )
-        else:
-            await msg.edit_text(f"❌ Ошибка: {result['error']}")
-    except Exception as e:
-        logger.error(f"Invoice confirm error: {e}")
-        await msg.edit_text(f"❌ Ошибка: {str(e)[:200]}")
-    return True
-
-
-# ── AI Assistant ──────────────────────────────────────────────
+# ── Приём mp3 для публикации бита ─────────────────────────────
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Приём аудио-файла от админа: если имя в формате type-beat — запуск upload flow."""
     if not update.effective_user: return
     if update.effective_user.id != ADMIN_ID: return
 
     audio = update.message.audio
-    voice = update.message.voice
-
-    # Если это аудио-файл с именем в формате "... type beat ... BPM KEY.mp3" — upload flow
     if audio and audio.file_name and "type beat" in audio.file_name.lower():
         await handle_beat_upload(update, context, audio)
-        return
-
-    # Иначе — голос/аудио в ассистента (транскрипция)
-    src = voice or audio
-    if not src: return
-    thinking = await update.message.reply_text("Слушаю...")
-    try:
-        file = await context.bot.get_file(src.file_id)
-        file_bytes = bytes(await file.download_as_bytearray())
-        text = await assistant_ai.transcribe_voice(file_bytes, "voice.ogg")
-        if not text.strip():
-            await thinking.edit_text("Не расслышал, попробуй ещё раз")
-            return
-        await thinking.edit_text("Слышу: " + text)
-        result = await process_ai(update.effective_user.id, text)
-        await thinking.edit_text(result)
-    except Exception as e:
-        logger.error("Voice error: " + str(e))
-        await thinking.edit_text("Ошибка голосового. Попробуй текстом.")
 
 
 async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE, audio):
@@ -2031,161 +1639,9 @@ async def handle_assistant(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _append_idea(update, wd, text.strip())
         return
 
-    text = update.message.text or ""
-    if not text.strip() or text.startswith("/"): return
-
-    # Редактирование количества, цены или названия товара в накладной
-    if user_id in editing_qty and user_id in pending_invoices:
-        field, idx = editing_qty[user_id]
-        invoice = pending_invoices[user_id]
-        if field == "name":
-            new_name = text.strip()
-            if not new_name:
-                await update.message.reply_text("Название не может быть пустым")
-                return
-            editing_qty.pop(user_id, None)
-            old_name = invoice["items"][idx]["name"]
-            invoice["items"][idx]["name"] = new_name
-            # Перепоиск в Sigma и запись корректировки в wiki
-            try:
-                api = _sigma_instance
-                if not api.token:
-                    await api.login()
-                product = await api.find_product(new_name)
-                if product:
-                    sigma_name = product.get("name", "")
-                    sigma_id = product.get("id")
-                    # Записываем две коррекции: old_name → sigma_name (пользователь подтвердил)
-                    # и new_name → sigma_name (чтобы в следующий раз отрабатывало имплицитно)
-                    try:
-                        sigma_api.wiki_store.record_correction(
-                            ocr_name=old_name, sigma_name=sigma_name,
-                            sigma_id=sigma_id, confidence=0.9, source="user_correction",
-                        )
-                        sigma_api.wiki_store.record_correction(
-                            ocr_name=new_name, sigma_name=sigma_name,
-                            sigma_id=sigma_id, confidence=0.9, source="user_correction",
-                        )
-                        sigma_api.wiki_store.flush_pending()
-                    except Exception as e:
-                        logger.warning(f"wiki correction failed: {e}")
-                    await update.message.reply_text(
-                        f"✅ Найдено в Sigma: {sigma_name[:60]}\nКоррекция сохранена в wiki."
-                    )
-                else:
-                    await update.message.reply_text(
-                        f"⚠️ В Sigma не найдено: '{new_name[:50]}'\n"
-                        f"При загрузке накладной будет создан новый товар."
-                    )
-            except Exception as e:
-                await update.message.reply_text(f"Ошибка поиска в Sigma: {str(e)[:100]}")
-            text_summary = format_invoice_final(invoice["supplier"], invoice["items"])
-            await update.message.reply_text(text_summary, reply_markup=kb_invoice_edit(invoice["items"]))
-            return
-        try:
-            new_val = float(text.strip().replace(",", "."))
-            editing_qty.pop(user_id, None)
-            invoice["items"][idx][field] = new_val
-            item_name = invoice["items"][idx]["name"][:35]
-            label = "кол-во" if field == "qty" else "цена"
-            await update.message.reply_text(f"✅ {item_name}\n{label} обновлено: {new_val}")
-            text_summary = format_invoice_final(invoice["supplier"], invoice["items"])
-            await update.message.reply_text(text_summary, reply_markup=kb_invoice_edit(invoice["items"]))
-        except ValueError:
-            await update.message.reply_text("Введи число, например: 5 или 37.50")
-        return
-
-    if await handle_invoice_confirm(update, context): return
-    msg = update.message
-    is_forwarded = (msg.audio or msg.forward_origin or
-        getattr(msg, 'forward_from', None) or
-        getattr(msg, 'forward_from_chat', None) or
-        getattr(msg, 'forward_date', None) or
-        getattr(msg, 'forward_sender_name', None))
-    if is_forwarded: return
-    thinking = await update.message.reply_text("...")
-    try:
-        result = await process_ai(user_id, text)
-        await thinking.edit_text(result)
-    except Exception as e:
-        await thinking.edit_text("Ошибка: " + str(e))
-
-async def process_ai(user_id, text):
-    if user_id not in conversation_history:
-        conversation_history[user_id] = []
-    history = conversation_history[user_id]
-    parsed = await assistant_ai.process_message(text, history)
-    history.append({"role": "user", "content": text})
-    history.append({"role": "assistant", "content": parsed.get("response", "")})
-    if len(history) > 20:
-        conversation_history[user_id] = history[-20:]
-    return parsed.get("response", "Готово")
-
-async def cmd_wiki(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /wiki stats  — сколько записей в каждом топике
-    /wiki review — список невалидированных product_mappings
-    /wiki push   — commit + push wiki/ в git (персистентность на Render)
-    """
-    if not update.effective_user: return
-    if update.effective_user.id != ADMIN_ID: return
-    args = context.args or []
-    subcmd = args[0].lower() if args else "stats"
-    ws = sigma_api.wiki_store
-
-    if subcmd == "stats":
-        stats = ws.get_stats()
-        lines = ["📚 Wiki статистика\n"]
-        for name, count in stats["topics"].items():
-            lines.append(f"• {name}: {count}")
-        lines.append(f"\nPending (не сброшено): {stats['pending']}")
-        lines.append(f"Changelog записей: {stats['changelog_entries']}")
-        lines.append(f"Последнее обновление: {stats['last_updated']}")
-        await update.message.reply_text("\n".join(lines))
-        return
-
-    if subcmd == "review":
-        items = ws.get_unverified_mappings(limit=20)
-        if not items:
-            await update.message.reply_text("Нет невалидированных маппингов.")
-            return
-        lines = ["⚠️ Невалидированные product_mappings:\n"]
-        for e in items:
-            v = e.get("value", {})
-            lines.append(
-                f"• {e['key'][:35]} → {v.get('sigma_name', '')[:35]}\n"
-                f"  conf={v.get('confidence', 0):.2f} use={v.get('use_count', 0)}"
-            )
-        await update.message.reply_text("\n".join(lines)[:4000])
-        return
-
-    if subcmd == "push":
-        import subprocess
-        try:
-            subprocess.run(["git", "add", "wiki/"], cwd=os.path.dirname(os.path.abspath(__file__)), check=True)
-            result = subprocess.run(
-                ["git", "commit", "-m", "wiki: update from bot corrections"],
-                cwd=os.path.dirname(os.path.abspath(__file__)),
-                capture_output=True, text=True,
-            )
-            if result.returncode != 0 and "nothing to commit" in (result.stdout + result.stderr):
-                await update.message.reply_text("Нечего коммитить — wiki актуальна.")
-                return
-            subprocess.run(["git", "push"], cwd=os.path.dirname(os.path.abspath(__file__)), check=True)
-            await update.message.reply_text("✅ Wiki запушена в git.")
-        except Exception as e:
-            await update.message.reply_text(f"❌ Ошибка push: {str(e)[:300]}")
-        return
-
-    await update.message.reply_text(
-        "Подкоманды: /wiki stats | /wiki review | /wiki push"
-    )
-
-
-async def cmd_my(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_user: return
-    if update.effective_user.id != ADMIN_ID: return
-    await update.message.reply_text(assistant_ai.get_summary())
+    # Layer 3 (conversational agent) сюда подключится позже.
+    # Сейчас — свободный текст от админа игнорируется.
+    return
 
 
 # ── Запуск ────────────────────────────────────────────────────
@@ -2195,23 +1651,6 @@ async def heartbeat_scheduler():
         write_heartbeat()
         await asyncio.sleep(30)
 
-async def load_sigma_suppliers():
-    """Загружаем поставщиков из Sigma и передаём в assistant_ai"""
-    try:
-        api = _sigma_instance
-        if await api.login():
-            suppliers = await api.get_suppliers()
-            names = [s.get("name", "") for s in suppliers if s.get("name")]
-            assistant_ai.set_suppliers(names)
-            logger.info(f"Sigma suppliers loaded: {len(names)}")
-    except Exception as e:
-        logger.warning(f"Could not load Sigma suppliers: {e}")
-
-async def sigma_suppliers_scheduler():
-    """Обновляем список поставщиков раз в час"""
-    while True:
-        await asyncio.sleep(3600)
-        await load_sigma_suppliers()
 
 async def post_init(application):
     try:
@@ -2228,9 +1667,6 @@ async def post_init(application):
     logger.info("Bot started: " + str(len(beats_db.BEATS_CACHE)) + " beats, " + str(len(all_users)) + " users")
     asyncio.create_task(daily_channel_scheduler(application.bot, ADMIN_ID))
     asyncio.create_task(heartbeat_scheduler())
-    asyncio.create_task(sigma_suppliers_scheduler())
-    asyncio.create_task(load_sigma_suppliers())
-    asyncio.create_task(load_sigma_products())
     asyncio.create_task(asyncio.to_thread(_warmup_ffmpeg))
     write_heartbeat()
 
@@ -2241,20 +1677,6 @@ def _warmup_ffmpeg():
         video_builder.warmup()
     except Exception as e:
         logger.warning("ffmpeg warmup failed: %s", e)
-
-
-async def load_sigma_products():
-    """Загрузить все товары из Sigma в глобальный кэш при старте"""
-    try:
-        api = _sigma_instance
-        if not await api.login():
-            logger.warning("Could not load Sigma products: login failed")
-            return
-        await api.get_company_info()
-        count = await api.load_all_products()
-        logger.info(f"Sigma products loaded at startup: {count}")
-    except Exception as e:
-        logger.error(f"Error loading Sigma products: {e}")
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -2271,78 +1693,6 @@ def run_health_server():
     server.serve_forever()
 
 
-async def reminder_scheduler(bot, admin_id):
-    while True:
-        try:
-            data = assistant_ai.load_data()
-            now = datetime.now().strftime("%Y-%m-%dT%H:%M")
-            changed = False
-            for r in data.get("reminders", []):
-                if not r.get("done") and r.get("datetime", "") <= now:
-                    try:
-                        await bot.send_message(admin_id, f"⏰ Напоминание: {r['text']}")
-                        r["done"] = True
-                        changed = True
-                    except Exception:
-                        pass
-            if changed:
-                assistant_ai.save_data(data)
-        except Exception as e:
-            logger.error("Reminder error: " + str(e))
-        await asyncio.sleep(60)
-
-async def wiki_autopush_scheduler():
-    """Раз в сутки в 04:00 флашит pending и пушит wiki/ в git.
-    Один редеплой Render в тихий час вместо постоянных пушей в течение дня."""
-    import subprocess
-    cwd = os.path.dirname(os.path.abspath(__file__))
-    while True:
-        try:
-            now = datetime.now()
-            target = now.replace(hour=4, minute=0, second=0, microsecond=0)
-            if now >= target:
-                target += timedelta(days=1)
-            await asyncio.sleep((target - now).total_seconds())
-
-            # 1) Сброс накопленных коррекций в product_mappings.json
-            try:
-                sigma_api.wiki_store.flush_pending()
-            except Exception as e:
-                logger.error("wiki autopush flush error: " + str(e))
-
-            # 2) git add wiki/ + commit + push
-            subprocess.run(["git", "add", "wiki/"], cwd=cwd, check=True)
-            result = subprocess.run(
-                ["git", "commit", "-m", "wiki: daily autopush"],
-                cwd=cwd, capture_output=True, text=True,
-            )
-            if result.returncode != 0 and "nothing to commit" in (result.stdout + result.stderr):
-                logger.info("wiki autopush: nothing to commit")
-                continue
-            subprocess.run(["git", "push"], cwd=cwd, check=True)
-            logger.info("wiki autopush: pushed to git")
-        except Exception as e:
-            logger.error("wiki autopush error: " + str(e))
-            await asyncio.sleep(3600)
-
-
-async def daily_report_scheduler(bot, admin_id):
-    while True:
-        try:
-            now = datetime.now()
-            target = now.replace(hour=12, minute=0, second=0, microsecond=0)
-            if now >= target:
-                target += timedelta(days=1)
-            wait_seconds = (target - now).total_seconds()
-            await asyncio.sleep(wait_seconds)
-            data = assistant_ai.load_data()
-            report = assistant_ai.get_daily_report(data)
-            await bot.send_message(admin_id, report)
-        except Exception as e:
-            logger.error("Daily report error: " + str(e))
-            await asyncio.sleep(3600)
-
-
 async def run_bot():
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", cmd_start))
@@ -2353,9 +1703,6 @@ async def run_bot():
     app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("giveaway", cmd_giveaway))
     app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(CommandHandler("my", cmd_my))
-    app.add_handler(CommandHandler("wiki", cmd_wiki))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_invoice_photo))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_assistant))
     app.add_handler(MessageHandler(filters.ALL, handle_message))
@@ -2363,9 +1710,6 @@ async def run_bot():
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
-    asyncio.create_task(reminder_scheduler(app.bot, ADMIN_ID))
-    asyncio.create_task(daily_report_scheduler(app.bot, ADMIN_ID))
-    asyncio.create_task(wiki_autopush_scheduler())
     await asyncio.Event().wait()
 
 
