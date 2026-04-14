@@ -315,6 +315,11 @@ async def send_sample_pack(bot, chat_id):
         logger.error("Sample pack error: " + str(e))
 
 async def show_main_menu(bot, chat_id):
+    # Защитная перезагрузка: если кэш пуст, но файл с данными на диске есть —
+    # значит post_init не успел / упал молча. Дешевле перечитать.
+    if not beats_db.BEATS_CACHE and os.path.exists(beats_db.BEATS_FILE) and os.path.getsize(beats_db.BEATS_FILE) > 1024:
+        logger.warning("show_main_menu: cache пуст, перечитываю beats_data.json")
+        beats_db.load_beats()
     beats = len([b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == "beat"])
     tracks = len([b for b in beats_db.BEATS_CACHE if b.get("content_type") == "track"])
     remixes = len([b for b in beats_db.BEATS_CACHE if b.get("content_type") == "remix"])
