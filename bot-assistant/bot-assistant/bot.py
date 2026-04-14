@@ -245,12 +245,9 @@ def kb_admin():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Статистика (" + str(len(all_users)) + " польз.)", callback_data="admin_stats")],
         [InlineKeyboardButton("🎹 " + str(beats) + " / 🎤 " + str(tracks) + " / 🔀 " + str(remixes), callback_data="admin_catalog")],
-        [InlineKeyboardButton("🎹 Добавить биты", callback_data="admin_addbeats_beat"),
-         InlineKeyboardButton("🎤 Добавить треки", callback_data="admin_addbeats_track")],
-        [InlineKeyboardButton("🔀 Добавить ремиксы", callback_data="admin_addbeats_remix"),
-         InlineKeyboardButton("🗑 Очистить", callback_data="admin_clearbeats")],
-        [InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast")],
-        [InlineKeyboardButton("🎵 Бит дня сейчас", callback_data="admin_beatofday")],
+        [InlineKeyboardButton("🎤 Добавить треки", callback_data="admin_addbeats_track"),
+         InlineKeyboardButton("🔀 Добавить ремиксы", callback_data="admin_addbeats_remix")],
+        [InlineKeyboardButton("🗑 Очистить", callback_data="admin_clearbeats")],
         [InlineKeyboardButton("📡 Автопост в канал", callback_data="admin_channelpost")],
         [InlineKeyboardButton("🎬 YouTube", callback_data="admin_yt_menu")],
         [InlineKeyboardButton("🎁 Розыгрыш: " + ("🟢 Активен" if giveaway["active"] else "🔴 Нет"), callback_data="admin_giveaway")],
@@ -585,34 +582,6 @@ async def do_search(bot, chat_id, query, user_id):
     rows.append([InlineKeyboardButton("◀️ Меню", callback_data="main_menu")])
     await bot.send_message(chat_id, "🔍 По запросу \"" + query + "\" нашёл " + str(len(results)) + " шт.:",
                            reply_markup=InlineKeyboardMarkup(rows))
-
-
-# ── Бит дня ───────────────────────────────────────────────────
-
-async def send_beat_of_day(bot):
-    pool = [b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == "beat"]
-    if not pool:
-        return 0
-    beat = random.choice(pool)
-    sent = 0
-    for uid in list(all_users.keys()):
-        try:
-            await bot.send_message(uid, "🎵 Бит дня от IIIPLKIII специально для тебя! Врубай 🔥")
-            await send_beat(bot, uid, beat, uid)
-            sent += 1
-            await asyncio.sleep(0.05)
-        except Exception:
-            pass
-    return sent
-
-async def daily_beat_scheduler(bot):
-    while True:
-        now = datetime.now(MSK_TZ)
-        target = now.replace(hour=18, minute=0, second=0, microsecond=0)
-        if now >= target:
-            target += timedelta(days=1)
-        await asyncio.sleep((target - now).total_seconds())
-        await send_beat_of_day(bot)
 
 
 # ── Автопостинг в канал @iiiplfiii ────────────────────────────
@@ -1272,11 +1241,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if data in ("admin_addbeats_beat", "admin_addbeats_track", "admin_addbeats_remix"):
+    if data in ("admin_addbeats_track", "admin_addbeats_remix"):
         if user_id != ADMIN_ID: return
         mode_type = data.replace("admin_addbeats_", "")
         bulk_add_mode[ADMIN_ID] = mode_type
-        icons = {"beat": "🎹 биты", "track": "🎤 треки", "remix": "🔀 ремиксы"}
+        icons = {"track": "🎤 треки", "remix": "🔀 ремиксы"}
         await query.message.reply_text(
             "✅ Режим включён! Всё пойдёт как: " + icons[mode_type] + "\n\nПересылай посты из канала.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⛔ Закончить", callback_data="admin_stopadd")]]))
@@ -1361,20 +1330,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         beats_db.BEATS_BY_ID.clear()
         asyncio.create_task(asyncio.to_thread(beats_db.save_beats))
         await query.message.reply_text("🗑 Каталог очищен!",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ В панель", callback_data="admin_panel")]]))
-        return
-
-    if data == "admin_broadcast":
-        if user_id != ADMIN_ID: return
-        bulk_add_mode[str(ADMIN_ID) + "_broadcast"] = True
-        await query.message.reply_text("📢 Напиши текст — отправлю всем " + str(len(all_users)) + " пользователям:",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")]]))
-        return
-
-    if data == "admin_beatofday":
-        if user_id != ADMIN_ID: return
-        sent = await send_beat_of_day(bot)
-        await query.message.reply_text("✅ Бит дня отправлен " + str(sent) + " пользователям!",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ В панель", callback_data="admin_panel")]]))
         return
 
@@ -1573,22 +1528,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if user_id != ADMIN_ID:
-        return
-
-    broadcast_key = str(ADMIN_ID) + "_broadcast"
-    if broadcast_key in bulk_add_mode:
-        del bulk_add_mode[broadcast_key]
-        if not text:
-            return
-        sent = 0
-        for uid in list(all_users.keys()):
-            try:
-                await bot.send_message(uid, text)
-                sent += 1
-                await asyncio.sleep(0.05)
-            except Exception:
-                pass
-        await message.reply_text("✅ Рассылка улетела! Отправлено: " + str(sent) + " чел.")
         return
 
     if ADMIN_ID not in bulk_add_mode or bulk_add_mode.get(ADMIN_ID) not in ("beat", "track", "remix"):
@@ -2052,7 +1991,6 @@ async def handle_assistant(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != ADMIN_ID: return
     if ADMIN_ID in bulk_add_mode and bulk_add_mode.get(ADMIN_ID) in ("beat","track","remix"): return
-    if str(ADMIN_ID) + "_broadcast" in bulk_add_mode: return
 
     # Ввод новой темы в post_ideas.md (из inline-меню)
     idea_key = str(ADMIN_ID) + "_idea"
@@ -2263,8 +2201,6 @@ async def post_init(application):
         beats_db.load_beats()
     load_users()
     logger.info("Bot started: " + str(len(beats_db.BEATS_CACHE)) + " beats, " + str(len(all_users)) + " users")
-    # daily_beat_scheduler выключен: дублировал контент канала рассылкой в ЛС всем юзерам бота.
-    # Теперь весь автопост идёт через daily_channel_scheduler в @iiiplfiii.
     asyncio.create_task(daily_channel_scheduler(application.bot, ADMIN_ID))
     asyncio.create_task(heartbeat_scheduler())
     asyncio.create_task(sigma_suppliers_scheduler())
