@@ -244,7 +244,16 @@ def kb_admin():
         [InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast")],
         [InlineKeyboardButton("🎵 Бит дня сейчас", callback_data="admin_beatofday")],
         [InlineKeyboardButton("📡 Автопост в канал", callback_data="admin_channelpost")],
+        [InlineKeyboardButton("🎬 YouTube", callback_data="admin_yt_menu")],
         [InlineKeyboardButton("🎁 Розыгрыш: " + ("🟢 Активен" if giveaway["active"] else "🔴 Нет"), callback_data="admin_giveaway")],
+    ])
+
+
+def kb_admin_yt():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 Статистика канала", callback_data="admin_yt_stats")],
+        [InlineKeyboardButton("🔧 Batch-fix 10 type beats", callback_data="admin_yt_fix_confirm")],
+        [InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")],
     ])
 
 
@@ -729,6 +738,65 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         dry_hint = "\n🧪 DRY_RUN включён — публикация пойдёт тебе в ЛС" if os.getenv("POST_DRY_RUN") == "1" else ""
         await query.message.reply_text("📡 Автопост в канал:" + dry_hint, reply_markup=kb_admin_channel())
+        return
+
+    if data == "admin_yt_menu":
+        if user_id != ADMIN_ID:
+            return
+        await query.message.reply_text("🎬 YouTube:", reply_markup=kb_admin_yt())
+        return
+
+    if data == "admin_yt_stats":
+        if user_id != ADMIN_ID:
+            return
+        try:
+            import yt_api
+            s = yt_api.get_channel_stats()
+            await query.message.reply_text(
+                f"📊 {s['title']}\n"
+                f"Подписчиков: {s['subs']}\n"
+                f"Просмотров: {s['views']:,}\n"
+                f"Видео: {s['videos']}"
+            )
+        except Exception as e:
+            logger.exception("yt stats failed")
+            await query.message.reply_text(f"⚠️ Ошибка: {e}")
+        return
+
+    if data == "admin_yt_fix_confirm":
+        if user_id != ADMIN_ID:
+            return
+        import yt_fixes
+        count = len(yt_fixes.FIXES)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"🔥 Да, обновить все {count}", callback_data="admin_yt_fix_go")],
+            [InlineKeyboardButton("◀️ Отмена", callback_data="admin_yt_menu")],
+        ])
+        await query.message.reply_text(
+            f"🔧 Обновить title/description/tags для {count} видео?\n"
+            "Вернуть обратно нельзя — YT перезапишет snippet.",
+            reply_markup=kb,
+        )
+        return
+
+    if data == "admin_yt_fix_go":
+        if user_id != ADMIN_ID:
+            return
+        import yt_api
+        import yt_fixes
+        await query.message.reply_text("⏳ Запускаю batch-fix...")
+        ok, fail = [], []
+        for vid, spec in yt_fixes.FIXES.items():
+            try:
+                yt_api.update_video(vid, spec["title"], spec["description"], spec["tags"])
+                ok.append(vid)
+            except Exception as e:
+                logger.exception("yt_fix failed for %s", vid)
+                fail.append(f"{vid}: {e}")
+        msg = f"✅ Обновлено: {len(ok)}/{len(yt_fixes.FIXES)}"
+        if fail:
+            msg += "\n\n❌ Ошибки:\n" + "\n".join(fail[:10])
+        await query.message.reply_text(msg)
         return
 
     if data.startswith("admin_postnow_"):
