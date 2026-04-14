@@ -820,6 +820,33 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("❌ Отменено")
             return
 
+        if action == "regen":
+            import beat_post_builder
+            meta = payload["meta"]
+            try:
+                new_caption = await beat_post_builder.build_tg_caption_async(meta)
+            except Exception as e:
+                logger.exception("regen caption failed")
+                await query.answer(f"❌ LLM: {e}", show_alert=True)
+                return
+            payload["tg_caption"] = new_caption
+            chat_id = payload.get("tg_preview_chat_id")
+            msg_id = payload.get("tg_preview_msg_id")
+            if chat_id and msg_id:
+                try:
+                    await context.bot.edit_message_caption(
+                        chat_id=chat_id,
+                        message_id=msg_id,
+                        caption=f"👁 Превью TG-поста:\n\n{new_caption}",
+                    )
+                    await query.answer("🔄 Подпись перезаписана")
+                except Exception as e:
+                    logger.exception("edit_message_caption failed")
+                    await query.answer(f"❌ Edit: {e}", show_alert=True)
+            else:
+                await query.answer("⚠️ Превью-сообщение не найдено", show_alert=True)
+            return
+
         from pathlib import Path
         meta = payload["meta"]
         yt_post = payload["yt_post"]
@@ -1970,10 +1997,12 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await status.delete()
 
         # 1) Превью TG-поста — точно как увидят подписчики канала.
-        await update.message.reply_audio(
+        tg_preview_msg = await update.message.reply_audio(
             audio=audio.file_id,
             caption=f"👁 Превью TG-поста:\n\n{tg_caption}",
         )
+        pending_uploads[token]["tg_preview_chat_id"] = tg_preview_msg.chat_id
+        pending_uploads[token]["tg_preview_msg_id"] = tg_preview_msg.message_id
 
         # 2) Превью YT-поста — thumbnail + title + tags + description + кнопки.
         yt_preview = (
@@ -1986,6 +2015,7 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
             [InlineKeyboardButton("🚀 YT + TG", callback_data=f"bu_all_{token}")],
             [InlineKeyboardButton("🎬 Только YouTube", callback_data=f"bu_yt_{token}")],
             [InlineKeyboardButton("📡 Только в канал TG", callback_data=f"bu_tg_{token}")],
+            [InlineKeyboardButton("🔄 Переписать TG-подпись", callback_data=f"bu_regen_{token}")],
             [InlineKeyboardButton("❌ Отмена", callback_data=f"bu_cancel_{token}")],
         ])
         await update.message.reply_photo(
