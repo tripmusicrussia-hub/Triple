@@ -6,6 +6,9 @@ import random
 import os
 import json
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+MSK_TZ = ZoneInfo("Europe/Moscow")
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputFile
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
@@ -604,7 +607,7 @@ async def send_beat_of_day(bot):
 
 async def daily_beat_scheduler(bot):
     while True:
-        now = datetime.now()
+        now = datetime.now(MSK_TZ)
         target = now.replace(hour=18, minute=0, second=0, microsecond=0)
         if now >= target:
             target += timedelta(days=1)
@@ -662,11 +665,13 @@ async def daily_channel_scheduler(bot, admin_id: int):
     """Каждый день в 16:00 МСК готовит preview автопоста и шлёт админу в ЛС."""
     while True:
         try:
-            now = datetime.now()
+            now = datetime.now(MSK_TZ)
             target = now.replace(hour=CHANNEL_POST_HOUR, minute=0, second=0, microsecond=0)
             if now >= target:
                 target += timedelta(days=1)
-            await asyncio.sleep((target - now).total_seconds())
+            wait_s = (target - now).total_seconds()
+            logger.info("daily_channel_scheduler: sleep until %s MSK (%.0fs)", target.isoformat(), wait_s)
+            await asyncio.sleep(wait_s)
             if admin_id:
                 await preview_daily_post(bot, admin_id)
         except Exception as e:
