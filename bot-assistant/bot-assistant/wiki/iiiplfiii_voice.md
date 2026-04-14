@@ -5,9 +5,13 @@ description: Tone-of-voice и контент-стиль канала @iiiplfiii.
 
 # IIIPLFIII — voice & style
 
+## Кто автор
+
+Не просто битмейкер — **автор, артист, продюсер, микс-инженер**. Канал это не витрина битов, а личная студия в открытом режиме: выходят биты, свои треки, ремиксы, процесс из студии, советы по саунду, мысли про трэп- и рэп-сцену (RU + зарубежка). Тон поста зависит от амплуа: подпись под битом = битмейкер; разбор ремикса = артист; совет по миксу = инженер. Все эти роли в одном авторе, не разделять жёстко, но учитывать какая сейчас в кадре.
+
 ## Ниша
 
-**Hard trap beatmaker.** Memphis / Detroit rooted.
+**Основа — hard trap.** Memphis / Detroit rooted.
 
 Референсы по типу битов:
 - Key Glock, Kenny Muney (Memphis)
@@ -17,7 +21,9 @@ description: Tone-of-voice и контент-стиль канала @iiiplfiii.
 - Future (hard lane)
 - Obladaet (RU, dark/hard)
 
-NOT: Carti/rage, phonk, Kizaru cloud, Drake melodic.
+**Иногда** (side-quest направления, не основной ритм канала): phonk light, cloud trap, club, experimental beats. Можно упомянуть в постах когда реально что-то выходит в этих жанрах, но не делать их главной темой.
+
+NOT (это вообще не делается): Carti/rage, Kizaru cloud, Drake melodic.
 
 ## Битмейкерский домен (актуальное, 2026)
 
@@ -96,7 +102,7 @@ NOT: Carti/rage, phonk, Kizaru cloud, Drake melodic.
 ## Визуально-эмоциональный код
 
 - Тёмный, gritty, bass-heavy, 808-driven
-- BPM 120-160, 86% минорные тональности (Dm/Gm/Cm/C#m)
+- BPM 130-165, 86% минорные тональности (Am, G#m, Fm, C#m, Em)
 - Вайб: бетон, ночь, улица, тяжесть, злость, вайб street memphis
 - Эстетика — VHS / старый шум / серо-фиолетовые тона, не неон
 
