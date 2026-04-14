@@ -48,6 +48,11 @@ giveaway = {"active": False, "prize_file": None, "prize_name": "", "end_time": N
 pending_posts: dict[str, dict] = {}
 CHANNEL_POST_HOUR = 16  # МСК
 
+# Превью upload-флоу (новый бит от админа)
+pending_uploads: dict[str, dict] = {}
+TEMP_UPLOAD_DIR = os.path.join(BASE_DIR, "temp_uploads")
+os.makedirs(TEMP_UPLOAD_DIR, exist_ok=True)
+
 ARTIST_TAGS = [
     "keyglock", "bossmandlow", "bossman", "obladaet", "nardowick",
     "kizaru", "scryptonite", "skryptonit", "konfuz", "bigbabytape",
@@ -786,6 +791,100 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"YT_CLIENT_SECRET: {_mask(cs)}\n  {cs_ok}\n\n"
             f"YT_REFRESH_TOKEN: {_mask(rt)}\n  {rt_ok}"
         )
+        return
+
+    # ── Beat upload callbacks (bu_yt, bu_tg, bu_all, bu_cancel) ─────
+    if data.startswith("bu_"):
+        if user_id != ADMIN_ID:
+            return
+        parts = data.split("_", 2)
+        if len(parts) < 3:
+            return
+        action, token = parts[1], parts[2]
+        payload = pending_uploads.get(token)
+        if not payload:
+            await query.message.reply_text("⚠️ Превью устарело. Загрузи mp3 ещё раз.")
+            return
+
+        if action == "cancel":
+            _cleanup_upload(token)
+            await query.message.reply_text("❌ Отменено")
+            return
+
+        from pathlib import Path
+        meta = payload["meta"]
+        yt_post = payload["yt_post"]
+        tg_caption = payload["tg_caption"]
+        video_path: Path = payload["video_path"]
+        thumb_path: Path = payload["thumb_path"]
+
+        yt_ok = None
+        tg_ok = None
+        yt_url = None
+
+        if action in ("yt", "all"):
+            await query.message.reply_text("⏳ Гружу на YouTube...")
+            try:
+                import yt_api
+                loop = asyncio.get_running_loop()
+                video_id = await loop.run_in_executor(
+                    None,
+                    lambda: yt_api.upload_video(
+                        video_path, yt_post.title, yt_post.description,
+                        yt_post.tags, thumb_path,
+                    ),
+                )
+                yt_url = f"https://youtu.be/{video_id}"
+                yt_ok = True
+                # Добавляем в каталог
+                try:
+                    import beats_db
+                    new_id = max([b["id"] for b in beats_db.BEATS_CACHE] + [0]) + 1
+                    beats_db.BEATS_CACHE.append({
+                        "id": new_id,
+                        "msg_id": 0,
+                        "name": yt_post.title,
+                        "tags": yt_post.tags,
+                        "post_url": yt_url,
+                        "bpm": meta.bpm,
+                        "key": meta.key,
+                        "file_id": payload["tg_file_id"],
+                        "content_type": "beat",
+                        "file_unique_id": "",
+                        "classification_confidence": 1.0,
+                        "yt_video_id": video_id,
+                    })
+                    beats_db._rebuild_index()
+                    beats_db.save_beats()
+                except Exception as e:
+                    logger.exception("beats_db append failed")
+            except Exception as e:
+                logger.exception("yt upload failed")
+                yt_ok = False
+                await query.message.reply_text(f"❌ YT ошибка: {e}")
+
+        if action in ("tg", "all"):
+            try:
+                await context.bot.send_audio(
+                    CHANNEL_ID,
+                    audio=payload["tg_file_id"],
+                    caption=tg_caption,
+                )
+                tg_ok = True
+            except Exception as e:
+                logger.exception("tg send failed")
+                tg_ok = False
+                await query.message.reply_text(f"❌ TG ошибка: {e}")
+
+        parts_msg = []
+        if yt_ok:
+            parts_msg.append(f"✅ YT: {yt_url}")
+        if tg_ok:
+            parts_msg.append("✅ TG: опубликовано в канал")
+        if parts_msg:
+            await query.message.reply_text("\n".join(parts_msg))
+
+        _cleanup_upload(token)
         return
 
     if data == "admin_yt_fix_confirm":
@@ -1772,11 +1871,21 @@ async def handle_invoice_confirm(update: Update, context: ContextTypes.DEFAULT_T
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user: return
     if update.effective_user.id != ADMIN_ID: return
-    voice = update.message.voice or update.message.audio
-    if not voice: return
+
+    audio = update.message.audio
+    voice = update.message.voice
+
+    # Если это аудио-файл с именем в формате "... type beat ... BPM KEY.mp3" — upload flow
+    if audio and audio.file_name and "type beat" in audio.file_name.lower():
+        await handle_beat_upload(update, context, audio)
+        return
+
+    # Иначе — голос/аудио в ассистента (транскрипция)
+    src = voice or audio
+    if not src: return
     thinking = await update.message.reply_text("Слушаю...")
     try:
-        file = await context.bot.get_file(voice.file_id)
+        file = await context.bot.get_file(src.file_id)
         file_bytes = bytes(await file.download_as_bytearray())
         text = await assistant_ai.transcribe_voice(file_bytes, "voice.ogg")
         if not text.strip():
@@ -1788,6 +1897,97 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error("Voice error: " + str(e))
         await thinking.edit_text("Ошибка голосового. Попробуй текстом.")
+
+
+async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE, audio):
+    """Обработка присланного mp3: парсит имя → thumbnail + video → preview + кнопки."""
+    import beat_upload
+    import beat_post_builder
+    import thumbnail_generator
+    import video_builder
+    from pathlib import Path
+
+    try:
+        meta = beat_upload.parse_filename(audio.file_name)
+    except ValueError as e:
+        await update.message.reply_text(
+            f"❌ Имя файла не распарсил: {e}\n\n"
+            "Формат: <artist> type beat <NAME> <BPM> <KEY>.mp3\n"
+            "Пример: kenny muney type beat THOUGHTS 160 Am.mp3"
+        )
+        return
+
+    status = await update.message.reply_text(
+        f"🎧 Разобрал: {meta.name} — {meta.artist_display} Type Beat\n"
+        f"⚡ BPM {meta.bpm}  🎹 {meta.key}\n\n"
+        "⏳ Качаю mp3..."
+    )
+
+    token = uuid.uuid4().hex[:12]
+    mp3_path = Path(TEMP_UPLOAD_DIR) / f"{token}.mp3"
+    video_path = Path(TEMP_UPLOAD_DIR) / f"{token}.mp4"
+    thumb_path = Path(TEMP_UPLOAD_DIR) / f"{token}.jpg"
+
+    try:
+        file = await context.bot.get_file(audio.file_id)
+        await file.download_to_drive(str(mp3_path))
+
+        await status.edit_text(status.text + "\n🖼 Рендерю thumbnail...")
+        thumbnail_generator.generate_thumbnail(meta.name, meta.artist_line, thumb_path)
+
+        await status.edit_text(status.text + "\n🎬 Собираю видео (ffmpeg)...")
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, video_builder.build_video, mp3_path, video_path)
+
+        yt_post = beat_post_builder.build_yt_post(meta)
+        tg_caption = beat_post_builder.build_tg_caption(meta)
+
+        pending_uploads[token] = {
+            "meta": meta,
+            "mp3_path": mp3_path,
+            "video_path": video_path,
+            "thumb_path": thumb_path,
+            "yt_post": yt_post,
+            "tg_caption": tg_caption,
+            "tg_file_id": audio.file_id,
+        }
+
+        preview = (
+            f"🎬 YouTube title:\n{yt_post.title}\n\n"
+            f"🏷 Tags: {', '.join(yt_post.tags[:6])} ...\n\n"
+            f"📝 Description (start):\n{yt_post.description[:400]}...\n\n"
+            f"💬 Telegram caption:\n{tg_caption}"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎬 На YouTube", callback_data=f"bu_yt_{token}")],
+            [InlineKeyboardButton("📡 В канал TG", callback_data=f"bu_tg_{token}")],
+            [InlineKeyboardButton("🚀 YT + TG", callback_data=f"bu_all_{token}")],
+            [InlineKeyboardButton("❌ Отмена", callback_data=f"bu_cancel_{token}")],
+        ])
+        await status.delete()
+        await update.message.reply_photo(
+            photo=open(thumb_path, "rb"),
+            caption=preview[:1024],
+            reply_markup=kb,
+        )
+    except Exception as e:
+        logger.exception("beat_upload failed")
+        await status.edit_text(f"❌ Ошибка: {e}")
+        _cleanup_upload(token)
+
+
+def _cleanup_upload(token: str):
+    """Удаляет temp файлы и запись из pending_uploads."""
+    data = pending_uploads.pop(token, None)
+    if not data:
+        return
+    for key in ("mp3_path", "video_path", "thumb_path"):
+        p = data.get(key)
+        if p:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
 
 async def handle_assistant(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not update.message: return

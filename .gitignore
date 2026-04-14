@@ -24,6 +24,10 @@ debug_*.jpg
 test_ocr_out/
 *.raw.json
 
+# Beat upload temp files
+bot-assistant/bot-assistant/temp_uploads/
+bot-assistant/bot-assistant/assets/thumb_samples/
+
 # OS
 .DS_Store
 Thumbs.db

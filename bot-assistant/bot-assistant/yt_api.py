@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Optional
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaFileUpload
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +67,57 @@ def update_video(
     except HttpError as e:
         logger.error("YT update FAIL %s: %s", video_id, e)
         raise
+
+
+def upload_video(
+    video_path: Path,
+    title: str,
+    description: str,
+    tags: list[str],
+    thumbnail_path: Optional[Path] = None,
+    category_id: str = "10",
+    privacy: str = "public",
+) -> str:
+    """Загружает видео на YT + опционально кастомный thumbnail.
+
+    Returns video_id.
+    """
+    if not video_path.exists():
+        raise FileNotFoundError(video_path)
+    yt = get_yt_client()
+    body = {
+        "snippet": {
+            "title": title,
+            "description": description,
+            "tags": tags,
+            "categoryId": category_id,
+        },
+        "status": {
+            "privacyStatus": privacy,
+            "selfDeclaredMadeForKids": False,
+        },
+    }
+    media = MediaFileUpload(str(video_path), chunksize=-1, resumable=True, mimetype="video/mp4")
+    req = yt.videos().insert(part="snippet,status", body=body, media_body=media)
+    resp = None
+    while resp is None:
+        status, resp = req.next_chunk()
+        if status:
+            logger.info("YT upload progress: %d%%", int(status.progress() * 100))
+    video_id = resp["id"]
+    logger.info("YT upload OK: %s", video_id)
+
+    if thumbnail_path and thumbnail_path.exists():
+        try:
+            yt.thumbnails().set(
+                videoId=video_id,
+                media_body=MediaFileUpload(str(thumbnail_path), mimetype="image/jpeg"),
+            ).execute()
+            logger.info("YT thumbnail set for %s", video_id)
+        except HttpError as e:
+            logger.warning("YT thumbnail failed (не критично): %s", e)
+
+    return video_id
 
 
 def get_channel_stats() -> dict:
