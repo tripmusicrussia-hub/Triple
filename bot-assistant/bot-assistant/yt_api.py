@@ -24,9 +24,9 @@ SCOPES = [
 
 
 def get_yt_client():
-    client_id = os.getenv("YT_CLIENT_ID", "")
-    client_secret = os.getenv("YT_CLIENT_SECRET", "")
-    refresh_token = os.getenv("YT_REFRESH_TOKEN", "")
+    client_id = os.getenv("YT_CLIENT_ID", "").strip()
+    client_secret = os.getenv("YT_CLIENT_SECRET", "").strip()
+    refresh_token = os.getenv("YT_REFRESH_TOKEN", "").strip()
     if not all([client_id, client_secret, refresh_token]):
         raise RuntimeError("YT_CLIENT_ID / YT_CLIENT_SECRET / YT_REFRESH_TOKEN не заданы в env")
     creds = Credentials(
