@@ -1,9 +1,9 @@
 ---
-name: iiiplkiii-voice
-description: Tone-of-voice и контент-стиль канала @iiiplfiii (IIIPLKIII). Hard / Memphis / Detroit trap beatmaker. Используется и в чате при ручной редактуре, и ботом как system-prompt для LLM-генерации постов.
+name: iiiplfiii-voice
+description: Tone-of-voice и контент-стиль канала @iiiplfiii. Hard / Memphis / Detroit trap beatmaker. Используется и в чате при ручной редактуре, и ботом как system-prompt для LLM-генерации постов.
 ---
 
-# IIIPLKIII — voice & style
+# IIIPLFIII — voice & style
 
 ## Ниша
 

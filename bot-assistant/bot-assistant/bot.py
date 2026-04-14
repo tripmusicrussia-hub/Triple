@@ -2195,6 +2195,11 @@ async def sigma_suppliers_scheduler():
         await load_sigma_suppliers()
 
 async def post_init(application):
+    try:
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("post_init: webhook cleared, pending updates dropped")
+    except Exception as e:
+        logger.warning("post_init: delete_webhook failed: %s", e)
     beats_db.load_beats()
     if not beats_db.BEATS_CACHE and os.path.exists(beats_db.BEATS_FILE) and os.path.getsize(beats_db.BEATS_FILE) > 1024:
         logger.warning("post_init: cache empty but file has content — retrying load_beats after 2s")

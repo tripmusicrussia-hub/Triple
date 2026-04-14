@@ -1,7 +1,7 @@
 """
 Генератор ежедневных постов в канал @iiiplfiii.
 
-System-prompt для LLM читается из ~/.claude/skills/iiiplkiii-voice/SKILL.md
+System-prompt для LLM читается из ~/.claude/skills/iiiplfiii-voice/SKILL.md
 (единый источник tone-of-voice — общий для Claude и для бота).
 
 Рубрики по дням недели:
@@ -40,8 +40,8 @@ logger = logging.getLogger(__name__)
 HERE = Path(__file__).parent
 # Источник tone-of-voice. В приоритете — копия в репо (для прода на Render),
 # fallback — локальный Claude skill (удобно для сессий/разработки).
-_SKILL_REPO = HERE / "wiki" / "iiiplkiii_voice.md"
-_SKILL_LOCAL = Path.home() / ".claude" / "skills" / "iiiplkiii-voice" / "SKILL.md"
+_SKILL_REPO = HERE / "wiki" / "iiiplfiii_voice.md"
+_SKILL_LOCAL = Path.home() / ".claude" / "skills" / "iiiplfiii-voice" / "SKILL.md"
 SKILL_PATH = _SKILL_REPO if _SKILL_REPO.exists() else _SKILL_LOCAL
 POST_IDEAS_PATH = HERE / "wiki" / "post_ideas.md"
 
