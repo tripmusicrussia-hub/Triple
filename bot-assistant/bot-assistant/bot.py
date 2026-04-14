@@ -2263,7 +2263,8 @@ async def post_init(application):
         beats_db.load_beats()
     load_users()
     logger.info("Bot started: " + str(len(beats_db.BEATS_CACHE)) + " beats, " + str(len(all_users)) + " users")
-    asyncio.create_task(daily_beat_scheduler(application.bot))
+    # daily_beat_scheduler выключен: дублировал контент канала рассылкой в ЛС всем юзерам бота.
+    # Теперь весь автопост идёт через daily_channel_scheduler в @iiiplfiii.
     asyncio.create_task(daily_channel_scheduler(application.bot, ADMIN_ID))
     asyncio.create_task(heartbeat_scheduler())
     asyncio.create_task(sigma_suppliers_scheduler())
