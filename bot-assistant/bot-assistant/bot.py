@@ -1639,9 +1639,21 @@ async def handle_assistant(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _append_idea(update, wd, text.strip())
         return
 
-    # Layer 3 (conversational agent) сюда подключится позже.
-    # Сейчас — свободный текст от админа игнорируется.
-    return
+    text = update.message.text or ""
+    if not text.strip() or text.startswith("/"):
+        return
+
+    import agent_router
+    thinking = await update.message.reply_text("…")
+    try:
+        reply = await agent_router.handle(text)
+    except Exception as e:
+        logger.exception("agent_router crashed")
+        reply = f"❌ Агент упал: {str(e)[:200]}"
+    try:
+        await thinking.edit_text(reply or "(пусто)")
+    except Exception:
+        await update.message.reply_text(reply or "(пусто)")
 
 
 # ── Запуск ────────────────────────────────────────────────────
