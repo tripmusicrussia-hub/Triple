@@ -20,6 +20,7 @@ import beats_db
 import post_generator
 import licensing
 import sales
+import cryptobot
 import uuid
 import io
 
@@ -217,8 +218,10 @@ def kb_after_beat(beat_id, content_type="beat"):
     back_map = {"beat": "menu_beat", "track": "menu_track", "remix": "menu_remix"}
     rows = [[InlineKeyboardButton("▶️ Следующий похожий", callback_data="next_" + str(beat_id))]]
     if content_type == "beat":
-        rows.append([InlineKeyboardButton(f"💰 Купить MP3 · {licensing.PRICE_MP3_STARS}⭐",
-                                          callback_data="buy_mp3_" + str(beat_id))])
+        rows.append([
+            InlineKeyboardButton(f"⭐ {licensing.PRICE_MP3_STARS}", callback_data="buy_mp3_" + str(beat_id)),
+            InlineKeyboardButton(f"💵 {licensing.PRICE_MP3_USDT:g} USDT", callback_data="buy_usdt_" + str(beat_id)),
+        ])
     rows.append([InlineKeyboardButton("❤️ В избранное", callback_data="fav_" + str(beat_id)),
                  InlineKeyboardButton("🎲 Случайный", callback_data="random_beat")])
     rows.append([InlineKeyboardButton("◀️ Меню", callback_data=back_map.get(content_type, "main_menu"))])
@@ -226,10 +229,10 @@ def kb_after_beat(beat_id, content_type="beat"):
 
 
 def kb_channel_beat_buy(beat_id: int) -> InlineKeyboardMarkup:
-    """Клавиатура под публикацией бита в канале: Купить MP3 через Stars + ссылка на ЛС для WAV/Exclusive."""
+    """Клавиатура под публикацией бита в канале: Stars + USDT + ссылка на ЛС для WAV/Exclusive."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"💰 Купить MP3 · {licensing.PRICE_MP3_STARS}⭐",
-                              callback_data="buy_mp3_" + str(beat_id))],
+        [InlineKeyboardButton(f"⭐ MP3 · {licensing.PRICE_MP3_STARS}", callback_data="buy_mp3_" + str(beat_id)),
+         InlineKeyboardButton(f"💵 MP3 · {licensing.PRICE_MP3_USDT:g} USDT", callback_data="buy_usdt_" + str(beat_id))],
         [InlineKeyboardButton("✍️ WAV / Unlimited / Exclusive", url="https://t.me/iiiplfiii")],
     ])
 
@@ -1172,6 +1175,49 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_beat(bot, query.message.chat_id, beat, user_id)
         return
 
+    if data.startswith("buy_usdt_"):
+        try:
+            beat_id = int(data[len("buy_usdt_"):])
+        except ValueError:
+            return
+        beat = beats_db.get_beat_by_id(beat_id)
+        if not beat:
+            await query.answer("Бит не найден", show_alert=True)
+            return
+        bpm = beat.get("bpm") or "?"
+        key = beat.get("key") or "?"
+        try:
+            inv = await cryptobot.create_invoice(
+                amount=licensing.PRICE_MP3_USDT,
+                asset="USDT",
+                description=f"MP3 Lease на «{beat['name']}» ({bpm} BPM, {key})",
+                payload=f"mp3_lease:{beat_id}:{user_id}",
+            )
+        except Exception as e:
+            logger.exception("cryptobot.create_invoice failed")
+            await query.answer(f"⚠️ CryptoBot недоступен: {str(e)[:150]}", show_alert=True)
+            return
+        pay_url = inv.get("pay_url") or inv.get("mini_app_invoice_url") or inv.get("bot_invoice_url")
+        invoice_id = int(inv.get("invoice_id"))
+        pending_usdt_invoices[invoice_id] = {"user_id": user_id, "beat_id": beat_id}
+        try:
+            await bot.send_message(
+                user_id,
+                f"💵 Счёт на {licensing.PRICE_MP3_USDT:g} USDT за «{beat['name']}»\n\n"
+                f"Жми кнопку ниже — откроется CryptoBot, оплати из @wallet.\n"
+                f"Как пройдёт оплата — бит и лицензия автоматом придут сюда (ждать 10-30 сек).\n\n"
+                f"⏱ Счёт активен 30 минут.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💳 Оплатить в CryptoBot", url=pay_url)]]),
+            )
+            if query.message.chat_id != user_id:
+                await query.answer("💵 Счёт отправил в ЛС бота", show_alert=False)
+        except TelegramError as e:
+            logger.warning("send USDT invoice msg failed: %s", e)
+            await query.answer("Сначала напиши /start боту в ЛС — тогда пришлю счёт.", show_alert=True)
+            return
+        asyncio.create_task(poll_usdt_invoice(bot, invoice_id, user_id, beat_id))
+        return
+
     if data.startswith("buy_mp3_"):
         try:
             beat_id = int(data[len("buy_mp3_"):])
@@ -1721,6 +1767,76 @@ async def handle_assistant(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply or "(пусто)")
 
 
+# ── Доставка бита + лицензии (общая для Stars и USDT) ────────
+
+async def _deliver_mp3_lease(bot, user, beat: dict, *, payment_charge_id: str,
+                             amount: int | float, currency: str) -> None:
+    """Отправляет mp3 + txt-лицензию покупателю, логирует продажу, уведомляет админа."""
+    buyer_name = (user.full_name or user.username or str(user.id)).strip()
+    license_text = licensing.mp3_lease_text(
+        buyer_name=buyer_name,
+        buyer_tg_id=user.id,
+        beat_name=beat["name"],
+        bpm=beat.get("bpm"),
+        key=beat.get("key"),
+        payment_charge_id=payment_charge_id,
+    )
+    try:
+        await bot.send_audio(
+            user.id,
+            audio=beat["file_id"],
+            caption=f"🎹 {beat['name']}\n\nMP3 Lease — ты красавчик 🔥\nЛицензия ниже.",
+        )
+        license_bytes = io.BytesIO(license_text.encode("utf-8"))
+        license_bytes.name = f"LICENSE_{beat['name'].replace(' ', '_')}_{user.id}.txt"
+        await bot.send_document(
+            user.id,
+            document=InputFile(license_bytes, filename=license_bytes.name),
+            caption="📄 Сохрани этот файл — это твоё подтверждение лицензии.",
+        )
+    except Exception as e:
+        logger.exception("delivery failed")
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                f"🚨 Оплата прошла, доставка сломалась!\n"
+                f"User: {user.id} @{user.username}\nBeat: {beat['name']}\n"
+                f"charge: {payment_charge_id}\nError: {e}",
+            )
+        except Exception:
+            pass
+
+    try:
+        sales.log_sale(
+            buyer_tg_id=user.id,
+            buyer_username=user.username,
+            buyer_name=buyer_name,
+            beat_id=beat["id"],
+            beat_name=beat["name"],
+            license_type="mp3_lease",
+            stars_amount=int(amount) if currency == "XTR" else 0,
+            currency=currency,
+            payment_charge_id=payment_charge_id,
+            provider_charge_id=None,
+            status="completed",
+        )
+    except Exception:
+        logger.exception("sales.log_sale failed")
+
+    try:
+        amount_disp = f"{amount}⭐" if currency == "XTR" else f"{amount} {currency}"
+        await bot.send_message(
+            ADMIN_ID,
+            f"💰 Продажа MP3 Lease\n"
+            f"Бит: {beat['name']}\n"
+            f"Покупатель: {buyer_name} (@{user.username or '—'}, id={user.id})\n"
+            f"Сумма: {amount_disp}\n"
+            f"charge: {payment_charge_id}",
+        )
+    except Exception:
+        pass
+
+
 # ── Telegram Stars payments ───────────────────────────────────
 
 async def handle_precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1742,7 +1858,7 @@ async def handle_precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def handle_successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """После успешной оплаты: шлём mp3 + txt-лицензию, логируем продажу."""
+    """После успешной оплаты Stars: вызываем общую доставку."""
     msg = update.message
     if not msg or not msg.successful_payment:
         return
@@ -1764,76 +1880,72 @@ async def handle_successful_payment(update: Update, context: ContextTypes.DEFAUL
         try:
             await bot.send_message(
                 ADMIN_ID,
-                f"🚨 Оплата прошла, но бит id={beat_id} не найден.\n"
+                f"🚨 Stars-оплата прошла, но бит id={beat_id} не найден.\n"
                 f"User: {user.id} @{user.username}\ncharge: {sp.telegram_payment_charge_id}",
             )
         except Exception:
             pass
         return
 
-    buyer_name = (user.full_name or user.username or str(user.id)).strip()
-    license_text = licensing.mp3_lease_text(
-        buyer_name=buyer_name,
-        buyer_tg_id=user.id,
-        beat_name=beat["name"],
-        bpm=beat.get("bpm"),
-        key=beat.get("key"),
+    await _deliver_mp3_lease(
+        bot, user, beat,
         payment_charge_id=sp.telegram_payment_charge_id,
+        amount=sp.total_amount,
+        currency=sp.currency or "XTR",
     )
 
-    try:
-        await bot.send_audio(
-            user.id,
-            audio=beat["file_id"],
-            caption=f"🎹 {beat['name']}\n\nMP3 Lease — ты красавчик 🔥\nЛицензия ниже.",
-        )
-        license_bytes = io.BytesIO(license_text.encode("utf-8"))
-        license_bytes.name = f"LICENSE_{beat['name'].replace(' ', '_')}_{user.id}.txt"
-        await bot.send_document(
-            user.id,
-            document=InputFile(license_bytes, filename=license_bytes.name),
-            caption="📄 Сохрани этот файл — это твоё подтверждение лицензии.",
-        )
-    except Exception as e:
-        logger.exception("delivery failed")
+
+# ── CryptoBot (USDT) payments ─────────────────────────────────
+
+# Активные USDT-инвойсы: invoice_id → (user_id, beat_id, created_at)
+pending_usdt_invoices: dict[int, dict] = {}
+
+
+async def poll_usdt_invoice(bot, invoice_id: int, user_id: int, beat_id: int,
+                            timeout_sec: int = 1800):
+    """Пуллит инвойс до оплаты или expiry. Доставляет бит при paid."""
+    import time
+    started = time.monotonic()
+    while time.monotonic() - started < timeout_sec:
+        await asyncio.sleep(5)
         try:
-            await bot.send_message(
-                ADMIN_ID,
-                f"🚨 Оплата прошла, доставка сломалась!\n"
-                f"User: {user.id} @{user.username}\nBeat: {beat['name']}\n"
-                f"charge: {sp.telegram_payment_charge_id}\nError: {e}",
+            inv = await cryptobot.get_invoice(invoice_id)
+        except Exception as e:
+            logger.warning("poll_usdt_invoice getInvoices err: %s", e)
+            continue
+        if not inv:
+            continue
+        status = inv.get("status")
+        if status == "paid":
+            beat = beats_db.get_beat_by_id(beat_id)
+            if not beat:
+                try:
+                    await bot.send_message(user_id, "⚠️ Бит пропал из каталога. Напишу автору: @iiiplfiii")
+                except Exception:
+                    pass
+                pending_usdt_invoices.pop(invoice_id, None)
+                return
+            try:
+                user = await bot.get_chat(user_id)
+            except Exception:
+                class _U:
+                    pass
+                user = _U()
+                user.id = user_id
+                user.full_name = str(user_id)
+                user.username = None
+            await _deliver_mp3_lease(
+                bot, user, beat,
+                payment_charge_id=f"cryptobot:{invoice_id}:{inv.get('hash', '')}",
+                amount=float(inv.get("amount") or 0),
+                currency=inv.get("asset") or "USDT",
             )
-        except Exception:
-            pass
-
-    try:
-        sales.log_sale(
-            buyer_tg_id=user.id,
-            buyer_username=user.username,
-            buyer_name=buyer_name,
-            beat_id=beat_id,
-            beat_name=beat["name"],
-            license_type="mp3_lease",
-            stars_amount=sp.total_amount,
-            currency=sp.currency,
-            payment_charge_id=sp.telegram_payment_charge_id,
-            provider_charge_id=sp.provider_payment_charge_id,
-            status="completed",
-        )
-    except Exception:
-        logger.exception("sales.log_sale failed")
-
-    try:
-        await bot.send_message(
-            ADMIN_ID,
-            f"💰 Продажа MP3 Lease\n"
-            f"Бит: {beat['name']}\n"
-            f"Покупатель: {buyer_name} (@{user.username or '—'}, id={user.id})\n"
-            f"Сумма: {sp.total_amount}⭐\n"
-            f"charge: {sp.telegram_payment_charge_id}",
-        )
-    except Exception:
-        pass
+            pending_usdt_invoices.pop(invoice_id, None)
+            return
+        if status == "expired":
+            pending_usdt_invoices.pop(invoice_id, None)
+            return
+    pending_usdt_invoices.pop(invoice_id, None)
 
 
 # ── Запуск ────────────────────────────────────────────────────

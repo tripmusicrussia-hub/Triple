@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 _MSK = ZoneInfo("Europe/Moscow")
 
 PRICE_MP3_STARS = 500  # ~$5 net после Fragment payout
+PRICE_MP3_USDT = 5.0   # 5 USDT напрямую, комиссия CryptoBot ~3% при выводе
 
 PRODUCER = "TRIPLE FILL"
 PRODUCER_CONTACT = "@iiiplfiii"
