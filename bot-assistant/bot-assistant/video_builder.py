@@ -75,30 +75,30 @@ def build_video(
     logger.info("duration: %.2fs, building video %s", duration, out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Stream copy видео (без re-encode) — loop.mp4 уже в целевом формате 1280x720 H.264.
+    # Энкодим только аудио (mp3 → aac). Билд ~5 сек вместо 2-3 мин.
     cmd = [
         _ffmpeg(), "-y",
-        "-stream_loop", "-1",        # лупим видео бесконечно
+        "-stream_loop", "-1",
         "-i", str(loop_path),
         "-i", str(mp3_path),
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-crf", "23",
-        "-pix_fmt", "yuv420p",
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-c:v", "copy",
         "-c:a", "aac",
         "-b:a", "192k",
-        "-shortest",                  # режем по длине audio
+        "-shortest",
         "-t", f"{duration:.2f}",
-        "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080",
         "-movflags", "+faststart",
         str(out_path),
     ]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     except subprocess.TimeoutExpired:
-        raise RuntimeError("ffmpeg timeout (10 min) — видео слишком длинное или CPU перегружен")
+        raise RuntimeError("ffmpeg timeout (2 min) — что-то сильно не так, stream copy должен быть секунды")
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg failed ({proc.returncode}): {proc.stderr[-1500:]}")
-    logger.info("video built: %s (%.1fs)", out_path, duration)
+    logger.info("video built OK: %s (audio %.1fs)", out_path, duration)
     return out_path
 
 

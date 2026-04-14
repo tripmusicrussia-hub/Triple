@@ -27,6 +27,7 @@ test_ocr_out/
 # Beat upload temp files
 bot-assistant/bot-assistant/temp_uploads/
 bot-assistant/bot-assistant/assets/thumb_samples/
+bot-assistant/bot-assistant/assets/loop_*_original.mp4
 
 # OS
 .DS_Store
