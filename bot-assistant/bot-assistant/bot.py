@@ -1936,8 +1936,10 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
         thumbnail_generator.generate_thumbnail(meta.name, meta.artist_line, thumb_path)
 
         await status.edit_text(status.text + "\n🎬 Собираю видео (ffmpeg)...")
+        logger.info("upload: starting ffmpeg for %s", mp3_path)
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, video_builder.build_video, mp3_path, video_path)
+        logger.info("upload: ffmpeg done, building post meta")
 
         yt_post = beat_post_builder.build_yt_post(meta)
         tg_caption = beat_post_builder.build_tg_caption(meta)
@@ -2206,7 +2208,16 @@ async def post_init(application):
     asyncio.create_task(sigma_suppliers_scheduler())
     asyncio.create_task(load_sigma_suppliers())
     asyncio.create_task(load_sigma_products())
+    asyncio.create_task(asyncio.to_thread(_warmup_ffmpeg))
     write_heartbeat()
+
+
+def _warmup_ffmpeg():
+    try:
+        import video_builder
+        video_builder.warmup()
+    except Exception as e:
+        logger.warning("ffmpeg warmup failed: %s", e)
 
 
 async def load_sigma_products():

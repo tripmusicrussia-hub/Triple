@@ -16,9 +16,25 @@ LOOP_PATH = HERE / "assets" / "loop.mp4"
 
 logger = logging.getLogger(__name__)
 
+_FFMPEG_CACHE: str | None = None
+
 
 def _ffmpeg() -> str:
-    return imageio_ffmpeg.get_ffmpeg_exe()
+    global _FFMPEG_CACHE
+    if _FFMPEG_CACHE:
+        return _FFMPEG_CACHE
+    logger.info("resolving ffmpeg binary (may download on first run)...")
+    _FFMPEG_CACHE = imageio_ffmpeg.get_ffmpeg_exe()
+    logger.info("ffmpeg binary: %s", _FFMPEG_CACHE)
+    return _FFMPEG_CACHE
+
+
+def warmup():
+    """Прогревает ffmpeg-бинарник — вызвать на старте бота, чтобы первый upload не ждал скачивания."""
+    try:
+        _ffmpeg()
+    except Exception as e:
+        logger.warning("ffmpeg warmup failed: %s", e)
 
 
 def _probe_duration(path: Path) -> float:
@@ -54,7 +70,9 @@ def build_video(
     if not mp3_path.exists():
         raise FileNotFoundError(f"mp3 not found: {mp3_path}")
 
+    logger.info("probing duration of %s", mp3_path)
     duration = _probe_duration(mp3_path)
+    logger.info("duration: %.2fs, building video %s", duration, out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     cmd = [
@@ -74,8 +92,10 @@ def build_video(
         "-movflags", "+faststart",
         str(out_path),
     ]
-    logger.info("ffmpeg cmd: %s", " ".join(cmd))
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("ffmpeg timeout (10 min) — видео слишком длинное или CPU перегружен")
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg failed ({proc.returncode}): {proc.stderr[-1500:]}")
     logger.info("video built: %s (%.1fs)", out_path, duration)
