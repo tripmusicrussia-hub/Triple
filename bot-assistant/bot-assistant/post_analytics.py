@@ -1,8 +1,8 @@
-"""Append-only журнал публикаций для аналитики «какой стиль подписи заходит».
+"""Журнал публикаций для аналитики «какой стиль подписи заходит».
 
-Phase 1: только пишем — style_id, beat_name, tg_message_id, yt_video_id, caption.
-Phase 2 (позже): collector раз в неделю обогатит события метриками из YT Analytics.
-Phase 3: weekly digest + биасинг выбора стиля.
+Dual-write:
+- Supabase `post_events` (primary) — если SUPABASE_URL/KEY заданы
+- Локальный post_events.jsonl (backup) — всегда, не теряемся если Supabase лёг
 """
 from __future__ import annotations
 
@@ -21,16 +21,49 @@ FALLBACK_LABEL = "fallback"
 _HERE = os.path.dirname(os.path.abspath(__file__))
 EVENTS_PATH = os.path.join(_HERE, "post_events.jsonl")
 _MSK = ZoneInfo("Europe/Moscow")
+_TABLE = "post_events"
+
+_supabase = None
+
+
+def _get_supabase():
+    """Lazy-init клиент. Возвращает None если env не задан или supabase не установлен."""
+    global _supabase
+    if _supabase is not None:
+        return _supabase if _supabase is not False else None
+    url = os.getenv("SUPABASE_URL", "").strip()
+    key = os.getenv("SUPABASE_KEY", "").strip()
+    if not url or not key:
+        _supabase = False
+        return None
+    try:
+        from supabase import create_client
+        _supabase = create_client(url, key)
+        logger.info("post_analytics: Supabase client initialized")
+        return _supabase
+    except Exception as e:
+        logger.warning("post_analytics: Supabase init failed (%s), using jsonl only", e)
+        _supabase = False
+        return None
 
 
 def log_event(**fields: Any) -> None:
-    """Append JSON-line в post_events.jsonl. Никогда не кидает — только логирует warning."""
+    """Пишет событие в Supabase (если доступен) + локальный jsonl backup.
+    Никогда не кидает — оба канала изолированы try/except."""
+    record = {"ts": datetime.now(_MSK).isoformat(), **fields}
+
     try:
-        record = {"ts": datetime.now(_MSK).isoformat(), **fields}
         with open(EVENTS_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception as e:
-        logger.warning("post_analytics log_event failed: %s", e)
+        logger.warning("post_analytics jsonl write failed: %s", e)
+
+    client = _get_supabase()
+    if client is not None:
+        try:
+            client.table(_TABLE).insert(record).execute()
+        except Exception as e:
+            logger.warning("post_analytics Supabase insert failed: %s", e)
 
 
 def read_events() -> Iterator[dict]:
