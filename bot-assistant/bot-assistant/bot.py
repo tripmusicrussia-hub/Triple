@@ -438,13 +438,22 @@ async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     beats_db.load_beats()
     after = len(beats_db.BEATS_CACHE)
     types = dict(_Counter(b.get("content_type", "?") for b in beats_db.BEATS_CACHE))
+    ch_raw = _os.getenv("CHANNEL_ID", "")
+    ch_used = CHANNEL_ID
+    ch_info = f"CHANNEL_ID raw: len={len(ch_raw)} repr={ch_raw!r}\nCHANNEL_ID used: {ch_used!r}"
+    try:
+        chat = await context.bot.get_chat(CHANNEL_ID)
+        ch_info += f"\nget_chat OK: id={chat.id} type={chat.type} title={chat.title!r} username=@{chat.username}"
+    except Exception as e:
+        ch_info += f"\nget_chat FAIL: {e}"
     msg = (
         "🔧 Diag\n"
         f"cwd: {cwd}\n"
         f"BEATS_FILE: {path}\n"
         f"exists: {exists}, size: {size} bytes\n"
         f"BEATS_CACHE before/after reload: {before} → {after}\n"
-        f"types: {types}"
+        f"types: {types}\n\n"
+        f"{ch_info}"
     )
     await update.message.reply_text(msg)
 
@@ -865,10 +874,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if action in ("tg", "all"):
             try:
-                await context.bot.send_audio(
+                sent = await context.bot.send_audio(
                     CHANNEL_ID,
                     audio=payload["tg_file_id"],
                     caption=tg_caption,
+                )
+                logger.info(
+                    "tg send_audio OK: target=%r landed chat_id=%s type=%s username=@%s title=%r message_id=%s",
+                    CHANNEL_ID, sent.chat.id, sent.chat.type, sent.chat.username, sent.chat.title, sent.message_id,
                 )
                 tg_ok = True
             except Exception as e:
