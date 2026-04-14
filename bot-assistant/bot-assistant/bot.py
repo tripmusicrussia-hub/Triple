@@ -1622,33 +1622,44 @@ def _cleanup_upload(token: str):
 async def handle_assistant(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not update.message: return
     user_id = update.effective_user.id
-    if user_id != ADMIN_ID: return
-    if ADMIN_ID in bulk_add_mode and bulk_add_mode.get(ADMIN_ID) in ("beat","track","remix"): return
-
-    # Ввод новой темы в post_ideas.md (из inline-меню)
-    idea_key = str(ADMIN_ID) + "_idea"
-    if idea_key in bulk_add_mode:
-        text = update.message.text or ""
-        if text.strip() == "/cancel":
-            del bulk_add_mode[idea_key]
-            await update.message.reply_text("❌ Отменено")
-            return
-        if not text.strip():
-            return
-        wd = bulk_add_mode.pop(idea_key)
-        await _append_idea(update, wd, text.strip())
-        return
-
     text = update.message.text or ""
     if not text.strip() or text.startswith("/"):
         return
 
-    import agent_router
+    # Кнопочный поиск (🔍 Поиск) — для всех, приоритет выше любого агента
+    search_key = str(user_id) + "_search"
+    if search_key in bulk_add_mode:
+        del bulk_add_mode[search_key]
+        await do_search(context.bot, update.message.chat_id, text, user_id)
+        return
+
+    if user_id == ADMIN_ID:
+        # Admin-only: bulk-add битов/треков/ремиксов — пропускаем, handle_message обработает
+        if bulk_add_mode.get(ADMIN_ID) in ("beat", "track", "remix"):
+            return
+
+        # Ввод новой темы в post_ideas.md (из inline-меню)
+        idea_key = str(ADMIN_ID) + "_idea"
+        if idea_key in bulk_add_mode:
+            if text.strip() == "/cancel":
+                del bulk_add_mode[idea_key]
+                await update.message.reply_text("❌ Отменено")
+                return
+            wd = bulk_add_mode.pop(idea_key)
+            await _append_idea(update, wd, text.strip())
+            return
+
+        import agent_router
+        agent_handle = agent_router.handle
+    else:
+        import user_agent
+        agent_handle = user_agent.handle
+
     thinking = await update.message.reply_text("…")
     try:
-        reply = await agent_router.handle(text)
+        reply = await agent_handle(text)
     except Exception as e:
-        logger.exception("agent_router crashed")
+        logger.exception("agent crashed")
         reply = f"❌ Агент упал: {str(e)[:200]}"
     try:
         await thinking.edit_text(reply or "(пусто)")
