@@ -1955,7 +1955,7 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
         logger.info("upload: ffmpeg done, building post meta")
 
         yt_post = beat_post_builder.build_yt_post(meta)
-        tg_caption = beat_post_builder.build_tg_caption(meta)
+        tg_caption = await beat_post_builder.build_tg_caption_async(meta)
 
         pending_uploads[token] = {
             "meta": meta,

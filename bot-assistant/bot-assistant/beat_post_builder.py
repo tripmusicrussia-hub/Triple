@@ -1,13 +1,18 @@
 """Строит YT title/description/tags и TG caption для свежего бита.
 
 Использует проверенную winner-формулу из yt_fixes.py.
+TG-подпись генерится LLM в голосе iiiplfiii-voice (разные стили каждый раз).
 """
 from __future__ import annotations
 
+import logging
+import random
 import re
 from dataclasses import dataclass
 
 from beat_upload import BeatMeta
+
+logger = logging.getLogger(__name__)
 
 BRAND = "TRIPLE FILL"
 TG_HANDLE = "@iiiplfiii"
@@ -96,9 +101,16 @@ def _slug(s: str) -> str:
 
 
 def _get_profile(artist_raw: str) -> dict:
-    """Ищет профиль по первому артисту (до ' x ')."""
-    key = artist_raw.split(" x ")[0].strip().lower()
-    return ARTIST_PROFILE.get(key, GENERIC_PROFILE)
+    """Ищет профиль по первому артисту (до ' x '). Нормализует пробелы/_/casing."""
+    raw = artist_raw.split(" x ")[0].strip().lower()
+    if raw in ARTIST_PROFILE:
+        return ARTIST_PROFILE[raw]
+    # Пользователь может написать «nardo wick» / «nardo_wick» — нормализуем
+    normalized = re.sub(r"[\s_-]+", "", raw)
+    for key, prof in ARTIST_PROFILE.items():
+        if re.sub(r"[\s_-]+", "", key) == normalized:
+            return prof
+    return GENERIC_PROFILE
 
 
 def _mood_label(prof: dict, bpm: int) -> str:
@@ -129,19 +141,32 @@ def _an(word: str) -> str:
 def build_yt_description(beat: BeatMeta) -> str:
     prof = _get_profile(beat.artist_raw)
     scene = prof["scene"]
-    mood_adj = ", ".join(prof["adjectives"][:2])
-    hook_phrase = f"{mood_adj} {scene} energy"
+    mood_adj_low = prof["adjectives"][0].lower()
+    second_adj_low = prof["adjectives"][1].lower() if len(prof["adjectives"]) > 1 else mood_adj_low
+    # Если scene уже содержит "trap" (GENERIC = "Hard trap") — режем чтобы не повторяться
+    is_generic = scene.lower().endswith("trap")
+    scene_low = scene.lower()
+    mood_low = prof["mood"].lower()
 
-    first_adj = prof["adjectives"][0]
-    artist_line = (
-        f"{prof['mood']} {beat.artist_display} type beat with {_an(scene)} {scene} vibe. "
-        f"Punchy 808s, {first_adj} melodies and hard trap drums create a "
-        f"modern {scene} sound"
-    )
+    if is_generic:
+        artist_line = (
+            f"{prof['mood']} {beat.artist_display} type beat with a hard street vibe. "
+            f"Punchy 808s, {mood_adj_low} melodies and trap drums create a modern, "
+            f"aggressive sound"
+        )
+        energy_line = f"with {_an(second_adj_low)} {second_adj_low}, street-rap energy"
+    else:
+        artist_line = (
+            f"{prof['mood']} {beat.artist_display} type beat with {_an(scene)} {scene} vibe. "
+            f"Punchy 808s, {mood_adj_low} melodies and hard trap drums create a "
+            f"modern {scene} sound"
+        )
+        energy_line = f"with {_an(mood_adj_low)} {mood_adj_low}, {second_adj_low} {scene} energy"
+
     best = "\n".join(f"✦ {x}" for x in prof["best_for"])
 
     return (
-        f'{artist_line} with {_an(mood_adj)} {hook_phrase}.\n\n'
+        f'{artist_line} {energy_line}.\n\n'
         f'"{beat.name}" is a hard trap instrumental inspired by this sound. '
         f'The beat combines expressive melodic elements with punchy drums and deep bass, '
         f'creating space for confident, modern vocals.\n\n'
@@ -190,18 +215,62 @@ def build_yt_tags(beat: BeatMeta) -> list[str]:
 
 
 def build_tg_caption(beat: BeatMeta) -> str:
-    """Короткий пост в канал @iiiplfiii в голосе IIIPLKIII.
-
-    Сдержанно, без маркетинга. Имя + артист + эмоция + key/BPM.
-    """
+    """Fallback-шаблон если LLM недоступен. Короткий, нейтральный."""
     prof = _get_profile(beat.artist_raw)
-    mood_phrase = f"{prof['scene'].lower()} vibe"
     return (
         f"{beat.name} — {beat.artist_line}\n\n"
-        f"{prof['mood']} {mood_phrase}\n\n"
         f"🎧 {beat.key}  ⚡ {beat.bpm} BPM\n\n"
-        f"Пиши в ЛС за beat — @iiiplfiii"
+        f"Пиши в ЛС — @iiiplfiii"
     )
+
+
+# Стили для рандомизации LLM-генерации каждого нового бита.
+TG_CAPTION_STYLES = [
+    "короткий хук в одну строку + BPM/key + контакт. Без воды.",
+    "минимал — почти без слов, голые факты (имя, артист-тип, BPM/key, @iiiplfiii). 3-4 строки.",
+    "сторителл — 3-4 строки про настроение бита и под что зайдёт. Затем BPM/key + контакт.",
+    "вопрос аудитории в конце — 2-3 строки, потом BPM/key, потом вопрос («кто пишет такое?» / «кому в работу?»).",
+    "эмоциональный — короткие фразы, восклицание, скобки)) или многоточие… BPM/key + контакт.",
+]
+
+
+async def build_tg_caption_async(beat: BeatMeta) -> str:
+    """LLM-генерация подписи в голосе iiiplfiii-voice. При сбое — fallback на шаблон."""
+    try:
+        import post_generator
+        prof = _get_profile(beat.artist_raw)
+        style = random.choice(TG_CAPTION_STYLES)
+        user_msg = (
+            f"Сгенерируй подпись к АУДИО-посту в канал @iiiplfiii для свежего бита.\n\n"
+            f"Метаданные:\n"
+            f"- Имя бита: {beat.name}\n"
+            f"- Артист (type beat для): {beat.artist_line}\n"
+            f"- Сцена: {prof['scene']}\n"
+            f"- Настроение/mood: {prof['mood']}\n"
+            f"- BPM: {beat.bpm}\n"
+            f"- Key: {beat.key}\n\n"
+            f"Стиль этой подписи: {style}\n\n"
+            f"Жёсткие требования:\n"
+            f"- 2-6 строк, plain text. ЗАПРЕЩЕНО: хэштеги (#что_угодно), markdown (**, __, ~~), кавычки вокруг всего поста\n"
+            f"- От первого лица, в голосе автора (см. system-prompt)\n"
+            f"- ОБЯЗАТЕЛЬНО упомянуть имя бита «{beat.name}» и артиста «{beat.artist_display}»\n"
+            f"- BPM и key — где-то в тексте (можно одной строкой типа «{beat.key} · {beat.bpm}»)\n"
+            f"- Минимум эмодзи (0-3 шт), только из whitelist (🎧 🎵 🔥 🎹 ⚡)\n"
+            f"- Контакт «@iiiplfiii» в конце или другая форма CTA\n"
+            f"- Никаких «Пиши в ЛС за beat» — звучит как продаван. Найди живой вариант.\n\n"
+            f"Верни ТОЛЬКО подпись, без преамбулы, без кавычек."
+        )
+        text = await post_generator._call_llm(user_msg, max_tokens=200, temperature=0.95)
+        text = text.strip().strip('"\'')
+        # Удаляем хэштег-простыни в конце (LLM иногда добавляет вопреки промпту)
+        text = re.sub(r"\n+#[\w_]+(\s+#[\w_]+)*\s*$", "", text).rstrip()
+        if beat.name.lower() not in text.lower():
+            logger.warning("LLM caption не содержит имя бита, fallback. Got: %r", text[:120])
+            return build_tg_caption(beat)
+        return text
+    except Exception as e:
+        logger.warning("build_tg_caption_async failed: %s — fallback", e)
+        return build_tg_caption(beat)
 
 
 @dataclass
