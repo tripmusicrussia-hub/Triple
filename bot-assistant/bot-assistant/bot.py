@@ -1967,22 +1967,30 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
             "tg_file_id": audio.file_id,
         }
 
-        preview = (
-            f"🎬 YouTube title:\n{yt_post.title}\n\n"
-            f"🏷 Tags: {', '.join(yt_post.tags[:6])} ...\n\n"
-            f"📝 Description (start):\n{yt_post.description[:400]}...\n\n"
-            f"💬 Telegram caption:\n{tg_caption}"
+        await status.delete()
+
+        # 1) Превью TG-поста — точно как увидят подписчики канала.
+        await update.message.reply_audio(
+            audio=audio.file_id,
+            caption=f"👁 Превью TG-поста:\n\n{tg_caption}",
+        )
+
+        # 2) Превью YT-поста — thumbnail + title + tags + description + кнопки.
+        yt_preview = (
+            f"👁 Превью YouTube:\n\n"
+            f"🎬 Title:\n{yt_post.title}\n\n"
+            f"🏷 Tags ({len(yt_post.tags)}): {', '.join(yt_post.tags[:6])}...\n\n"
+            f"📝 Description:\n{yt_post.description[:500]}..."
         )
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🎬 На YouTube", callback_data=f"bu_yt_{token}")],
-            [InlineKeyboardButton("📡 В канал TG", callback_data=f"bu_tg_{token}")],
             [InlineKeyboardButton("🚀 YT + TG", callback_data=f"bu_all_{token}")],
+            [InlineKeyboardButton("🎬 Только YouTube", callback_data=f"bu_yt_{token}")],
+            [InlineKeyboardButton("📡 Только в канал TG", callback_data=f"bu_tg_{token}")],
             [InlineKeyboardButton("❌ Отмена", callback_data=f"bu_cancel_{token}")],
         ])
-        await status.delete()
         await update.message.reply_photo(
             photo=open(thumb_path, "rb"),
-            caption=preview[:1024],
+            caption=yt_preview[:1024],
             reply_markup=kb,
         )
     except Exception as e:
