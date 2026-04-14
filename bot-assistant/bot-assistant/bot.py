@@ -860,7 +860,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 yt_ok = True
                 # Добавляем в каталог
                 try:
-                    import beats_db
                     new_id = max([b["id"] for b in beats_db.BEATS_CACHE] + [0]) + 1
                     beats_db.BEATS_CACHE.append({
                         "id": new_id,
