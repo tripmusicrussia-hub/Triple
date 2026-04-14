@@ -606,6 +606,9 @@ async def send_preview(bot, admin_id: int, payload: dict) -> None:
     pending_posts[token] = payload
     wd = datetime.now().weekday()
     header = f"📅 {WEEKDAY_RU[wd]} — {payload['rubric']} [{payload['kind']}]"
+    issues = payload.get("issues") or []
+    if issues:
+        header = "⚠️ automod не прошёл: " + "; ".join(issues) + "\n" + header
     kb = _post_preview_keyboard(token)
     try:
         if payload["kind"] == "audio" and payload.get("beat"):

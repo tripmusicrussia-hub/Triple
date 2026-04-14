@@ -251,6 +251,72 @@ async def _call_llm(user_message: str, max_tokens: int = 400, temperature: float
     raise RuntimeError(f"Все LLM недоступны. Последняя ошибка: {last_error}")
 
 
+# ─── Automoderation ───────────────────────────────────────────────────────────
+
+TG_LIMIT_AUDIO = 1024
+TG_LIMIT_TEXT = 4000
+
+EMOJI_WHITELIST = set("🎧🎵🎹🔥⛓️🗡️🥶⚫🌒⚡💬🔗📥❤️📝🎛🎶")
+
+FORBIDDEN_PLUGINS = re.compile(
+    r"\b(sytrus|nexus\s*2|massive\s*classic|3xosc|fl\s*slayer|harmor\s*default)\b",
+    re.IGNORECASE,
+)
+
+EMOJI_RE = re.compile(
+    "[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F000-\U0001F2FF]",
+)
+
+
+def validate_caption(text: str, kind: RubricKind) -> tuple[bool, list[str]]:
+    """Проверки перед публикацией. Возвращает (ok, issues)."""
+    issues: list[str] = []
+    limit = TG_LIMIT_AUDIO if kind == "audio" else TG_LIMIT_TEXT
+    if len(text) > limit:
+        issues.append(f"длина {len(text)} > {limit}")
+    if not text.strip():
+        issues.append("пустой текст")
+
+    m = FORBIDDEN_PLUGINS.search(text)
+    if m:
+        issues.append(f"запрещённый плагин: {m.group(0)}")
+
+    emojis = EMOJI_RE.findall(text)
+    bad = [e for e in emojis if e not in EMOJI_WHITELIST]
+    if bad:
+        issues.append(f"эмодзи вне whitelist: {''.join(set(bad))}")
+    if len(emojis) > 3:
+        issues.append(f"слишком много эмодзи ({len(emojis)}, max 3)")
+
+    bullets = sum(1 for line in text.splitlines() if line.strip().startswith(("- ", "* ", "• ")))
+    if bullets >= 3:
+        issues.append(f"bullet-простыня ({bullets} пунктов)")
+
+    return (len(issues) == 0, issues)
+
+
+async def _generate_with_retry(
+    generator,
+    kind: RubricKind,
+    max_attempts: int = 3,
+) -> tuple[str, list[str]]:
+    """Вызывает генератор, пока не пройдёт validate_caption или не закончатся попытки.
+    Возвращает (text, issues) — пустой issues означает ok.
+    """
+    last_text = ""
+    last_issues: list[str] = []
+    for attempt in range(1, max_attempts + 1):
+        text = await generator()
+        ok, issues = validate_caption(text, kind)
+        if ok:
+            if attempt > 1:
+                logger.info("automod: passed on attempt %d", attempt)
+            return text, []
+        logger.warning("automod attempt %d failed: %s", attempt, issues)
+        last_text, last_issues = text, issues
+    return last_text, last_issues
+
+
 # ─── Генерация контента ───────────────────────────────────────────────────────
 
 async def generate_caption(rubric: Rubric, beat: dict) -> str:
@@ -295,6 +361,7 @@ class PostPayload(TypedDict, total=False):
     beat: Optional[dict]
     topic: Optional[str]  # если текстовый пост — какую тему взяли, чтобы пометить после публикации
     weekday: int  # чтобы при regen знать какую рубрику повторить
+    issues: list[str]  # automod: список проблем если не прошла проверку после max_attempts
 
 
 async def generate_today_post(weekday: Optional[int] = None) -> PostPayload:
@@ -309,14 +376,18 @@ async def generate_today_post(weekday: Optional[int] = None) -> PostPayload:
             logger.info("Аудио-кандидатов нет, откат на текстовую рубрику вторника")
             rubric = RUBRIC_SCHEDULE[1]
         else:
-            caption = await generate_caption(rubric, beat)
-            return {"rubric": rubric["name"], "kind": "audio", "text": caption, "beat": beat, "weekday": weekday}
+            caption, issues = await _generate_with_retry(
+                lambda: generate_caption(rubric, beat), "audio"
+            )
+            return {"rubric": rubric["name"], "kind": "audio", "text": caption, "beat": beat, "weekday": weekday, "issues": issues}
 
     topic = pick_text_topic(rubric["section"])
     if topic is None:
         topic = "свободная рефлексия о работе над битами на этой неделе"
-    text = await generate_text_post(rubric, topic)
-    return {"rubric": rubric["name"], "kind": "text", "text": text, "beat": None, "topic": topic, "weekday": weekday}
+    text, issues = await _generate_with_retry(
+        lambda: generate_text_post(rubric, topic), "text"
+    )
+    return {"rubric": rubric["name"], "kind": "text", "text": text, "beat": None, "topic": topic, "weekday": weekday, "issues": issues}
 
 
 # ─── CLI для dry-run ──────────────────────────────────────────────────────────
