@@ -38,7 +38,11 @@ import beats_db
 logger = logging.getLogger(__name__)
 
 HERE = Path(__file__).parent
-SKILL_PATH = Path.home() / ".claude" / "skills" / "iiiplkiii-voice" / "SKILL.md"
+# Источник tone-of-voice. В приоритете — копия в репо (для прода на Render),
+# fallback — локальный Claude skill (удобно для сессий/разработки).
+_SKILL_REPO = HERE / "wiki" / "iiiplkiii_voice.md"
+_SKILL_LOCAL = Path.home() / ".claude" / "skills" / "iiiplkiii-voice" / "SKILL.md"
+SKILL_PATH = _SKILL_REPO if _SKILL_REPO.exists() else _SKILL_LOCAL
 POST_IDEAS_PATH = HERE / "wiki" / "post_ideas.md"
 
 MODELS = [
