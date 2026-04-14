@@ -9,16 +9,19 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 MSK_TZ = ZoneInfo("Europe/Moscow")
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputFile
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputFile, LabeledPrice
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
-    CallbackQueryHandler, filters, ContextTypes
+    CallbackQueryHandler, PreCheckoutQueryHandler, filters, ContextTypes
 )
 from telegram.error import TelegramError
 from config import BOT_TOKEN, CHANNEL_ID, CHANNEL_LINK, SAMPLE_PACK_PATH, SAMPLE_PACK_FILE_ID, WELCOME_TEXT, CATALOG_INTRO, ADMIN_ID
 import beats_db
 import post_generator
+import licensing
+import sales
 import uuid
+import io
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -212,11 +215,22 @@ def kb_remixes_menu():
 
 def kb_after_beat(beat_id, content_type="beat"):
     back_map = {"beat": "menu_beat", "track": "menu_track", "remix": "menu_remix"}
+    rows = [[InlineKeyboardButton("▶️ Следующий похожий", callback_data="next_" + str(beat_id))]]
+    if content_type == "beat":
+        rows.append([InlineKeyboardButton(f"💰 Купить MP3 · {licensing.PRICE_MP3_STARS}⭐",
+                                          callback_data="buy_mp3_" + str(beat_id))])
+    rows.append([InlineKeyboardButton("❤️ В избранное", callback_data="fav_" + str(beat_id)),
+                 InlineKeyboardButton("🎲 Случайный", callback_data="random_beat")])
+    rows.append([InlineKeyboardButton("◀️ Меню", callback_data=back_map.get(content_type, "main_menu"))])
+    return InlineKeyboardMarkup(rows)
+
+
+def kb_channel_beat_buy(beat_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура под публикацией бита в канале: Купить MP3 через Stars + ссылка на ЛС для WAV/Exclusive."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("▶️ Следующий похожий", callback_data="next_" + str(beat_id))],
-        [InlineKeyboardButton("❤️ В избранное", callback_data="fav_" + str(beat_id)),
-         InlineKeyboardButton("🎲 Случайный", callback_data="random_beat")],
-        [InlineKeyboardButton("◀️ Меню", callback_data=back_map.get(content_type, "main_menu"))],
+        [InlineKeyboardButton(f"💰 Купить MP3 · {licensing.PRICE_MP3_STARS}⭐",
+                              callback_data="buy_mp3_" + str(beat_id))],
+        [InlineKeyboardButton("✍️ WAV / Unlimited / Exclusive", url="https://t.me/iiiplfiii")],
     ])
 
 def kb_giveaway():
@@ -656,7 +670,8 @@ async def publish_to_channel(bot, payload: dict) -> bool:
             caption = prefix + payload["text"]
             if len(caption) > 1024:
                 caption = caption[:1020] + "..."
-            await bot.send_audio(target, audio=beat["file_id"], caption=caption)
+            buy_kb = kb_channel_beat_buy(beat["id"])
+            await bot.send_audio(target, audio=beat["file_id"], caption=caption, reply_markup=buy_kb)
             if not dry_run:
                 post_generator.mark_beat_posted(beat["id"])
         else:
@@ -1156,6 +1171,46 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         beat = beats_db.get_beat_by_id(int(data.split("_")[1]))
         if beat:
             await send_beat(bot, query.message.chat_id, beat, user_id)
+        return
+
+    if data.startswith("buy_mp3_"):
+        try:
+            beat_id = int(data[len("buy_mp3_"):])
+        except ValueError:
+            return
+        beat = beats_db.get_beat_by_id(beat_id)
+        if not beat:
+            await query.answer("Бит не найден", show_alert=True)
+            return
+        bpm = beat.get("bpm") or "?"
+        key = beat.get("key") or "?"
+        title = f"MP3 Lease — {beat['name']}"[:32]
+        description = (
+            f"MP3 Lease на «{beat['name']}» ({bpm} BPM, {key}). "
+            f"Non-exclusive: до 100k стримов, до 2000 копий, 1 music video. "
+            f"Credit: prod. by TRIPLE FILL. После оплаты — mp3 + txt-лицензия в ЛС."
+        )[:255]
+        try:
+            await bot.send_invoice(
+                chat_id=user_id,
+                title=title,
+                description=description,
+                payload=f"mp3_lease:{beat_id}",
+                provider_token="",
+                currency="XTR",
+                prices=[LabeledPrice(label="MP3 Lease", amount=licensing.PRICE_MP3_STARS)],
+            )
+            if query.message.chat_id != user_id:
+                await query.answer("💰 Счёт отправил в ЛС бота", show_alert=False)
+        except TelegramError as e:
+            logger.warning("send_invoice failed for user %s: %s", user_id, e)
+            await query.answer(
+                "Сначала напиши /start боту в ЛС — тогда пришлю счёт.",
+                show_alert=True,
+            )
+        except Exception as e:
+            logger.exception("send_invoice error")
+            await query.answer(f"⚠️ {e}", show_alert=True)
         return
 
     if data == "search_prompt":
@@ -1667,6 +1722,121 @@ async def handle_assistant(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply or "(пусто)")
 
 
+# ── Telegram Stars payments ───────────────────────────────────
+
+async def handle_precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """PreCheckout: апрувим всё валидное. Отказ — только если payload битый / бит пропал."""
+    pcq = update.pre_checkout_query
+    payload = pcq.invoice_payload or ""
+    if not payload.startswith("mp3_lease:"):
+        await pcq.answer(ok=False, error_message="Неизвестный тип покупки")
+        return
+    try:
+        beat_id = int(payload.split(":", 1)[1])
+    except ValueError:
+        await pcq.answer(ok=False, error_message="Некорректный payload")
+        return
+    if not beats_db.get_beat_by_id(beat_id):
+        await pcq.answer(ok=False, error_message="Бит больше недоступен")
+        return
+    await pcq.answer(ok=True)
+
+
+async def handle_successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """После успешной оплаты: шлём mp3 + txt-лицензию, логируем продажу."""
+    msg = update.message
+    if not msg or not msg.successful_payment:
+        return
+    sp = msg.successful_payment
+    user = msg.from_user
+    bot = context.bot
+    payload = sp.invoice_payload or ""
+
+    if not payload.startswith("mp3_lease:"):
+        logger.warning("successful_payment: unknown payload %s", payload)
+        return
+    try:
+        beat_id = int(payload.split(":", 1)[1])
+    except ValueError:
+        return
+    beat = beats_db.get_beat_by_id(beat_id)
+    if not beat:
+        await msg.reply_text("⚠️ Бит пропал из каталога. Напишу автору — решим: @iiiplfiii")
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                f"🚨 Оплата прошла, но бит id={beat_id} не найден.\n"
+                f"User: {user.id} @{user.username}\ncharge: {sp.telegram_payment_charge_id}",
+            )
+        except Exception:
+            pass
+        return
+
+    buyer_name = (user.full_name or user.username or str(user.id)).strip()
+    license_text = licensing.mp3_lease_text(
+        buyer_name=buyer_name,
+        buyer_tg_id=user.id,
+        beat_name=beat["name"],
+        bpm=beat.get("bpm"),
+        key=beat.get("key"),
+        payment_charge_id=sp.telegram_payment_charge_id,
+    )
+
+    try:
+        await bot.send_audio(
+            user.id,
+            audio=beat["file_id"],
+            caption=f"🎹 {beat['name']}\n\nMP3 Lease — ты красавчик 🔥\nЛицензия ниже.",
+        )
+        license_bytes = io.BytesIO(license_text.encode("utf-8"))
+        license_bytes.name = f"LICENSE_{beat['name'].replace(' ', '_')}_{user.id}.txt"
+        await bot.send_document(
+            user.id,
+            document=InputFile(license_bytes, filename=license_bytes.name),
+            caption="📄 Сохрани этот файл — это твоё подтверждение лицензии.",
+        )
+    except Exception as e:
+        logger.exception("delivery failed")
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                f"🚨 Оплата прошла, доставка сломалась!\n"
+                f"User: {user.id} @{user.username}\nBeat: {beat['name']}\n"
+                f"charge: {sp.telegram_payment_charge_id}\nError: {e}",
+            )
+        except Exception:
+            pass
+
+    try:
+        sales.log_sale(
+            buyer_tg_id=user.id,
+            buyer_username=user.username,
+            buyer_name=buyer_name,
+            beat_id=beat_id,
+            beat_name=beat["name"],
+            license_type="mp3_lease",
+            stars_amount=sp.total_amount,
+            currency=sp.currency,
+            payment_charge_id=sp.telegram_payment_charge_id,
+            provider_charge_id=sp.provider_payment_charge_id,
+            status="completed",
+        )
+    except Exception:
+        logger.exception("sales.log_sale failed")
+
+    try:
+        await bot.send_message(
+            ADMIN_ID,
+            f"💰 Продажа MP3 Lease\n"
+            f"Бит: {beat['name']}\n"
+            f"Покупатель: {buyer_name} (@{user.username or '—'}, id={user.id})\n"
+            f"Сумма: {sp.total_amount}⭐\n"
+            f"charge: {sp.telegram_payment_charge_id}",
+        )
+    except Exception:
+        pass
+
+
 # ── Запуск ────────────────────────────────────────────────────
 
 async def heartbeat_scheduler():
@@ -1726,6 +1896,8 @@ async def run_bot():
     app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("giveaway", cmd_giveaway))
     app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(PreCheckoutQueryHandler(handle_precheckout))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, handle_successful_payment))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_assistant))
     app.add_handler(MessageHandler(filters.ALL, handle_message))
