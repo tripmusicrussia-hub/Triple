@@ -80,10 +80,28 @@ def _ffmpeg_dir_for_ytdlp() -> str:
     return str(tgt_dir)
 
 
+_CYR_TO_LAT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+}
+
+
+def _translit(s: str) -> str:
+    return "".join(_CYR_TO_LAT.get(c, c) for c in s)
+
+
 def _slug(artist: str) -> str:
-    """'Kenny Muney' → 'kenny_muney'. Для коллабов берём первого."""
+    """'Kenny Muney' → 'kenny_muney', 'скриптонит' → 'skriptonit'.
+
+    Для коллабов берём первого. Кириллица → транслит.
+    """
     first = artist.split(" x ")[0].strip().lower()
-    return re.sub(r"[^a-z0-9]+", "_", first).strip("_")
+    first = _translit(first)
+    slug = re.sub(r"[^a-z0-9]+", "_", first).strip("_")
+    return slug or "artist"
 
 
 def _cache_path(artist: str) -> Path:
