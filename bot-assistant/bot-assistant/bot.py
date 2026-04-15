@@ -1744,10 +1744,32 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await status.edit_text(status.text + "\n🖼 Рендерю thumbnail...")
         thumbnail_generator.generate_thumbnail(meta.name, meta.artist_line, thumb_path)
 
+        # Пробуем собрать VHS-нарезку клипов артиста (кэшируется на 30 дней)
+        loop = asyncio.get_running_loop()
+        clip_loop_path = None
+        try:
+            import clip_cutter
+            await status.edit_text(status.text + "\n🎞 Ищу клипы артиста на YT...")
+            clip_loop_path = await loop.run_in_executor(
+                None, clip_cutter.get_or_build_loop, meta.artist_raw
+            )
+            if clip_loop_path:
+                logger.info("upload: clip loop ready → %s", clip_loop_path)
+            else:
+                logger.info("upload: clip loop unavailable, using default")
+        except Exception as e:
+            logger.warning("upload: clip_cutter failed, fallback to default loop: %s", e)
+            clip_loop_path = None
+
         await status.edit_text(status.text + "\n🎬 Собираю видео (ffmpeg)...")
         logger.info("upload: starting ffmpeg for %s", mp3_path)
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, video_builder.build_video, mp3_path, video_path)
+        build_kwargs = {}
+        if clip_loop_path:
+            build_kwargs["loop_path"] = clip_loop_path
+        await loop.run_in_executor(
+            None,
+            lambda: video_builder.build_video(mp3_path, video_path, **build_kwargs),
+        )
         logger.info("upload: ffmpeg done, building post meta")
 
         yt_post = beat_post_builder.build_yt_post(meta)
@@ -1758,6 +1780,7 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
             "mp3_path": mp3_path,
             "video_path": video_path,
             "thumb_path": thumb_path,
+            "clip_loop_path": clip_loop_path,
             "yt_post": yt_post,
             "tg_caption": tg_caption,
             "tg_style": tg_style,
@@ -1804,7 +1827,7 @@ def _cleanup_upload(token: str):
     data = pending_uploads.pop(token, None)
     if not data:
         return
-    for key in ("mp3_path", "video_path", "thumb_path"):
+    for key in ("mp3_path", "video_path", "thumb_path", "clip_loop_path"):
         p = data.get(key)
         if p:
             try:
@@ -2062,10 +2085,31 @@ async def post_init(application):
         beats_db.load_beats()
     load_users()
     logger.info("Bot started: " + str(len(beats_db.BEATS_CACHE)) + " beats, " + str(len(all_users)) + " users")
+    _janitor_clip_loops()
     asyncio.create_task(daily_channel_scheduler(application.bot, ADMIN_ID))
     asyncio.create_task(heartbeat_scheduler())
     asyncio.create_task(asyncio.to_thread(_warmup_ffmpeg))
     write_heartbeat()
+
+
+def _janitor_clip_loops():
+    """Подчищает clip-лупы оставшиеся от крашнувшихся upload-сессий."""
+    try:
+        from pathlib import Path as _P
+        loops_dir = _P(__file__).parent / "assets" / "loops"
+        if not loops_dir.exists():
+            return
+        removed = 0
+        for f in loops_dir.iterdir():
+            try:
+                f.unlink()
+                removed += 1
+            except Exception:
+                pass
+        if removed:
+            logger.info("janitor: cleaned %d stale clip loops", removed)
+    except Exception:
+        logger.exception("janitor: clip loops cleanup failed (non-fatal)")
 
 
 def _warmup_ffmpeg():

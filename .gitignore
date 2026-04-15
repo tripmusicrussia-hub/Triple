@@ -28,6 +28,7 @@ test_ocr_out/
 bot-assistant/bot-assistant/temp_uploads/
 bot-assistant/bot-assistant/assets/thumb_samples/
 bot-assistant/bot-assistant/assets/loop_*_original.mp4
+bot-assistant/bot-assistant/assets/loops/
 
 # OS
 .DS_Store

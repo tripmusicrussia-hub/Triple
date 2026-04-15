@@ -8,4 +8,5 @@ imageio-ffmpeg==0.6.0
 supabase==2.9.1
 pytrends==4.9.2
 feedparser==6.0.11
+yt-dlp==2026.3.17
 
