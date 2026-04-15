@@ -45,6 +45,10 @@ _SKILL_LOCAL = Path.home() / ".claude" / "skills" / "iiiplfiii-voice" / "SKILL.m
 SKILL_PATH = _SKILL_REPO if _SKILL_REPO.exists() else _SKILL_LOCAL
 POST_IDEAS_PATH = HERE / "wiki" / "post_ideas.md"
 
+# Доля постов, берущих тему из свежих интернет-трендов вместо post_ideas.md.
+# Остальное — evergreen-бэклог из post_ideas.md (стабильные фишки/сторителлинг/мастеринг).
+TRENDS_TOPIC_PROBABILITY = 0.7
+
 MODELS = [
     "anthropic/claude-haiku-4.5",
     "openai/gpt-4o-mini",
@@ -134,8 +138,7 @@ def _write_ideas(text: str) -> None:
     POST_IDEAS_PATH.write_text(text, encoding="utf-8")
 
 
-def pick_text_topic(section: str) -> Optional[str]:
-    """Возвращает случайную невостребованную тему из раздела. НЕ помечает — см. mark_topic_used."""
+def _pick_evergreen_topic(section: str) -> Optional[str]:
     text = _read_ideas()
     lines = text.splitlines()
     start_idx = None
@@ -160,6 +163,25 @@ def pick_text_topic(section: str) -> Optional[str]:
 
     line = random.choice(unused)
     return line[len("- [ ] "):].strip()
+
+
+def pick_text_topic(section: str) -> Optional[str]:
+    """Возвращает тему для текстового поста.
+
+    С вероятностью TRENDS_TOPIC_PROBABILITY берёт свежую из интернет-трендов
+    (YouTube + Google Trends, см. trends.py). Иначе — evergreen из post_ideas.md.
+    При сбое источника падаем на другой.
+    """
+    use_trends = random.random() < TRENDS_TOPIC_PROBABILITY
+    if use_trends:
+        try:
+            import trends
+            t = trends.pick_trending_topic()
+            if t:
+                return t
+        except Exception as e:
+            logger.warning("trends недоступны, fallback на evergreen: %s", e)
+    return _pick_evergreen_topic(section)
 
 
 def mark_topic_used(topic: str) -> None:
