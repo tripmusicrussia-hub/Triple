@@ -555,6 +555,91 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Напиши: /search keyglock")
 
 
+# ── /stats — сводка публикаций ────────────────────────────────
+
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Краткая сводка событий публикаций за 7 и 30 дней. Только админ."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    from collections import Counter
+    from zoneinfo import ZoneInfo
+    msk = ZoneInfo("Europe/Moscow")
+    now = datetime.now(msk)
+    cutoff_7 = now - timedelta(days=7)
+    cutoff_30 = now - timedelta(days=30)
+
+    events: list[dict] = []
+    try:
+        import post_analytics
+        client = post_analytics._get_supabase()
+        if client is not None:
+            resp = client.table("post_events").select("*")\
+                .gte("ts", cutoff_30.isoformat()).order("ts", desc=True).execute()
+            events = list(resp.data or [])
+        if not events:
+            for ev in post_analytics.read_events():
+                try:
+                    ts = datetime.fromisoformat(ev.get("ts", "").replace("Z", "+00:00"))
+                    if ts >= cutoff_30:
+                        events.append(ev)
+                except Exception:
+                    continue
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Не получилось прочитать события: {e}")
+        return
+
+    def _in_range(ev, cutoff):
+        try:
+            ts = datetime.fromisoformat(ev.get("ts", "").replace("Z", "+00:00"))
+            return ts >= cutoff
+        except Exception:
+            return False
+
+    ev7 = [e for e in events if _in_range(e, cutoff_7)]
+    ev30 = [e for e in events if _in_range(e, cutoff_30)]
+
+    if not ev30:
+        await update.message.reply_text(
+            "📊 Пусто за последние 30 дн.\n\nКак только начнёшь публиковать через /upload или автопостинг — здесь будет сводка."
+        )
+        return
+
+    lines = [f"📊 Сводка публикаций\n"]
+    lines.append(f"За 7 дн:  {len(ev7)}")
+    lines.append(f"За 30 дн: {len(ev30)}")
+
+    styles = Counter(e.get("style") or "?" for e in ev30)
+    if styles:
+        lines.append("\n🎨 Стили подписей (30 дн):")
+        for st, n in styles.most_common(5):
+            lines.append(f"  • {st}: {n}")
+
+    yt_only = sum(1 for e in ev30 if e.get("yt_video_id") and not e.get("tg_message_id"))
+    tg_only = sum(1 for e in ev30 if e.get("tg_message_id") and not e.get("yt_video_id"))
+    both    = sum(1 for e in ev30 if e.get("yt_video_id") and e.get("tg_message_id"))
+    lines.append("\n📡 Каналы (30 дн):")
+    lines.append(f"  • YT + TG:   {both}")
+    lines.append(f"  • Только YT: {yt_only}")
+    lines.append(f"  • Только TG: {tg_only}")
+
+    lines.append("\n🕑 Последние 5:")
+    for ev in ev30[:5]:
+        ts_raw = ev.get("ts", "")
+        try:
+            dt = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).astimezone(msk)
+            ts_disp = dt.strftime("%d.%m %H:%M")
+        except Exception:
+            ts_disp = ts_raw[:16]
+        beat = ev.get("beat_name") or "—"
+        style = ev.get("style") or "?"
+        marks = ""
+        if ev.get("yt_video_id"): marks += " 📺"
+        if ev.get("tg_message_id"): marks += " 💬"
+        lines.append(f"  • {ts_disp} — {beat} [{style}]{marks}")
+
+    await update.message.reply_text("\n".join(lines))
+
+
 # ── /giveaway ─────────────────────────────────────────────────
 
 async def cmd_giveaway(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -900,6 +985,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     CHANNEL_ID, sent.chat.id, sent.chat.type, sent.chat.username, sent.chat.title, sent.message_id,
                 )
                 tg_ok = True
+                # Помечаем last_posted_at чтобы scheduler не взял бит сразу в daily rubric
+                try:
+                    for b in beats_db.BEATS_CACHE:
+                        if b.get("file_id") == payload["tg_file_id"]:
+                            b["last_posted_at"] = datetime.now().isoformat(timespec="seconds")
+                    beats_db.save_beats()
+                except Exception:
+                    logger.exception("mark last_posted_at failed (non-fatal)")
             except Exception as e:
                 logger.exception("tg send failed")
                 tg_ok = False
@@ -2006,6 +2099,7 @@ async def run_bot():
     app.add_handler(CommandHandler("idea", cmd_idea))
     app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("giveaway", cmd_giveaway))
+    app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(PreCheckoutQueryHandler(handle_precheckout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, handle_successful_payment))

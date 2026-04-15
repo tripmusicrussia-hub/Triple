@@ -111,6 +111,21 @@ async def _call_llm(user_text: str) -> str:
 
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
+# Markdown-стриппер — LLM иногда лепит **bold** / __italic__ / ### заголовки
+# несмотря на запрет в промпте. Telegram рендерит их криво без parse_mode.
+_MD_BOLD = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
+_MD_ITAL = re.compile(r"(?<!_)__(.+?)__(?!_)", re.DOTALL)
+_MD_HEADING = re.compile(r"^#{1,6}\s*", re.MULTILINE)
+_MD_INLINE_CODE = re.compile(r"`([^`\n]+)`")
+
+
+def _strip_markdown(text: str) -> str:
+    text = _MD_BOLD.sub(r"\1", text)
+    text = _MD_ITAL.sub(r"\1", text)
+    text = _MD_HEADING.sub("", text)
+    text = _MD_INLINE_CODE.sub(r"\1", text)
+    return text
+
 
 def _maybe_tool_call(raw: str) -> dict | None:
     """Если в ответе валидный JSON с tool=catalog_search — вернуть args."""
@@ -151,8 +166,8 @@ async def handle(user_text: str, user_id: int | None = None) -> str:
             logger.exception("user_agent: catalog_search failed")
             return f"🔍 Поиск сломался: {str(e)[:150]}"
 
-    # Plain text ответ — убираем markdown-заборы если LLM их всё же налепил
-    text = raw.strip().strip("`").strip()
+    # Plain text ответ — снимаем markdown (LLM иногда игнорит инструкцию в промпте)
+    text = _strip_markdown(raw.strip().strip("`").strip())
     return text
 
 
