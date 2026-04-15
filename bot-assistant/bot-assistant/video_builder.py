@@ -1,7 +1,9 @@
 """Сборка видео для YouTube: видео-луп + mp3 → готовый mp4.
 
 Работает через bundled ffmpeg (imageio-ffmpeg), без system-install.
-Зацикливает assets/loop.mp4 на длину аудио, накладывает mp3 как audio track.
+По умолчанию накладывает audio-reactive waveform-визуализатор поверх лупа
+в серо-фиолетовых тонах (retention-буст для type-beat видео).
+Цвета совпадают с эстетикой SKILL.md: VHS / не неон.
 """
 from __future__ import annotations
 
@@ -18,6 +20,12 @@ logger = logging.getLogger(__name__)
 
 _FFMPEG_CACHE: str | None = None
 
+# Палитра визуализатора — серо-фиолетовая, попадает в SKILL.md «не неон»
+WAVE_COLOR_PRIMARY = "#B388EB"
+WAVE_COLOR_SECONDARY = "#8B2B9C"
+WAVE_HEIGHT = 90       # px, высота визуалайзера
+WAVE_MARGIN_BOT = 60   # px от нижнего края
+
 
 def _ffmpeg() -> str:
     global _FFMPEG_CACHE
@@ -30,7 +38,7 @@ def _ffmpeg() -> str:
 
 
 def warmup():
-    """Прогревает ffmpeg-бинарник — вызвать на старте бота, чтобы первый upload не ждал скачивания."""
+    """Прогревает ffmpeg-бинарник — вызвать на старте бота."""
     try:
         _ffmpeg()
     except Exception as e:
@@ -41,11 +49,9 @@ def _probe_duration(path: Path) -> float:
     """Длительность mp3/mp4 через ffmpeg (без ffprobe — у нас только ffmpeg бинарник)."""
     cmd = [_ffmpeg(), "-i", str(path)]
     proc = subprocess.run(cmd, capture_output=True, text=True)
-    # ffmpeg пишет в stderr, возвращает exit 1 когда нет -f output — это ок
     stderr = proc.stderr
     for line in stderr.splitlines():
         if "Duration:" in line:
-            # "  Duration: 00:02:34.12, start: ..."
             part = line.split("Duration:", 1)[1].split(",", 1)[0].strip()
             h, m, s = part.split(":")
             return int(h) * 3600 + int(m) * 60 + float(s)
@@ -56,12 +62,16 @@ def build_video(
     mp3_path: Path,
     out_path: Path,
     loop_path: Path = LOOP_PATH,
+    *,
+    visualizer: bool = True,
 ) -> Path:
-    """
-    Собирает финальное видео:
+    """Собирает финальное mp4 для YT.
+
     - видео-луп зацикливается на длину mp3
-    - mp3 подкладывается как audio
-    - codec: H.264 + AAC, 1920x1080, подходит для YT
+    - mp3 → aac audio track
+    - при visualizer=True — накладывает audio-reactive waveform
+      поверх видео-лупа в серо-фиолетовых тонах (retention-буст)
+    - при visualizer=False — stream copy (быстро, ~5 сек на 3-мин трек)
 
     Возвращает путь к out_path.
     """
@@ -72,12 +82,29 @@ def build_video(
 
     logger.info("probing duration of %s", mp3_path)
     duration = _probe_duration(mp3_path)
-    logger.info("duration: %.2fs, building video %s", duration, out_path)
+    logger.info("duration: %.2fs, visualizer=%s → %s", duration, visualizer, out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Stream copy видео (без re-encode) — loop.mp4 уже в целевом формате 1280x720 H.264.
-    # Энкодим только аудио (mp3 → aac). Билд ~5 сек вместо 2-3 мин.
-    cmd = [
+    if visualizer:
+        cmd = _build_visualizer_cmd(mp3_path, out_path, loop_path, duration)
+        timeout = max(180, int(duration * 1.5))
+    else:
+        cmd = _build_streamcopy_cmd(mp3_path, out_path, loop_path, duration)
+        timeout = 120
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"ffmpeg timeout ({timeout}s) — trace last 1500 chars: {cmd}")
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed ({proc.returncode}): {proc.stderr[-1500:]}")
+    logger.info("video built OK: %s (audio %.1fs)", out_path, duration)
+    return out_path
+
+
+def _build_streamcopy_cmd(mp3_path: Path, out_path: Path, loop_path: Path, duration: float) -> list[str]:
+    """Быстрая сборка без перекодирования видео (~5 сек). Без визуалайзера."""
+    return [
         _ffmpeg(), "-y",
         "-stream_loop", "-1",
         "-i", str(loop_path),
@@ -92,14 +119,45 @@ def build_video(
         "-movflags", "+faststart",
         str(out_path),
     ]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("ffmpeg timeout (2 min) — что-то сильно не так, stream copy должен быть секунды")
-    if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg failed ({proc.returncode}): {proc.stderr[-1500:]}")
-    logger.info("video built OK: %s (audio %.1fs)", out_path, duration)
-    return out_path
+
+
+def _build_visualizer_cmd(mp3_path: Path, out_path: Path, loop_path: Path, duration: float) -> list[str]:
+    """Сборка с audio-reactive waveform поверх лупа.
+
+    Filter chain:
+      [1:a]showwaves — генерит визуалайзер из аудио (line-режим, мягкий градиент)
+      [0:v][wave]overlay — накладывает его на лупnа по центру-снизу
+    """
+    filter_complex = (
+        f"[1:a]showwaves="
+        f"s=1280x{WAVE_HEIGHT}:"
+        f"mode=line:"
+        f"colors={WAVE_COLOR_PRIMARY}|{WAVE_COLOR_SECONDARY}:"
+        f"rate=30:"
+        f"n=30,"
+        f"format=yuva420p,"
+        f"colorchannelmixer=aa=0.85[wave];"
+        f"[0:v][wave]overlay=(W-w)/2:H-h-{WAVE_MARGIN_BOT}:shortest=1[v]"
+    )
+    return [
+        _ffmpeg(), "-y",
+        "-stream_loop", "-1",
+        "-i", str(loop_path),
+        "-i", str(mp3_path),
+        "-filter_complex", filter_complex,
+        "-map", "[v]",
+        "-map", "1:a:0",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-shortest",
+        "-t", f"{duration:.2f}",
+        "-movflags", "+faststart",
+        str(out_path),
+    ]
 
 
 if __name__ == "__main__":
@@ -107,9 +165,10 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) < 2:
-        print("usage: python video_builder.py <mp3_path> [out.mp4]")
+        print("usage: python video_builder.py <mp3_path> [out.mp4] [--no-viz]")
         sys.exit(1)
     mp3 = Path(sys.argv[1])
-    out = Path(sys.argv[2]) if len(sys.argv) > 2 else mp3.with_suffix(".mp4")
-    p = build_video(mp3, out)
+    out = Path(sys.argv[2]) if len(sys.argv) > 2 and not sys.argv[2].startswith("--") else mp3.with_suffix(".mp4")
+    viz = "--no-viz" not in sys.argv
+    p = build_video(mp3, out, visualizer=viz)
     print(f"OK  {p}")
