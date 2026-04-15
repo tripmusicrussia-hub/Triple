@@ -45,9 +45,10 @@ _SKILL_LOCAL = Path.home() / ".claude" / "skills" / "iiiplfiii-voice" / "SKILL.m
 SKILL_PATH = _SKILL_REPO if _SKILL_REPO.exists() else _SKILL_LOCAL
 POST_IDEAS_PATH = HERE / "wiki" / "post_ideas.md"
 
-# Доля постов, берущих тему из свежих интернет-трендов вместо post_ideas.md.
-# Остальное — evergreen-бэклог из post_ideas.md (стабильные фишки/сторителлинг/мастеринг).
-TRENDS_TOPIC_PROBABILITY = 0.7
+# Рубрики, которые получают scene-context (свежие новости сцены) как инъекцию
+# к user-message LLM — автор может вплести инсайт, если оно в тему.
+# Quick Tip / За кулисами / Итог — контекст не нужен (это про себя).
+RUBRICS_WITH_SCENE_CONTEXT = {"Hard Lifehack", "Studio Story"}
 
 MODELS = [
     "anthropic/claude-haiku-4.5",
@@ -166,21 +167,12 @@ def _pick_evergreen_topic(section: str) -> Optional[str]:
 
 
 def pick_text_topic(section: str) -> Optional[str]:
-    """Возвращает тему для текстового поста.
+    """Возвращает тему для текстового поста из evergreen-бэклога post_ideas.md.
 
-    С вероятностью TRENDS_TOPIC_PROBABILITY берёт свежую из интернет-трендов
-    (YouTube + Google Trends, см. trends.py). Иначе — evergreen из post_ideas.md.
-    При сбое источника падаем на другой.
+    Свежие тренды/новости НЕ заменяют тему поста — они инжектятся как context
+    в user-message LLM для рубрик из RUBRICS_WITH_SCENE_CONTEXT.
+    Канал = личный журнал автора, а не RSS-бот.
     """
-    use_trends = random.random() < TRENDS_TOPIC_PROBABILITY
-    if use_trends:
-        try:
-            import trends
-            t = trends.pick_trending_topic()
-            if t:
-                return t
-        except Exception as e:
-            logger.warning("trends недоступны, fallback на evergreen: %s", e)
     return _pick_evergreen_topic(section)
 
 
@@ -365,10 +357,34 @@ async def generate_caption(rubric: Rubric, beat: dict) -> str:
 
 
 async def generate_text_post(rubric: Rubric, topic: str) -> str:
-    """Текстовый пост на заданную тему."""
+    """Текстовый пост на заданную тему.
+
+    Для рубрик из RUBRICS_WITH_SCENE_CONTEXT в user-message добавляется
+    свежий scene-context (релизы/обсуждения сцены) как опциональный инсайт —
+    автор может вплести, если ложится в тему, но не обязан.
+    """
+    scene_block = ""
+    if rubric["name"] in RUBRICS_WITH_SCENE_CONTEXT:
+        try:
+            import trends
+            ctx = trends.get_scene_context()
+            if ctx:
+                scene_block = (
+                    "\n\n=== СВЕЖИЕ СОБЫТИЯ СЦЕНЫ (опционально, только если в тему) ===\n"
+                    f"{ctx}\n"
+                    "=== КОНЕЦ ===\n\n"
+                    "Если что-то из этого органично ложится в твой пост — можешь "
+                    "вплести как наблюдение ИЗ СВОЕГО УГЛА (битмейкер услышал → попробовал → выводы). "
+                    "НЕ пересказывай новость. НЕ промоти других артистов. "
+                    "Если не ложится — просто пиши по теме, игнорируй этот блок."
+                )
+        except Exception as e:
+            logger.warning("scene context недоступен: %s", e)
+
     user_msg = (
         f"{rubric['user_instruction']}\n\n"
-        f"Тема: {topic}\n\n"
+        f"Тема: {topic}"
+        f"{scene_block}\n\n"
         "Верни только текст поста, без пояснений."
     )
     return await _call_llm(user_msg, max_tokens=500, temperature=0.9)
