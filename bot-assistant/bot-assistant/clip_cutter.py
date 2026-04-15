@@ -32,8 +32,14 @@ TARGET_FPS = 30
 LOOP_DURATION_SEC = 60
 SNIPPET_DURATION_SEC = 60
 SNIPPETS_PER_ARTIST = 3
+
+# Fallback-режим (без BPM) — случайная длина
 SUBCLIP_MIN = 1.5
 SUBCLIP_MAX = 3.0
+
+# BPM-sync режим: длина под-клипа = N долей × (60/BPM).
+# 4 доли = 1 такт, 8 долей = 2 такта. 2 доли даёт быстрый монтаж в нач./кульм.
+BEAT_MULTIPLES = [2, 4, 4, 4, 8]  # weights: больше 4-дольных
 
 # Стилизация под-клипов: desat + darker curves + холодно-фиолетовый hue.
 # noise вынесен в финальный concat — иначе убивает сжатие каждого сегмента.
@@ -104,8 +110,9 @@ def _slug(artist: str) -> str:
     return slug or "artist"
 
 
-def _cache_path(artist: str) -> Path:
-    return LOOPS_DIR / f"{_slug(artist)}.mp4"
+def _cache_path(artist: str, bpm: int | None = None) -> Path:
+    suffix = f"_{bpm}" if bpm else ""
+    return LOOPS_DIR / f"{_slug(artist)}{suffix}.mp4"
 
 
 def _is_cache_fresh(path: Path) -> bool:
@@ -217,11 +224,13 @@ def _probe_duration(path: Path) -> float:
     return 0.0
 
 
-def _cut_subclips(snippet: Path, tmp_dir: Path, idx_start: int) -> list[Path]:
-    """Режет 60-сек snippet на под-клипы 1.5-3 сек с VHS-стилизацией.
+def _cut_subclips(snippet: Path, tmp_dir: Path, idx_start: int,
+                  bpm: int | None = None) -> list[Path]:
+    """Режет snippet на под-клипы с VHS-стилизацией.
 
+    Если задан bpm — каждый под-клип = N долей × (60/BPM), N из BEAT_MULTIPLES.
+    Без bpm — случайная длина 1.5-3 сек.
     Отбрасывает первые/последние 10% snippet (transitions).
-    Возвращает список путей готовых 1280x720 кусков.
     """
     duration = _probe_duration(snippet)
     if duration < 5:
@@ -231,8 +240,12 @@ def _cut_subclips(snippet: Path, tmp_dir: Path, idx_start: int) -> list[Path]:
     cursor = lo
     outs: list[Path] = []
     idx = idx_start
+    beat_sec = (60.0 / bpm) if bpm else None
     while cursor < hi:
-        seg_len = random.uniform(SUBCLIP_MIN, SUBCLIP_MAX)
+        if beat_sec:
+            seg_len = random.choice(BEAT_MULTIPLES) * beat_sec
+        else:
+            seg_len = random.uniform(SUBCLIP_MIN, SUBCLIP_MAX)
         if cursor + seg_len > hi:
             break
         out = tmp_dir / f"sub_{idx:03d}.mp4"
@@ -313,23 +326,26 @@ def _concat(subs: list[Path], out: Path, target_duration: float) -> Path:
     return out
 
 
-def get_or_build_loop(artist: str, force: bool = False) -> Path | None:
+def get_or_build_loop(artist: str, bpm: int | None = None,
+                      force: bool = False) -> Path | None:
     """Главный вход: вернёт путь к луп-файлу артиста или None при неудаче.
 
-    Кэшируется в assets/loops/<slug>.mp4 на 30 дней.
+    При заданном bpm нарезка синхронизируется с долями трека (4/8 долей
+    на cut). Итоговая длина лупа кратна такту — стык при loop'е без разрыва.
+    Кэш в assets/loops/<slug>[_<bpm>].mp4.
     """
     if not artist or len(artist.strip()) < 3:
         logger.info("clip_cutter: artist too short, skipping")
         return None
 
     LOOPS_DIR.mkdir(parents=True, exist_ok=True)
-    cache = _cache_path(artist)
+    cache = _cache_path(artist, bpm)
     if not force and _is_cache_fresh(cache):
-        logger.info("clip_cutter: cache hit for %r → %s", artist, cache)
+        logger.info("clip_cutter: cache hit for %r bpm=%s → %s", artist, bpm, cache)
         return cache
 
-    logger.info("clip_cutter: building loop for %r (cache %s)",
-                artist, "miss" if not cache.exists() else "stale")
+    logger.info("clip_cutter: building loop for %r bpm=%s (cache %s)",
+                artist, bpm, "miss" if not cache.exists() else "stale")
     t0 = time.time()
     with tempfile.TemporaryDirectory(prefix="clipcut_") as td:
         tmp = Path(td)
@@ -355,7 +371,7 @@ def get_or_build_loop(artist: str, force: bool = False) -> Path | None:
         all_subs: list[Path] = []
         idx = 0
         for snip in snippets:
-            subs = _cut_subclips(snip, tmp, idx)
+            subs = _cut_subclips(snip, tmp, idx, bpm=bpm)
             all_subs.extend(subs)
             idx += len(subs)
         if len(all_subs) < 5:
@@ -363,8 +379,15 @@ def get_or_build_loop(artist: str, force: bool = False) -> Path | None:
                            len(all_subs), artist)
             return None
 
+        # При BPM-sync длину лупа выравниваем по такту — чтобы при loop'е
+        # через -stream_loop не резался кик на стыке. bar = 4 доли.
+        target = LOOP_DURATION_SEC
+        if bpm:
+            bar = 4 * (60.0 / bpm)
+            target = round(LOOP_DURATION_SEC / bar) * bar
+
         try:
-            _concat(all_subs, cache, LOOP_DURATION_SEC)
+            _concat(all_subs, cache, target)
         except Exception as e:
             logger.warning("clip_cutter: concat failed: %s", e)
             return None
@@ -378,8 +401,10 @@ def get_or_build_loop(artist: str, force: bool = False) -> Path | None:
 if __name__ == "__main__":
     import sys
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-    artist = sys.argv[1] if len(sys.argv) > 1 else "kenny muney"
-    p = get_or_build_loop(artist, force="--force" in sys.argv)
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    artist = args[0] if args else "kenny muney"
+    bpm = int(args[1]) if len(args) > 1 else None
+    p = get_or_build_loop(artist, bpm=bpm, force="--force" in sys.argv)
     if p:
         print(f"OK -> {p} ({p.stat().st_size/1024/1024:.1f} MB)")
     else:

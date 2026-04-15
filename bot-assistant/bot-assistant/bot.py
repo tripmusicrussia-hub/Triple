@@ -1751,7 +1751,8 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
             import clip_cutter
             await status.edit_text(status.text + "\n🎞 Ищу клипы артиста на YT...")
             clip_loop_path = await loop.run_in_executor(
-                None, clip_cutter.get_or_build_loop, meta.artist_raw
+                None,
+                lambda: clip_cutter.get_or_build_loop(meta.artist_raw, bpm=meta.bpm),
             )
             if clip_loop_path:
                 logger.info("upload: clip loop ready → %s", clip_loop_path)
