@@ -11,6 +11,7 @@ Flow:
 from __future__ import annotations
 
 import logging
+import os
 import random
 import re
 import shutil
@@ -26,6 +27,22 @@ logger = logging.getLogger(__name__)
 HERE = Path(__file__).parent
 LOOPS_DIR = HERE / "assets" / "loops"
 CACHE_TTL_SEC = 30 * 24 * 3600  # 30 дней
+
+# YouTube cookies (для Render и других DC-IP — иначе YT бросает «Sign in»).
+# Render: грузим как Secret File → /etc/secrets/yt_cookies.txt.
+# Env YT_COOKIES_FILE переопределяет путь.
+_COOKIES_PATHS = [
+    os.getenv("YT_COOKIES_FILE", ""),
+    "/etc/secrets/yt_cookies.txt",
+    str(HERE / "yt_cookies.txt"),
+]
+
+
+def _cookies_file() -> str | None:
+    for p in _COOKIES_PATHS:
+        if p and Path(p).exists() and Path(p).stat().st_size > 100:
+            return p
+    return None
 
 TARGET_W, TARGET_H = 1280, 720
 TARGET_FPS = 30
@@ -136,6 +153,9 @@ def _search_videos(artist: str, limit: int = SNIPPETS_PER_ARTIST) -> list[dict]:
         "skip_download": True,
         "extract_flat": "in_playlist",
     }
+    cookies = _cookies_file()
+    if cookies:
+        ydl_opts["cookiefile"] = cookies
     results: list[dict] = []
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(query, download=False)
@@ -180,6 +200,9 @@ def _download_snippet(video: dict, out: Path) -> Path | None:
         "format": "bestvideo[height<=720][ext=mp4]/bestvideo[height<=720]/worst[height<=1080]",
         "outtmpl": str(raw),
     }
+    cookies = _cookies_file()
+    if cookies:
+        ydl_opts["cookiefile"] = cookies
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([video["url"]])
@@ -344,8 +367,10 @@ def get_or_build_loop(artist: str, bpm: int | None = None,
         logger.info("clip_cutter: cache hit for %r bpm=%s → %s", artist, bpm, cache)
         return cache
 
-    logger.info("clip_cutter: building loop for %r bpm=%s (cache %s)",
-                artist, bpm, "miss" if not cache.exists() else "stale")
+    cookies = _cookies_file()
+    logger.info("clip_cutter: building loop for %r bpm=%s (cache %s, cookies=%s)",
+                artist, bpm, "miss" if not cache.exists() else "stale",
+                "yes" if cookies else "no")
     t0 = time.time()
     with tempfile.TemporaryDirectory(prefix="clipcut_") as td:
         tmp = Path(td)
