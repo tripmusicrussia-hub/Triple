@@ -1741,48 +1741,24 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
         file = await context.bot.get_file(audio.file_id)
         await file.download_to_drive(str(mp3_path))
 
-        await status.edit_text(status.text + "\n🖼 Рендерю thumbnail...")
-        thumbnail_generator.generate_thumbnail(meta.name, meta.artist_line, thumb_path)
-
-        # Пробуем собрать VHS-нарезку клипов артиста (кэшируется на 30 дней)
+        # Brand-кадр канала — один JPG на весь канал (паттерн RichBlessed 1.3M views).
+        # Качаем с GH Release при первом upload, кэшируем в assets/brand/ (не wipe'ится janitor'ом).
         loop = asyncio.get_running_loop()
-        clip_loop_path = None
-        try:
-            import clip_cutter
-            await status.edit_text(status.text + "\n🎞 Ищу клипы артиста на YT...")
-            clip_loop_path = await loop.run_in_executor(
-                None,
-                lambda: clip_cutter.get_or_build_loop(meta.artist_raw, bpm=meta.bpm),
-            )
-            if clip_loop_path:
-                logger.info("upload: clip loop ready → %s", clip_loop_path)
-            else:
-                logger.info("upload: clip loop unavailable, using default")
-        except Exception as e:
-            logger.warning("upload: clip_cutter failed, fallback to default loop: %s", e)
-            clip_loop_path = None
-
-        # Thumbnail: если clip-loop доступен → кадр из него (R6 SKILL yt-optimization),
-        # иначе legacy text-overlay. Перезаписываем thumbnail_generator результат.
-        if clip_loop_path:
-            try:
-                new_thumb = await loop.run_in_executor(
-                    None,
-                    lambda: thumbnail_generator.generate_thumbnail_from_clip(
-                        clip_loop_path, thumb_path
-                    ),
-                )
-                if new_thumb:
-                    logger.info("upload: thumbnail from clip-loop ready")
-                else:
-                    logger.warning("upload: thumbnail-from-clip failed, legacy stays")
-            except Exception as e:
-                logger.warning("upload: thumbnail-from-clip errored: %s, legacy stays", e)
+        await status.edit_text(status.text + "\n🖼 Готовлю brand-кадр...")
+        brand_path = await loop.run_in_executor(None, _ensure_brand_image)
+        if brand_path:
+            import shutil
+            shutil.copy2(brand_path, thumb_path)
+            logger.info("upload: using brand image as thumbnail")
+        else:
+            # Fallback — legacy text-overlay (для случая если GH Release недоступен)
+            logger.warning("upload: brand image unavailable, using legacy text-thumbnail")
+            thumbnail_generator.generate_thumbnail(meta.name, meta.artist_line, thumb_path)
+        clip_loop_path = None  # больше не используется, но оставляем в payload для совместимости
 
         await status.edit_text(status.text + "\n🎬 Собираю видео (ffmpeg)...")
         logger.info("upload: starting ffmpeg for %s", mp3_path)
         # Статичный кадр + mp3 — winning-паттерн (RichBlessed/Versa/beha2py etc.)
-        # thumbnail уже сгенерён выше (либо из clip-loop, либо legacy).
         await loop.run_in_executor(
             None,
             lambda: video_builder.build_video(thumb_path, mp3_path, video_path),
@@ -2109,8 +2085,42 @@ async def post_init(application):
     write_heartbeat()
 
 
+BRAND_IMAGE_URL = (
+    "https://github.com/tripmusicrussia-hub/Triple/releases/download/"
+    "clip-loops-v1/iiiplfiii_brand.jpg"
+)
+
+
+def _ensure_brand_image():
+    """Возвращает путь к brand-кадру канала, качая при первом вызове.
+
+    Кэширует в assets/brand/ — директория НЕ wipe'ится janitor'ом.
+    Если GH Release недоступен → None (бот падает на legacy text-thumbnail).
+    """
+    from pathlib import Path as _P
+    import httpx as _httpx
+    brand_dir = _P(__file__).parent / "assets" / "brand"
+    brand_dir.mkdir(parents=True, exist_ok=True)
+    brand_path = brand_dir / "iiiplfiii_brand.jpg"
+    if brand_path.exists() and brand_path.stat().st_size > 10000:
+        return brand_path
+    try:
+        with _httpx.Client(timeout=60, follow_redirects=True) as c:
+            r = c.get(BRAND_IMAGE_URL)
+            if r.status_code != 200 or len(r.content) < 10000:
+                logger.warning("brand image fetch: status=%d len=%d", r.status_code, len(r.content))
+                return None
+            brand_path.write_bytes(r.content)
+            logger.info("brand image cached: %s (%d KB)", brand_path, len(r.content) // 1024)
+            return brand_path
+    except Exception as e:
+        logger.warning("brand image fetch failed: %s", e)
+        return None
+
+
 def _janitor_clip_loops():
-    """Подчищает clip-лупы оставшиеся от крашнувшихся upload-сессий."""
+    """Подчищает clip-лупы оставшиеся от крашнувшихся upload-сессий.
+    НЕ трогает assets/brand/ — там brand-кадр канала, reused постоянно."""
     try:
         from pathlib import Path as _P
         loops_dir = _P(__file__).parent / "assets" / "loops"
