@@ -1781,12 +1781,11 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
         await status.edit_text(status.text + "\n🎬 Собираю видео (ffmpeg)...")
         logger.info("upload: starting ffmpeg for %s", mp3_path)
-        build_kwargs = {}
-        if clip_loop_path:
-            build_kwargs["loop_path"] = clip_loop_path
+        # Статичный кадр + mp3 — winning-паттерн (RichBlessed/Versa/beha2py etc.)
+        # thumbnail уже сгенерён выше (либо из clip-loop, либо legacy).
         await loop.run_in_executor(
             None,
-            lambda: video_builder.build_video(mp3_path, video_path, **build_kwargs),
+            lambda: video_builder.build_video(thumb_path, mp3_path, video_path),
         )
         logger.info("upload: ffmpeg done, building post meta")
 
