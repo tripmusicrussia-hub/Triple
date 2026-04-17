@@ -28,21 +28,14 @@ HERE = Path(__file__).parent
 LOOPS_DIR = HERE / "assets" / "loops"
 CACHE_TTL_SEC = 30 * 24 * 3600  # 30 дней
 
-# YouTube cookies (для Render и других DC-IP — иначе YT бросает «Sign in»).
-# Render: грузим как Secret File → /etc/secrets/yt_cookies.txt.
-# Env YT_COOKIES_FILE переопределяет путь.
-_COOKIES_PATHS = [
-    os.getenv("YT_COOKIES_FILE", ""),
-    "/etc/secrets/yt_cookies.txt",
-    str(HERE / "yt_cookies.txt"),
-]
-
-
-def _cookies_file() -> str | None:
-    for p in _COOKIES_PATHS:
-        if p and Path(p).exists() and Path(p).stat().st_size > 100:
-            return p
-    return None
+# GitHub Release как источник пре-собранных лупов для прод-окружения (Render).
+# YT режет DC-IP — локально yt-dlp работает, на Render нет. Обходим через
+# GitHub Release: локально собираем лупы → пушим как assets → Render качает.
+GH_RELEASE_BASE = os.getenv(
+    "CLIP_LOOPS_RELEASE_URL",
+    "https://github.com/tripmusicrussia-hub/Triple/releases/download/clip-loops-v1",
+)
+GH_RELEASE_TIMEOUT_SEC = 90
 
 TARGET_W, TARGET_H = 1280, 720
 TARGET_FPS = 30
@@ -132,6 +125,31 @@ def _cache_path(artist: str, bpm: int | None = None) -> Path:
     return LOOPS_DIR / f"{_slug(artist)}{suffix}.mp4"
 
 
+def _try_github_release(artist: str, out: Path) -> Path | None:
+    """Качает пре-собранный луп с GitHub Release. None если нет или ошибка."""
+    import httpx
+    slug = _slug(artist)
+    url = f"{GH_RELEASE_BASE}/{slug}.mp4"
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with httpx.Client(timeout=GH_RELEASE_TIMEOUT_SEC, follow_redirects=True) as c:
+            with c.stream("GET", url) as r:
+                if r.status_code != 200:
+                    logger.info("GH release miss %s (HTTP %d)", url, r.status_code)
+                    return None
+                with open(out, "wb") as f:
+                    for chunk in r.iter_bytes(chunk_size=1 << 20):
+                        f.write(chunk)
+    except Exception as e:
+        logger.warning("GH release fetch failed %s: %s", url, e)
+        return None
+    if not out.exists() or out.stat().st_size < 1000:
+        return None
+    logger.info("GH release hit %s → %s (%.1f MB)",
+                slug, out, out.stat().st_size / 1024 / 1024)
+    return out
+
+
 def _is_cache_fresh(path: Path) -> bool:
     if not path.exists():
         return False
@@ -153,9 +171,6 @@ def _search_videos(artist: str, limit: int = SNIPPETS_PER_ARTIST) -> list[dict]:
         "skip_download": True,
         "extract_flat": "in_playlist",
     }
-    cookies = _cookies_file()
-    if cookies:
-        ydl_opts["cookiefile"] = cookies
     results: list[dict] = []
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(query, download=False)
@@ -200,9 +215,6 @@ def _download_snippet(video: dict, out: Path) -> Path | None:
         "format": "bestvideo[height<=720][ext=mp4]/bestvideo[height<=720]/worst[height<=1080]",
         "outtmpl": str(raw),
     }
-    cookies = _cookies_file()
-    if cookies:
-        ydl_opts["cookiefile"] = cookies
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([video["url"]])
@@ -367,10 +379,14 @@ def get_or_build_loop(artist: str, bpm: int | None = None,
         logger.info("clip_cutter: cache hit for %r bpm=%s → %s", artist, bpm, cache)
         return cache
 
-    cookies = _cookies_file()
-    logger.info("clip_cutter: building loop for %r bpm=%s (cache %s, cookies=%s)",
-                artist, bpm, "miss" if not cache.exists() else "stale",
-                "yes" if cookies else "no")
+    logger.info("clip_cutter: building loop for %r bpm=%s (cache %s)",
+                artist, bpm, "miss" if not cache.exists() else "stale")
+
+    # Шаг 1: пробуем GitHub Release (пре-собранные лупы для топ-артистов).
+    # На Render это единственный работающий путь — yt-dlp режется DC-IP.
+    gh_hit = _try_github_release(artist, cache)
+    if gh_hit:
+        return gh_hit
     t0 = time.time()
     with tempfile.TemporaryDirectory(prefix="clipcut_") as td:
         tmp = Path(td)
