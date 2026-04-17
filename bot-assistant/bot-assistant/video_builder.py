@@ -85,17 +85,34 @@ def build_video(
     logger.info("duration: %.2fs, visualizer=%s → %s", duration, visualizer, out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Таймауты: Render free tier ~3x медленнее локальной машины.
+    # Для visualizer (re-encode) закладываем 4x длительности трека, минимум 300с.
+    # Для stream-copy хватает 120с.
+    def _run(cmd, tout):
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=tout)
+        except subprocess.TimeoutExpired:
+            return None
+
     if visualizer:
         cmd = _build_visualizer_cmd(mp3_path, out_path, loop_path, duration)
-        timeout = max(180, int(duration * 1.5))
+        timeout = max(300, int(duration * 4))
+        proc = _run(cmd, timeout)
+        if proc is None:
+            logger.warning(
+                "ffmpeg visualizer timeout (%ds), fallback to stream-copy (no waveform)",
+                timeout,
+            )
+            cmd = _build_streamcopy_cmd(mp3_path, out_path, loop_path, duration)
+            proc = _run(cmd, 120)
+            if proc is None:
+                raise RuntimeError(f"ffmpeg stream-copy fallback timeout on {mp3_path}")
     else:
         cmd = _build_streamcopy_cmd(mp3_path, out_path, loop_path, duration)
-        timeout = 120
+        proc = _run(cmd, 120)
+        if proc is None:
+            raise RuntimeError(f"ffmpeg stream-copy timeout on {mp3_path}")
 
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"ffmpeg timeout ({timeout}s) — trace last 1500 chars: {cmd}")
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg failed ({proc.returncode}): {proc.stderr[-1500:]}")
     logger.info("video built OK: %s (audio %.1fs)", out_path, duration)
