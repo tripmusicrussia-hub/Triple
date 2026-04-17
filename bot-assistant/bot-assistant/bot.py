@@ -1762,6 +1762,23 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
             logger.warning("upload: clip_cutter failed, fallback to default loop: %s", e)
             clip_loop_path = None
 
+        # Thumbnail: если clip-loop доступен → кадр из него (R6 SKILL yt-optimization),
+        # иначе legacy text-overlay. Перезаписываем thumbnail_generator результат.
+        if clip_loop_path:
+            try:
+                new_thumb = await loop.run_in_executor(
+                    None,
+                    lambda: thumbnail_generator.generate_thumbnail_from_clip(
+                        clip_loop_path, thumb_path
+                    ),
+                )
+                if new_thumb:
+                    logger.info("upload: thumbnail from clip-loop ready")
+                else:
+                    logger.warning("upload: thumbnail-from-clip failed, legacy stays")
+            except Exception as e:
+                logger.warning("upload: thumbnail-from-clip errored: %s, legacy stays", e)
+
         await status.edit_text(status.text + "\n🎬 Собираю видео (ffmpeg)...")
         logger.info("upload: starting ffmpeg for %s", mp3_path)
         build_kwargs = {}
