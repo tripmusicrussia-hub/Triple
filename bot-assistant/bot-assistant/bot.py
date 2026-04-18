@@ -169,6 +169,7 @@ def kb_main_menu():
         [InlineKeyboardButton(f"🎹 Биты ({beats})", callback_data="menu_beat")],
         [InlineKeyboardButton(f"🎤 Треки ({tracks})", callback_data="menu_track"),
          InlineKeyboardButton(f"🔀 Ремиксы ({remixes})", callback_data="menu_remix")],
+        [InlineKeyboardButton("📦 Kits & Packs", callback_data="menu_products")],
         # Quick-filter chips — быстрый доступ к популярным сценам / mood
         [InlineKeyboardButton("🔥 Hard", callback_data="qf_hard"),
          InlineKeyboardButton("🌃 Memphis", callback_data="qf_memphis"),
@@ -1606,6 +1607,122 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "menu_beat":
         beats = len([b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == "beat"])
         await query.message.reply_text("🎹 Целых " + str(beats) + " битов! Ищешь что-то конкретное или просто серфишь?", reply_markup=kb_beats_menu())
+        return
+
+    if data == "menu_products":
+        # Раздел продуктов — показываем 3 подтипа с counter'ами.
+        counts = {"drumkit": 0, "samplepack": 0, "looppack": 0}
+        for b in beats_db.BEATS_CACHE:
+            ct = b.get("content_type")
+            if ct in counts:
+                counts[ct] += 1
+        total = sum(counts.values())
+        if total == 0:
+            await query.message.reply_text(
+                "📦 Паков и китов пока нет — скоро будет.\n"
+                "Пока лучшее — биты: тыкай 🎹 Биты в главном меню.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")],
+                ]),
+            )
+            return
+        rows = []
+        if counts["drumkit"]:
+            rows.append([InlineKeyboardButton(
+                f"🥁 Drum Kits ({counts['drumkit']})",
+                callback_data="prodcat_drumkit_0",
+            )])
+        if counts["samplepack"]:
+            rows.append([InlineKeyboardButton(
+                f"🎵 Sample Packs ({counts['samplepack']})",
+                callback_data="prodcat_samplepack_0",
+            )])
+        if counts["looppack"]:
+            rows.append([InlineKeyboardButton(
+                f"🔄 Loop Packs ({counts['looppack']})",
+                callback_data="prodcat_looppack_0",
+            )])
+        rows.append([InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")])
+        await query.message.reply_text(
+            f"📦 Паки и киты ({total}) — выбирай категорию:",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return
+
+    if data.startswith("prodcat_"):
+        # prodcat_<type>_<page> — пагинация по типу продукта.
+        rest = data[len("prodcat_"):]
+        try:
+            ctype, page_s = rest.rsplit("_", 1)
+            page = int(page_s)
+        except ValueError:
+            return
+        if ctype not in licensing.PRODUCT_TYPE_LABELS:
+            return
+        items = sorted(
+            [b for b in beats_db.BEATS_CACHE if b.get("content_type") == ctype],
+            key=lambda x: x["id"], reverse=True,
+        )
+        per_page = 6
+        total_pages = max(1, (len(items) + per_page - 1) // per_page)
+        page = max(0, min(page, total_pages - 1))
+        chunk = items[page * per_page:(page + 1) * per_page]
+        rows = []
+        for p in chunk:
+            stars = p.get("price_stars", "?")
+            rows.append([InlineKeyboardButton(
+                f"{p['name']} — {stars}⭐",
+                callback_data=f"prodview_{p['id']}",
+            )])
+        # Nav row
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("⬅️", callback_data=f"prodcat_{ctype}_{page-1}"))
+        nav.append(InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="noop"))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton("➡️", callback_data=f"prodcat_{ctype}_{page+1}"))
+        if nav:
+            rows.append(nav)
+        rows.append([InlineKeyboardButton("◀️ К категориям", callback_data="menu_products")])
+        label = licensing.PRODUCT_TYPE_LABELS[ctype]
+        await query.message.reply_text(
+            f"{label}s — {len(items)} шт.\nТыкай название чтобы посмотреть.",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return
+
+    if data.startswith("prodview_"):
+        try:
+            pid = int(data[len("prodview_"):])
+        except ValueError:
+            return
+        p = beats_db.get_beat_by_id(pid)
+        if not p or p.get("content_type") not in licensing.PRODUCT_TYPE_LABELS:
+            await query.answer("Продукт не найден", show_alert=True)
+            return
+        label = licensing.PRODUCT_TYPE_LABELS[p["content_type"]]
+        size_mb = (p.get("file_size") or 0) / (1024 * 1024) if p.get("file_size") else 0
+        stars = p.get("price_stars", "?")
+        usdt = p.get("price_usdt", "?")
+        info = (
+            f"📦 <b>{label}</b>\n"
+            f"🎯 <b>{p['name']}</b>\n"
+            f"📎 {size_mb:.1f} MB\n\n"
+            f"{p.get('description') or '<i>(без описания)</i>'}\n\n"
+            f"💎 WAV / Trackouts / Exclusive — DM @iiiplfiii"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"⭐ {stars}", callback_data=f"buy_prod_{pid}"),
+             InlineKeyboardButton(f"💵 {usdt:g} USDT" if isinstance(usdt, (int, float)) else "💵 USDT",
+                                   callback_data=f"buy_prod_usdt_{pid}")],
+            [InlineKeyboardButton(f"◀️ К {label}s",
+                                   callback_data=f"prodcat_{p['content_type']}_0")],
+        ])
+        await query.message.reply_text(info, reply_markup=kb, parse_mode="HTML")
+        return
+
+    if data == "noop":
+        await query.answer()
         return
 
     if data == "menu_track":
