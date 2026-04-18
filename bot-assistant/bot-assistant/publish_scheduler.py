@@ -179,7 +179,7 @@ def cancel(token: str) -> bool:
 
 
 def queue_summary() -> list[str]:
-    """Короткий список для /stats команды."""
+    """Короткий список с token'ами для /cancel_sched."""
     out = []
     for q in sorted(_QUEUE, key=lambda x: x["publish_at"]):
         dt = _parse_dt(q["publish_at"])
@@ -187,7 +187,12 @@ def queue_summary() -> list[str]:
         name = meta.get("name", "?")
         artist = meta.get("artist_display", "?")
         actions = "+".join(q.get("actions", []))
-        out.append(f"📅 {dt.strftime('%a %d %b %H:%M МСК')}  {name} — {artist}  [{actions}]")
+        token = q.get("token", "?")
+        beat_id = q.get("reserved_beat_id", "?")
+        out.append(
+            f"📅 {dt.strftime('%a %d %b %H:%M МСК')}  {name} — {artist}  [{actions}]\n"
+            f"   id={beat_id} · token=<code>{token}</code>"
+        )
     return out
 
 

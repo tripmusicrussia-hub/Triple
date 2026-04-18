@@ -513,7 +513,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode="HTML",
                 )
                 return
-        except (ValueError, Exception) as e:
+            # Бит с таким id не найден — показываем вменяемое сообщение + меню
+            await bot.send_message(
+                user_id,
+                f"🎧 Бит по этой ссылке пока не публичный (id={beat_id}).\n"
+                "Вот весь каталог + поиск по BPM/сцене:",
+                reply_markup=kb_main_menu(),
+            )
+            return
+        except Exception as e:
             logger.warning("deep-link buy_ failed for %r: %s", context.args[0], e)
             # fall through to normal start flow
 
@@ -677,9 +685,9 @@ async def cmd_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not items:
         await update.message.reply_text("📭 Очередь пуста")
         return
-    text = "📅 Очередь плановых публикаций:\n\n" + "\n".join(items)
-    text += "\n\n/cancel_sched <token> — отменить (token из лога)"
-    await update.message.reply_text(text)
+    text = "📅 Очередь плановых публикаций:\n\n" + "\n\n".join(items)
+    text += "\n\n<i>Отменить:</i> <code>/cancel_sched TOKEN</code>"
+    await update.message.reply_text(text, parse_mode="HTML")
 
 
 async def cmd_cancel_sched(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1985,6 +1993,11 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
         # Резервируем beat_id заранее, чтобы в описании YT был валидный deep-link
         # на покупку этого конкретного битка. При ошибке YT publish ID не закрепится.
+        # Защита от race-condition: если cache пустой (напр. upload сразу после
+        # redeploy, пока beats_db не успел прогрузиться с disk) — reload.
+        if not beats_db.BEATS_CACHE:
+            logger.warning("BEATS_CACHE empty before beat_id reserve — force-reloading")
+            beats_db.load_beats()
         reserved_beat_id = max([b["id"] for b in beats_db.BEATS_CACHE] + [0]) + 1
 
         yt_post = beat_post_builder.build_yt_post(meta, beat_id=reserved_beat_id)
