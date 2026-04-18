@@ -405,6 +405,27 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
+    # Deep-link из YT-описания: /start buy_<beat_id> → сразу показать покупку этого бита
+    if context.args and context.args[0].startswith("buy_"):
+        try:
+            beat_id = int(context.args[0][4:])
+            beat = beats_db.get_beat_by_id(beat_id)
+            if beat:
+                caption = (
+                    f"🎧 <b>{beat.get('name','?')}</b>\n"
+                    f"⚡ BPM {beat.get('bpm','?')}  🎹 {beat.get('key','?')}\n\n"
+                    "Выбери вариант покупки — или напиши @iiiplfiii для WAV/Unlimited/Exclusive:"
+                )
+                await bot.send_message(
+                    user_id, caption,
+                    reply_markup=kb_channel_beat_buy(beat_id),
+                    parse_mode="HTML",
+                )
+                return
+        except (ValueError, Exception) as e:
+            logger.warning("deep-link buy_ failed for %r: %s", context.args[0], e)
+            # fall through to normal start flow
+
     subscribed = await is_subscribed(bot, user_id)
     if not subscribed:
         await update.message.reply_text(WELCOME_TEXT, reply_markup=kb_subscribe())
@@ -946,9 +967,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 yt_video_id = video_id
                 yt_url = f"https://youtu.be/{video_id}"
                 yt_ok = True
-                # Добавляем в каталог
+                # Добавляем в каталог — используем reserved_beat_id (чтобы deep-link
+                # из YT description вёл именно на этот битек).
                 try:
-                    new_id = max([b["id"] for b in beats_db.BEATS_CACHE] + [0]) + 1
+                    new_id = payload.get("reserved_beat_id") or (
+                        max([b["id"] for b in beats_db.BEATS_CACHE] + [0]) + 1
+                    )
                     beats_db.BEATS_CACHE.append({
                         "id": new_id,
                         "msg_id": 0,
@@ -1765,7 +1789,11 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
         )
         logger.info("upload: ffmpeg done, building post meta")
 
-        yt_post = beat_post_builder.build_yt_post(meta)
+        # Резервируем beat_id заранее, чтобы в описании YT был валидный deep-link
+        # на покупку этого конкретного битка. При ошибке YT publish ID не закрепится.
+        reserved_beat_id = max([b["id"] for b in beats_db.BEATS_CACHE] + [0]) + 1
+
+        yt_post = beat_post_builder.build_yt_post(meta, beat_id=reserved_beat_id)
         tg_caption, tg_style = await beat_post_builder.build_tg_caption_async(meta)
 
         pending_uploads[token] = {
@@ -1774,6 +1802,7 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
             "video_path": video_path,
             "thumb_path": thumb_path,
             "clip_loop_path": clip_loop_path,
+            "reserved_beat_id": reserved_beat_id,
             "yt_post": yt_post,
             "tg_caption": tg_caption,
             "tg_style": tg_style,

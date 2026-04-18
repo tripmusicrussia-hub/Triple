@@ -17,7 +17,15 @@ logger = logging.getLogger(__name__)
 BRAND = "TRIPLE FILL"
 TG_HANDLE = "@iiiplfiii"
 IG_HANDLE = "@iiiplfiii"
+BOT_USERNAME = "triplekillpost_bot"  # для deep-link покупки из YT
 YEAR = 2026
+
+
+def _buy_link(beat_id: int | None) -> str:
+    """Deep-link в TG-бот на покупку конкретного битка. beat_id=None → общая ссылка."""
+    if beat_id:
+        return f"https://t.me/{BOT_USERNAME}?start=buy_{beat_id}"
+    return f"https://t.me/{BOT_USERNAME}"
 
 # Mood / описание по основному артисту (для Best for + description phrases)
 ARTIST_PROFILE = {
@@ -151,7 +159,7 @@ def _an(word: str) -> str:
     return "an" if word and word[0].lower() in "aeiou" else "a"
 
 
-def build_yt_description(beat: BeatMeta) -> str:
+def build_yt_description(beat: BeatMeta, beat_id: int | None = None) -> str:
     prof = _get_profile(beat.artist_raw)
     scene = prof["scene"]
     mood_adj_low = prof["adjectives"][0].lower()
@@ -177,8 +185,50 @@ def build_yt_description(beat: BeatMeta) -> str:
         energy_line = f"with {_an(mood_adj_low)} {mood_adj_low}, {second_adj_low} {scene} energy"
 
     best = "\n".join(f"✦ {x}" for x in prof["best_for"])
+    buy = _buy_link(beat_id)
+
+    # Hashtag-блок в начале — YT показывает до 3 hashtag'ов над тайтлом.
+    # 3 tags: artist + scene + 'typebeat' — универсально и в нише.
+    primary_slug = beat.artist_display.split(" x ")[0].lower().replace(" ", "")
+    scene_slug = prof["scene"].lower().replace(" ", "")
+    hashtags_top = f"#{primary_slug}typebeat #{scene_slug}typebeat #typebeat"
+
+    # Keyword wall в конец — boost SEO через keyword-density.
+    # Генерим из артиста/сцены/года/коллаб-артистов.
+    kw_base = [
+        f"{primary_slug} type beat",
+        f"{primary_slug} type beat {YEAR}",
+        f"free {primary_slug} type beat",
+        f"hard {primary_slug} type beat",
+        f"{scene_slug} type beat",
+        f"{scene_slug} type beat {YEAR}",
+        f"hard {scene_slug} type beat",
+        f"dark {scene_slug} type beat",
+        f"{beat.bpm} bpm trap beat",
+        f"{beat.key_short.lower()} trap beat",
+        "free type beat",
+        f"free type beat {YEAR}",
+        "hard trap instrumental",
+        "trap type beat",
+        "free trap beat",
+        "type beat",
+    ]
+    # Related artists
+    for rel in prof.get("related_tags", []):
+        kw_base.extend([f"{rel} type beat", f"free {rel} type beat"])
+    # Dedupe + формируем comma-wall
+    seen = set()
+    kw_wall = []
+    for k in kw_base:
+        if k not in seen:
+            seen.add(k)
+            kw_wall.append(k)
+    keyword_wall = ", ".join(kw_wall)
 
     return (
+        f'{hashtags_top}\n\n'
+        f'🎧 BUY LEASE (MP3 · 500⭐ / 5 USDT): {buy}\n'
+        f'💎 WAV · Unlimited · Exclusive — DM {TG_HANDLE}\n\n'
         f'{artist_line} {energy_line}.\n\n'
         f'"{beat.name}" is a hard trap instrumental inspired by this sound. '
         f'The beat combines expressive melodic elements with punchy drums and deep bass, '
@@ -186,12 +236,13 @@ def build_yt_description(beat: BeatMeta) -> str:
         f'Best for:\n{best}\n\n'
         f'🎧 Key: {beat.key}\n'
         f'⚡ BPM: {beat.bpm}\n\n'
-        f'💼 License options:\n✦ MP3\n✦ WAV\n✦ Unlimited\n✦ Exclusive\n\n'
-        f'📩 To purchase or lease this beat:\n'
+        f'⚠️ FREE FOR NON-PROFIT ONLY.\n'
+        f'Using for profit/monetization/streaming → you MUST purchase a lease.\n'
+        f'Credit required: (prod. by {BRAND})\n\n'
+        f'📩 Contact:\n'
         f'📱 Telegram: {TG_HANDLE}\n'
         f'📱 Instagram: {IG_HANDLE}\n\n'
-        f'✦ Free for non-profit use only.\n'
-        f'✦ Credit required: (prod. by {BRAND})'
+        f'— tags —\n{keyword_wall}'
     )
 
 
@@ -296,10 +347,10 @@ class YTPost:
     tags: list[str]
 
 
-def build_yt_post(beat: BeatMeta) -> YTPost:
+def build_yt_post(beat: BeatMeta, beat_id: int | None = None) -> YTPost:
     return YTPost(
         title=build_yt_title(beat),
-        description=build_yt_description(beat),
+        description=build_yt_description(beat, beat_id=beat_id),
         tags=build_yt_tags(beat),
     )
 
