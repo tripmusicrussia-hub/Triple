@@ -263,7 +263,17 @@ def _an(word: str) -> str:
     return "an" if word and word[0].lower() in "aeiou" else "a"
 
 
-def build_yt_description(beat: BeatMeta, beat_id: int | None = None) -> str:
+def _fmt_ts(seconds: float) -> str:
+    """Секунды → 'M:SS' для YT chapters/timestamps."""
+    total = int(round(seconds))
+    return f"{total // 60}:{total % 60:02d}"
+
+
+def build_yt_description(
+    beat: BeatMeta,
+    beat_id: int | None = None,
+    duration_sec: float | None = None,
+) -> str:
     prof = _get_profile(beat.artist_raw)
     scene = prof["scene"]
     mood_adj_low = prof["adjectives"][0].lower()
@@ -329,6 +339,33 @@ def build_yt_description(beat: BeatMeta, beat_id: int | None = None) -> str:
             kw_wall.append(k)
     keyword_wall = ", ".join(kw_wall)
 
+    # Timestamps (RichBlessed pattern, 1.3M views) — retention через chapters.
+    # Опциональный блок: если duration не известен — пропускаем без вреда.
+    timestamps_block = ""
+    if duration_sec and duration_sec > 10:
+        timestamps_block = (
+            f'⏱ Timestamps:\n'
+            f'0:00 — "{beat.name}"\n'
+            f'{_fmt_ts(duration_sec)} — Thanks for listening all the way through\n\n'
+        )
+
+    # FAQ-блок (Fukk2Beatz pattern) — снимает 80% DM-возражений ДО того как юзер
+    # уходит читать. Вопросы пишем в реальном user-voice, не в маркетинг-voice.
+    faq_block = (
+        f'❓ FAQ\n\n'
+        f'— What does (FREE) mean?\n'
+        f'Beat is free for NON-PROFIT use only. Credit (prod. by {BRAND}) required. '
+        f'For streaming / monetization / profit — you MUST purchase a lease.\n\n'
+        f'— How do I get the untagged file after purchase?\n'
+        f'Instantly. The bot ({buy}) sends untagged MP3 + TXT license right after '
+        f'Telegram Stars / USDT payment clears.\n\n'
+        f'— What\'s included in MP3 Lease (500⭐ / 7 USDT)?\n'
+        f'Untagged 320kbps MP3 + TXT license: up to 100k streams, 2k paid copies, '
+        f'1 music video, non-exclusive.\n\n'
+        f'— Can I get WAV / Trackouts / Unlimited / Exclusive?\n'
+        f'Yes. DM {TG_HANDLE} — we\'ll discuss terms and pricing.\n\n'
+    )
+
     return (
         f'{hashtags_top}\n\n'
         f'🎧 ALL BEATS + LEASE: {LANDING_URL}\n'
@@ -341,9 +378,11 @@ def build_yt_description(beat: BeatMeta, beat_id: int | None = None) -> str:
         f'Best for:\n{best}\n\n'
         f'🎧 Key: {beat.key}\n'
         f'⚡ BPM: {beat.bpm}\n\n'
+        f'{timestamps_block}'
         f'⚠️ FREE FOR NON-PROFIT ONLY.\n'
         f'Using for profit/monetization/streaming → you MUST purchase a lease.\n'
         f'Credit required: (prod. by {BRAND})\n\n'
+        f'{faq_block}'
         f'📩 Contact:\n'
         f'📱 Telegram: {TG_HANDLE}\n'
         f'📱 Instagram: {IG_HANDLE}\n\n'
@@ -398,12 +437,37 @@ def _bot_footer(beat_id: int | None = None) -> str:
     return f"🎧 Весь каталог + lease → {catalog}"
 
 
+def _hashtag_nav(beat: BeatMeta) -> str:
+    """Навигационная строка хэштегов для TG-постов.
+
+    TG делает #tag кликабельным внутри канала → юзер жмёт #memphis и видит
+    все memphis-биты в ленте. Это работает вместо "категорий", которых в
+    каналах нет. Держим ≤4 тегов, чтобы не засорять caption.
+
+    Формат: `#<artist> #<scene> #bpm<bucket> #typebeat`
+    Пример: `#kennymuney #memphis #bpm160 #typebeat`
+    """
+    prof = _get_profile(beat.artist_raw)
+    primary = beat.artist_display.split(" x ")[0].lower().replace(" ", "")
+    scene = prof["scene"].lower().replace(" ", "")
+    bpm_bucket = (beat.bpm // 10) * 10 if beat.bpm else 140
+    # Dedupe на случай если артист и сцена совпадают (редко, но).
+    tags = [f"#{primary}", f"#{scene}", f"#bpm{bpm_bucket}", "#typebeat"]
+    seen, out = set(), []
+    for t in tags:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return " ".join(out)
+
+
 def build_tg_caption(beat: BeatMeta, beat_id: int | None = None) -> str:
     """Fallback-шаблон если LLM недоступен. Короткий, нейтральный."""
     return (
         f"{beat.name} — {beat.artist_line}\n\n"
         f"🎧 {beat.key}  ⚡ {beat.bpm} BPM\n\n"
-        f"{_bot_footer(beat_id)}"
+        f"{_bot_footer(beat_id)}\n\n"
+        f"{_hashtag_nav(beat)}"
     )
 
 
@@ -447,7 +511,8 @@ async def build_tg_caption_async(beat: BeatMeta, beat_id: int | None = None) -> 
             f"- BPM и key — где-то в тексте (можно одной строкой типа «{beat.key} · {beat.bpm}»)\n"
             f"- Минимум эмодзи (0-3 шт), только из whitelist (🎧 🎵 🔥 🎹 ⚡)\n"
             f"- НЕ ПИШИ ссылки / контакты / @handles — они добавляются автоматически снизу\n"
-            f"- Никаких «Пиши в ЛС за beat» — звучит как продаван.\n\n"
+            f"- Никаких «Пиши в ЛС за beat» — звучит как продаван.\n"
+            f"{post_generator.ANTI_AI_BLOCK}\n"
             f"Верни ТОЛЬКО подпись, без преамбулы, без кавычек."
         )
         text = await post_generator._call_llm(user_msg, max_tokens=200, temperature=0.95)
@@ -457,7 +522,7 @@ async def build_tg_caption_async(beat: BeatMeta, beat_id: int | None = None) -> 
         if beat.name.lower() not in text.lower():
             logger.warning("LLM caption не содержит имя бита, fallback. Got: %r", text[:120])
             return build_tg_caption(beat, beat_id=beat_id), "fallback"
-        return f"{text}\n\n{footer}", style_label
+        return f"{text}\n\n{footer}\n\n{_hashtag_nav(beat)}", style_label
     except Exception as e:
         logger.warning("build_tg_caption_async failed: %s — fallback", e)
         return build_tg_caption(beat, beat_id=beat_id), "fallback"
@@ -470,11 +535,99 @@ class YTPost:
     tags: list[str]
 
 
-def build_yt_post(beat: BeatMeta, beat_id: int | None = None) -> YTPost:
+def build_yt_post(
+    beat: BeatMeta,
+    beat_id: int | None = None,
+    duration_sec: float | None = None,
+) -> YTPost:
     return YTPost(
         title=build_yt_title(beat),
-        description=build_yt_description(beat, beat_id=beat_id),
+        description=build_yt_description(beat, beat_id=beat_id, duration_sec=duration_sec),
         tags=build_yt_tags(beat),
+    )
+
+
+def _slugify(s: str) -> str:
+    """lowercase + убрать пробелы/дефисы — для сравнения тегов."""
+    return re.sub(r"[\s_\-]+", "", s.lower())
+
+
+# Канонический список сцен (для классификации тегов каталога).
+_KNOWN_SCENES = {
+    "memphis", "detroit", "atlanta", "neworleans", "florida",
+    "hardtrap", "phonk", "drill",
+}
+
+
+def build_pinned_hub() -> str:
+    """Закреп-пост канала: навигация по каталогу через кликабельные хэштеги.
+
+    TG рендерит #tag как ссылку «все посты канала с этим хэштегом». Это
+    работает вместо «категорий», которых в каналах нет. Кайф в том, что
+    юзер жмёт #memphis — и видит ровно те биты, которые ты постил под
+    этим тегом.
+
+    Генерируется из `beats_db.BEATS_CACHE`: top-сцены, top-артисты,
+    bpm-бакеты, соотношение beat/track/remix. Обновлять раз в 2 недели
+    (новые сцены/артисты появляются органически).
+    """
+    import beats_db
+    from collections import Counter
+
+    # Канонические артисты — берём ключи из ARTIST_PROFILE, слагифицируем.
+    canonical_artists = {_slugify(k): k for k in ARTIST_PROFILE}
+
+    scene_counter = Counter()
+    artist_counter = Counter()
+    bpm_counter = Counter()
+    by_type = Counter()
+
+    for b in beats_db.BEATS_CACHE:
+        ctype = b.get("content_type", "beat")
+        by_type[ctype] += 1
+        # Считаем только beat'ы для hub (treck/remix не продаются)
+        if ctype != "beat":
+            continue
+        for raw_tag in b.get("tags", []):
+            tl = _slugify(raw_tag)
+            if tl in _KNOWN_SCENES:
+                scene_counter[tl] += 1
+            elif tl in canonical_artists:
+                artist_counter[tl] += 1
+        bpm = b.get("bpm")
+        if isinstance(bpm, int) and 80 <= bpm <= 200:
+            bpm_counter[(bpm // 10) * 10] += 1
+
+    top_scenes = [s for s, _ in scene_counter.most_common(8)]
+    top_artists = [a for a, _ in artist_counter.most_common(10)]
+    top_bpm = sorted((b for b, _ in bpm_counter.most_common(6)))
+
+    scenes_line = " ".join(f"#{s}" for s in top_scenes) or "#memphis #detroit #hardtrap"
+    artists_line = " ".join(f"#{a}" for a in top_artists) or "#keyglock #kennymuney #obladaet"
+    bpm_line = " ".join(f"#bpm{b}" for b in top_bpm) or "#bpm130 #bpm140 #bpm150 #bpm160"
+
+    total_beats = by_type.get("beat", 0)
+    tracks = by_type.get("track", 0)
+    remixes = by_type.get("remix", 0)
+
+    counts_line_parts = [f"{total_beats} битов"]
+    if tracks:
+        counts_line_parts.append(f"{tracks} треков")
+    if remixes:
+        counts_line_parts.append(f"{remixes} ремиксов")
+    counts_line = " · ".join(counts_line_parts)
+
+    return (
+        f"🗺 НАВИГАЦИЯ ПО КАНАЛУ\n\n"
+        f"Каталог: {counts_line}\n"
+        f"Жми хэштег → увидишь все посты по теме.\n\n"
+        f"📍 Сцены\n{scenes_line}\n\n"
+        f"🎤 Артисты (type beat под)\n{artists_line}\n\n"
+        f"⚡ BPM\n{bpm_line}\n\n"
+        f"🔍 Поиск по каталогу + lease → https://t.me/{BOT_USERNAME}\n"
+        f"🎧 Все биты + landing → {LANDING_URL}\n"
+        f"💎 WAV · Trackouts · Unlimited · Exclusive — DM {TG_HANDLE}\n\n"
+        f"💰 MP3 Lease: 500⭐ / 7 USDT (untagged MP3 + TXT license, instant delivery)"
     )
 
 

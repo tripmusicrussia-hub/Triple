@@ -731,6 +731,31 @@ async def cmd_cancel_sched(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ Не нашёл в очереди: {token}")
 
 
+# ── /pin_hub — навигационный закреп-пост в канал ──────────────
+
+async def cmd_pin_hub(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Генерирует navigation hub-пост по текущему каталогу и предлагает
+    админу опубликовать + закрепить в канале. Обновлять раз в 2 недели
+    (появились новые сцены/артисты в каталоге).
+    """
+    if update.effective_user.id != ADMIN_ID:
+        return
+    text = beat_post_builder.build_pinned_hub()
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📌 Опубликовать и закрепить", callback_data="pin_hub_go")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="pin_hub_cancel")],
+    ])
+    # Сохраняем текст в user_data — чтобы callback взял именно эту версию,
+    # а не пересчитывал каталог заново (вдруг между превью и кликом что-то
+    # успело измениться).
+    context.user_data["pin_hub_text"] = text
+    await update.message.reply_text(
+        f"👁 Превью hub-поста:\n\n{text}",
+        reply_markup=kb,
+        disable_web_page_preview=True,
+    )
+
+
 # ── /stats — сводка публикаций ────────────────────────────────
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1361,6 +1386,50 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
             await bot.send_message(user_id, "❌ Отменено")
             return
+
+    if data == "pin_hub_cancel":
+        if user_id != ADMIN_ID:
+            return
+        context.user_data.pop("pin_hub_text", None)
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await bot.send_message(user_id, "❌ Hub-пост не опубликован")
+        return
+
+    if data == "pin_hub_go":
+        if user_id != ADMIN_ID:
+            return
+        text = context.user_data.pop("pin_hub_text", None)
+        if not text:
+            # Если кнопка залежалась — пересчитываем
+            text = beat_post_builder.build_pinned_hub()
+        try:
+            sent = await bot.send_message(
+                CHANNEL_ID, text, disable_web_page_preview=True,
+            )
+        except Exception as e:
+            logger.exception("pin_hub: send to CHANNEL_ID failed")
+            await bot.send_message(user_id, f"❌ Не смог запостить в канал: {e}")
+            return
+        try:
+            await bot.pin_chat_message(
+                CHANNEL_ID, sent.message_id, disable_notification=True,
+            )
+            pinned_note = "✅ Опубликовано и закреплено"
+        except Exception as e:
+            logger.warning("pin_hub: pin failed (бот не admin с pin-правами?): %s", e)
+            pinned_note = (
+                "✅ Опубликовано, но закрепить не смог — проверь права бота "
+                f"в канале (нужно Pin Messages).\nDetail: {e}"
+            )
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await bot.send_message(user_id, pinned_note)
+        return
 
     if data == "check_sub":
         subscribed_users.discard(user_id)
@@ -2079,7 +2148,17 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
             beats_db.load_beats()
         reserved_beat_id = max([b["id"] for b in beats_db.BEATS_CACHE] + [0]) + 1
 
-        yt_post = beat_post_builder.build_yt_post(meta, beat_id=reserved_beat_id)
+        # Длительность mp3 для YT-timestamps (RichBlessed pattern). Если probe
+        # упадёт — description соберётся без timestamps-блока, не критично.
+        try:
+            mp3_duration = video_builder.probe_duration(mp3_path)
+        except Exception as e:
+            logger.warning("probe_duration failed, YT description без timestamps: %s", e)
+            mp3_duration = None
+
+        yt_post = beat_post_builder.build_yt_post(
+            meta, beat_id=reserved_beat_id, duration_sec=mp3_duration,
+        )
         tg_caption, tg_style = await beat_post_builder.build_tg_caption_async(meta, beat_id=reserved_beat_id)
 
         pending_uploads[token] = {
@@ -2106,12 +2185,17 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
         pending_uploads[token]["tg_preview_msg_id"] = tg_preview_msg.message_id
 
         # 2) Превью YT-поста — thumbnail + title + tags + description + кнопки.
-        yt_preview = (
-            f"👁 Превью YouTube:\n\n"
+        # Disclaimer ставим в начале — caption у reply_photo лимитирован 1024
+        # символами; при обрезке должна резаться description, а не warning.
+        yt_preview_head = (
+            f"👁 Превью YouTube:\n"
+            f"⚠️ Ссылка buy_{reserved_beat_id} заработает после «🚀 YT + TG»\n\n"
             f"🎬 Title:\n{yt_post.title}\n\n"
             f"🏷 Tags ({len(yt_post.tags)}): {', '.join(yt_post.tags[:6])}...\n\n"
-            f"📝 Description:\n{yt_post.description[:500]}..."
+            f"📝 Description:\n"
         )
+        desc_budget = max(0, 1024 - len(yt_preview_head) - 3)  # 3 — на "..."
+        yt_preview = yt_preview_head + yt_post.description[:desc_budget] + "..."
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🚀 YT + TG сейчас", callback_data=f"bu_all_{token}")],
             [InlineKeyboardButton("📅 В лучшее время (авто)", callback_data=f"bu_sched_{token}")],
@@ -2693,6 +2777,7 @@ async def run_bot():
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("queue", cmd_queue))
     app.add_handler(CommandHandler("cancel_sched", cmd_cancel_sched))
+    app.add_handler(CommandHandler("pin_hub", cmd_pin_hub))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(PreCheckoutQueryHandler(handle_precheckout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, handle_successful_payment))

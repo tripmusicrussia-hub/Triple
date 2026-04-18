@@ -42,8 +42,12 @@ def warmup():
         logger.warning("ffmpeg warmup failed: %s", e)
 
 
-def _probe_duration(path: Path) -> float:
-    """Длительность mp3 через ffmpeg."""
+def probe_duration(path: Path) -> float:
+    """Длительность mp3/аудио в секундах через ffmpeg stderr-parse.
+
+    Публичный API — используется и в build_video, и в upload flow для
+    YT-description timestamps.
+    """
     cmd = [_ffmpeg(), "-i", str(path)]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     stderr = proc.stderr
@@ -69,7 +73,7 @@ def build_video(image_path: Path, mp3_path: Path, out_path: Path) -> Path:
     if not mp3_path.exists():
         raise FileNotFoundError(f"mp3 not found: {mp3_path}")
 
-    duration = _probe_duration(mp3_path)
+    duration = probe_duration(mp3_path)
     logger.info("duration: %.2fs, building stillimage video → %s", duration, out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
