@@ -576,6 +576,36 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Напиши: /search keyglock")
 
 
+# ── /queue — очередь плановых публикаций ─────────────────────
+
+async def cmd_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    import publish_scheduler
+    items = publish_scheduler.queue_summary()
+    if not items:
+        await update.message.reply_text("📭 Очередь пуста")
+        return
+    text = "📅 Очередь плановых публикаций:\n\n" + "\n".join(items)
+    text += "\n\n/cancel_sched <token> — отменить (token из лога)"
+    await update.message.reply_text(text)
+
+
+async def cmd_cancel_sched(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /cancel_sched <token>")
+        return
+    token = context.args[0]
+    import publish_scheduler
+    if publish_scheduler.cancel(token):
+        # Файлы оставляем в pending_uploads (если ещё там) либо вручную удалять
+        await update.message.reply_text(f"✅ Отменено: {token}")
+    else:
+        await update.message.reply_text(f"⚠️ Не нашёл в очереди: {token}")
+
+
 # ── /stats — сводка публикаций ────────────────────────────────
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -909,6 +939,32 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if action == "cancel":
             _cleanup_upload(token)
             await query.message.reply_text("❌ Отменено")
+            return
+
+        if action == "sched":
+            import publish_scheduler
+            # Сохраняем token в payload чтобы потом matching при публикации
+            payload["token"] = token
+            publish_at = publish_scheduler.enqueue(payload, actions=["yt", "tg"])
+            # НЕ удаляем payload из pending_uploads и НЕ чистим temp-файлы —
+            # они нужны scheduler'у в назначенное время.
+            # Но также удаляем token из pending_uploads → чтоб нельзя было
+            # ещё раз нажать кнопку → чистка только ПОСЛЕ публикации.
+            pending_uploads.pop(token, None)
+            try:
+                await query.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            now = datetime.now(MSK_TZ)
+            delta = publish_at - now
+            days, rem = divmod(int(delta.total_seconds()), 86400)
+            hours, _ = divmod(rem, 3600)
+            human = f"{days}д {hours}ч" if days else f"{hours}ч"
+            await query.message.reply_text(
+                f"📅 Запланировано на {publish_at.strftime('%a %d %b %H:%M МСК')} (через {human})\n"
+                f"В назначенное время — авто-upload YT + пост в канал @iiiplfiii.\n\n"
+                f"В очереди: {publish_scheduler.queue_size()} битов"
+            )
             return
 
         if action == "regen":
@@ -1827,7 +1883,8 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
             f"📝 Description:\n{yt_post.description[:500]}..."
         )
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🚀 YT + TG", callback_data=f"bu_all_{token}")],
+            [InlineKeyboardButton("🚀 YT + TG сейчас", callback_data=f"bu_all_{token}")],
+            [InlineKeyboardButton("📅 В лучшее время (авто)", callback_data=f"bu_sched_{token}")],
             [InlineKeyboardButton("🎬 Только YouTube", callback_data=f"bu_yt_{token}")],
             [InlineKeyboardButton("📡 Только в канал TG", callback_data=f"bu_tg_{token}")],
             [InlineKeyboardButton("🔄 Переписать TG-подпись", callback_data=f"bu_regen_{token}")],
@@ -1849,6 +1906,15 @@ def _cleanup_upload(token: str):
     data = pending_uploads.pop(token, None)
     if not data:
         return
+    # Если этот token в очереди публ. scheduler'а — НЕ удалять файлы,
+    # они нужны в назначенное время. Scheduler сам почистит после publish.
+    try:
+        import publish_scheduler
+        if publish_scheduler.is_scheduled(token):
+            logger.info("cleanup: token %s scheduled, skip file delete", token)
+            return
+    except Exception:
+        pass
     for key in ("mp3_path", "video_path", "thumb_path", "clip_loop_path"):
         p = data.get(key)
         if p:
@@ -2108,10 +2174,142 @@ async def post_init(application):
     load_users()
     logger.info("Bot started: " + str(len(beats_db.BEATS_CACHE)) + " beats, " + str(len(all_users)) + " users")
     _janitor_clip_loops()
+    # Восстанавливаем очередь плановых публикаций с диска
+    try:
+        import publish_scheduler
+        n = publish_scheduler.load_queue()
+        logger.info("publish_scheduler: restored %d queued items on startup", n)
+    except Exception:
+        logger.exception("publish_scheduler restore failed (non-fatal)")
     asyncio.create_task(daily_channel_scheduler(application.bot, ADMIN_ID))
+    asyncio.create_task(scheduled_publish_loop(application.bot))
     asyncio.create_task(heartbeat_scheduler())
     asyncio.create_task(asyncio.to_thread(_warmup_ffmpeg))
     write_heartbeat()
+
+
+async def scheduled_publish_loop(bot):
+    """Каждые 60с проверяет очередь publish_scheduler и публикует due item'ы."""
+    import publish_scheduler
+    while True:
+        try:
+            for item in publish_scheduler.due_items():
+                try:
+                    await _execute_scheduled_publish(bot, item)
+                    publish_scheduler.mark_published(item["token"])
+                    # Чистим temp-файлы
+                    for key in ("mp3_path", "video_path", "thumb_path"):
+                        p = item.get(key)
+                        if p:
+                            try:
+                                os.remove(p)
+                            except Exception:
+                                pass
+                except Exception:
+                    logger.exception("scheduled publish failed for token=%s", item.get("token"))
+                    # Не удаляем из очереди — повторим через минуту
+        except Exception:
+            logger.exception("scheduled_publish_loop iteration failed")
+        await asyncio.sleep(60)
+
+
+async def _execute_scheduled_publish(bot, item: dict):
+    """Публикует один scheduled item на YT + TG (или одно из)."""
+    import yt_api, post_analytics
+    from pathlib import Path as _P
+    actions = item.get("actions", ["yt", "tg"])
+    meta_d = item["meta"]
+    yt_post_d = item["yt_post"]
+    tg_caption = item["tg_caption"]
+    video_path = _P(item["video_path"])
+    thumb_path = _P(item["thumb_path"])
+    reserved_beat_id = item.get("reserved_beat_id")
+    tg_file_id = item["tg_file_id"]
+
+    yt_video_id = None
+    yt_ok = None
+    tg_ok = None
+    tg_message_id = None
+
+    if "yt" in actions and video_path.exists():
+        try:
+            loop = asyncio.get_running_loop()
+            vid = await loop.run_in_executor(
+                None,
+                lambda: yt_api.upload_video(
+                    video_path, yt_post_d["title"], yt_post_d["description"],
+                    yt_post_d["tags"], thumb_path,
+                ),
+            )
+            yt_video_id = vid
+            yt_ok = True
+            # Добавляем в каталог с reserved_beat_id
+            try:
+                new_id = reserved_beat_id or (max([b["id"] for b in beats_db.BEATS_CACHE] + [0]) + 1)
+                beats_db.BEATS_CACHE.append({
+                    "id": new_id, "msg_id": 0, "name": yt_post_d["title"],
+                    "tags": yt_post_d["tags"], "post_url": f"https://youtu.be/{vid}",
+                    "bpm": meta_d.get("bpm"), "key": meta_d.get("key"),
+                    "file_id": tg_file_id, "content_type": "beat",
+                    "file_unique_id": "", "classification_confidence": 1.0,
+                    "yt_video_id": vid,
+                })
+                beats_db._rebuild_index()
+                beats_db.save_beats()
+            except Exception:
+                logger.exception("scheduled: beats_db append failed (non-fatal)")
+        except Exception:
+            logger.exception("scheduled: YT upload failed")
+            yt_ok = False
+
+    if "tg" in actions:
+        try:
+            sent = await bot.send_audio(CHANNEL_ID, audio=tg_file_id, caption=tg_caption)
+            tg_message_id = sent.message_id
+            tg_ok = True
+            try:
+                for b in beats_db.BEATS_CACHE:
+                    if b.get("file_id") == tg_file_id:
+                        b["last_posted_at"] = datetime.now().isoformat(timespec="seconds")
+                beats_db.save_beats()
+            except Exception:
+                logger.exception("scheduled: mark last_posted_at failed (non-fatal)")
+        except Exception:
+            logger.exception("scheduled: TG send failed")
+            tg_ok = False
+
+    # Лог публикации
+    if yt_ok or tg_ok:
+        try:
+            post_analytics.log_event(
+                kind="scheduled_upload",
+                beat_name=meta_d.get("name", "?"),
+                artist=meta_d.get("artist_display", "?"),
+                bpm=meta_d.get("bpm"),
+                key=meta_d.get("key", ""),
+                style=item.get("tg_style", "scheduled"),
+                caption=tg_caption,
+                yt_video_id=yt_video_id,
+                tg_message_id=tg_message_id,
+                yt_title=yt_post_d["title"],
+            )
+        except Exception:
+            logger.exception("scheduled: post_analytics failed (non-fatal)")
+
+    # Уведомление админу
+    try:
+        parts = []
+        if "yt" in actions:
+            parts.append(f"YT: {'✅ https://youtu.be/' + yt_video_id if yt_ok else '❌'}")
+        if "tg" in actions:
+            parts.append(f"TG: {'✅ msg_id=' + str(tg_message_id) if tg_ok else '❌'}")
+        await bot.send_message(
+            ADMIN_ID,
+            f"📅 Плановая публикация отработала — {meta_d.get('name','?')} — {meta_d.get('artist_display','?')}\n"
+            + "\n".join(parts)
+        )
+    except Exception:
+        logger.exception("scheduled: admin notify failed")
 
 
 BRAND_IMAGE_URL = (
@@ -2200,6 +2398,8 @@ async def run_bot():
     app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("giveaway", cmd_giveaway))
     app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CommandHandler("queue", cmd_queue))
+    app.add_handler(CommandHandler("cancel_sched", cmd_cancel_sched))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(PreCheckoutQueryHandler(handle_precheckout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, handle_successful_payment))
