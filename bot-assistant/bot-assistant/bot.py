@@ -48,10 +48,69 @@ giveaway = {"active": False, "prize_file": None, "prize_name": "", "end_time": N
 pending_posts: dict[str, dict] = {}
 CHANNEL_POST_HOUR = 16  # МСК
 
-# Превью upload-флоу (новый бит от админа)
+# Превью upload-флоу (новый бит от админа) — НЕ персистим: mp3/video/thumb
+# живут в temp_uploads/ на локальном диске, при redeploy они пропадут, так
+# что восстанавливать бесполезно.
 pending_uploads: dict[str, dict] = {}
-# Превью upload-флоу для drum kit / sample pack / loop pack (zip от админа)
+
+# Превью upload-флоу для drum kit / sample pack / loop pack (zip от админа).
+# Здесь file_id ссылается на TG-хранилище (переживает redeploy), поэтому
+# pending_products можно безопасно персистить на диск и восстанавливать.
 pending_products: dict[str, dict] = {}
+PENDING_PRODUCTS_PATH = os.path.join(BASE_DIR, "pending_products.json")
+
+
+def _persist_pending_products() -> None:
+    """Сбрасывает pending_products на диск. Вызывается после append/pop.
+
+    meta — это dataclass ProductMeta, сериализуем через __dict__.
+    """
+    try:
+        serializable = {}
+        for token, p in pending_products.items():
+            meta = p.get("meta")
+            serializable[token] = {
+                "meta": meta.__dict__ if hasattr(meta, "__dict__") else meta,
+                "file_id": p.get("file_id"),
+                "file_unique_id": p.get("file_unique_id"),
+                "file_size": p.get("file_size"),
+                "file_name": p.get("file_name"),
+                "mime_type": p.get("mime_type"),
+            }
+        with open(PENDING_PRODUCTS_PATH, "w", encoding="utf-8") as f:
+            import json as _json
+            _json.dump(serializable, f, ensure_ascii=False, indent=2)
+    except Exception:
+        logger.exception("persist pending_products failed (non-fatal)")
+
+
+def _restore_pending_products() -> int:
+    """Вызывается при старте бота — восстанавливает pending_products с диска.
+    Returns: сколько записей восстановлено.
+    """
+    if not os.path.exists(PENDING_PRODUCTS_PATH):
+        return 0
+    try:
+        import json as _json
+        import product_upload
+        with open(PENDING_PRODUCTS_PATH, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+        for token, p in data.items():
+            meta_dict = p.get("meta") or {}
+            pending_products[token] = {
+                "meta": product_upload.ProductMeta(**meta_dict),
+                "file_id": p.get("file_id"),
+                "file_unique_id": p.get("file_unique_id"),
+                "file_size": p.get("file_size"),
+                "file_name": p.get("file_name"),
+                "mime_type": p.get("mime_type"),
+            }
+        return len(pending_products)
+    except Exception:
+        logger.exception("restore pending_products failed")
+        return 0
+
+
 TEMP_UPLOAD_DIR = os.path.join(BASE_DIR, "temp_uploads")
 os.makedirs(TEMP_UPLOAD_DIR, exist_ok=True)
 
@@ -1560,6 +1619,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         token = data[len("prod_cancel_"):]
         pending_products.pop(token, None)
+        _persist_pending_products()
         try:
             await query.message.edit_reply_markup(reply_markup=None)
         except Exception:
@@ -1572,6 +1632,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         token = data[len("prod_save_"):]
         pending = pending_products.pop(token, None)
+        _persist_pending_products()
         if not pending:
             await query.answer("⚠️ Токен устарел — пришли zip заново", show_alert=True)
             return
@@ -2733,6 +2794,7 @@ async def handle_admin_fsm_text(update: Update, context: ContextTypes.DEFAULT_TY
             "file_name": state.get("file_name"),
             "mime_type": state.get("mime_type", "application/zip"),
         }
+        _persist_pending_products()
         type_label = licensing.PRODUCT_TYPE_LABELS[state["content_type"]]
         size_mb = (state.get("file_size") or 0) / (1024 * 1024)
         preview = (
@@ -3277,60 +3339,63 @@ async def poll_usdt_invoice(bot, invoice_id: int, user_id: int, item_id: int,
     """Пуллит инвойс до оплаты/expiry. Доставляет бит или продукт при paid.
 
     kind="beat" → _deliver_mp3_lease, kind="product" → _deliver_product.
+
+    try/finally гарантирует очистку записи в pending_usdt_invoices даже
+    при exception — защита от утечки памяти при долгом uptime.
     """
     import time
     started = time.monotonic()
-    while time.monotonic() - started < timeout_sec:
-        await asyncio.sleep(5)
-        try:
-            inv = await cryptobot.get_invoice(invoice_id)
-        except Exception as e:
-            logger.warning("poll_usdt_invoice getInvoices err: %s", e)
-            continue
-        if not inv:
-            continue
-        status = inv.get("status")
-        if status == "paid":
-            item = beats_db.get_beat_by_id(item_id)
-            label = "продукт" if kind == "product" else "бит"
-            if not item:
-                try:
-                    await bot.send_message(
-                        user_id,
-                        f"⚠️ {label.capitalize()} пропал из каталога. Напишу автору: @iiiplfiii",
-                    )
-                except Exception:
-                    pass
-                pending_usdt_invoices.pop(invoice_id, None)
-                return
+    try:
+        while time.monotonic() - started < timeout_sec:
+            await asyncio.sleep(5)
             try:
-                user = await bot.get_chat(user_id)
-            except Exception:
-                class _U:
-                    pass
-                user = _U()
-                user.id = user_id
-                user.full_name = str(user_id)
-                user.username = None
-            charge = f"cryptobot:{invoice_id}:{inv.get('hash', '')}"
-            amount = float(inv.get("amount") or 0)
-            currency = inv.get("asset") or "USDT"
-            if kind == "product":
-                await _deliver_product(
-                    bot, user, item,
-                    payment_charge_id=charge, amount=amount, currency=currency,
-                )
-            else:
-                await _deliver_mp3_lease(
-                    bot, user, item,
-                    payment_charge_id=charge, amount=amount, currency=currency,
-                )
-            pending_usdt_invoices.pop(invoice_id, None)
-            return
-        if status == "expired":
-            pending_usdt_invoices.pop(invoice_id, None)
-            return
-    pending_usdt_invoices.pop(invoice_id, None)
+                inv = await cryptobot.get_invoice(invoice_id)
+            except Exception as e:
+                logger.warning("poll_usdt_invoice getInvoices err: %s", e)
+                continue
+            if not inv:
+                continue
+            status = inv.get("status")
+            if status == "paid":
+                item = beats_db.get_beat_by_id(item_id)
+                label = "продукт" if kind == "product" else "бит"
+                if not item:
+                    try:
+                        await bot.send_message(
+                            user_id,
+                            f"⚠️ {label.capitalize()} пропал из каталога. Напишу автору: @iiiplfiii",
+                        )
+                    except Exception:
+                        pass
+                    return
+                try:
+                    user = await bot.get_chat(user_id)
+                except Exception:
+                    class _U:
+                        pass
+                    user = _U()
+                    user.id = user_id
+                    user.full_name = str(user_id)
+                    user.username = None
+                charge = f"cryptobot:{invoice_id}:{inv.get('hash', '')}"
+                amount = float(inv.get("amount") or 0)
+                currency = inv.get("asset") or "USDT"
+                if kind == "product":
+                    await _deliver_product(
+                        bot, user, item,
+                        payment_charge_id=charge, amount=amount, currency=currency,
+                    )
+                else:
+                    await _deliver_mp3_lease(
+                        bot, user, item,
+                        payment_charge_id=charge, amount=amount, currency=currency,
+                    )
+                return
+            if status == "expired":
+                return
+    finally:
+        # Гарантированный cleanup: paid/expired/timeout/exception — всё удалится.
+        pending_usdt_invoices.pop(invoice_id, None)
 
 
 # ── Запуск ────────────────────────────────────────────────────
@@ -3361,6 +3426,13 @@ async def post_init(application):
         logger.info("publish_scheduler: restored %d queued items on startup", n)
     except Exception:
         logger.exception("publish_scheduler restore failed (non-fatal)")
+    # Восстанавливаем pending_products — недосохранённые продукты на preview-шаге.
+    try:
+        restored = _restore_pending_products()
+        if restored:
+            logger.info("pending_products: restored %d items on startup", restored)
+    except Exception:
+        logger.exception("pending_products restore failed (non-fatal)")
     asyncio.create_task(daily_channel_scheduler(application.bot, ADMIN_ID))
     asyncio.create_task(scheduled_publish_loop(application.bot))
     asyncio.create_task(heartbeat_scheduler())
