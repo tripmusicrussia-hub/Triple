@@ -1304,6 +1304,48 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     beats_db.save_beats()
                 except Exception as e:
                     logger.exception("beats_db append failed")
+
+                # ── YT Shorts: второй upload 9:16 версии 45 сек ───────
+                # Использует тот же brand-кадр, но в 1080×1920 letterbox.
+                # Shorts feed = отдельный recommendation-канал внутри YT,
+                # не каннибализирует основной трек.
+                try:
+                    import shorts_builder
+                    short_path = video_path.with_name(f"short_{video_path.name}")
+                    await loop.run_in_executor(
+                        None,
+                        lambda: shorts_builder.build_short(
+                            thumb_path, mp3_path, short_path,
+                        ),
+                    )
+                    short_title = beat_post_builder.build_shorts_title(meta)
+                    short_desc = beat_post_builder.build_shorts_description(
+                        meta, beat_id=payload.get("reserved_beat_id"),
+                        full_video_url=yt_url,
+                    )
+                    short_tags = beat_post_builder.build_shorts_tags(meta)
+                    short_video_id = await loop.run_in_executor(
+                        None,
+                        lambda: yt_api.upload_video(
+                            short_path, short_title, short_desc,
+                            short_tags, thumb_path,
+                        ),
+                    )
+                    short_url = f"https://youtu.be/{short_video_id}"
+                    logger.info("YT Short uploaded: %s", short_url)
+                    await query.message.reply_text(
+                        f"📱 YT Short опубликован: {short_url}"
+                    )
+                    # Cleanup — short file нужен только для upload'а
+                    try:
+                        short_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    logger.exception("YT Shorts upload failed (non-fatal)")
+                    await query.message.reply_text(
+                        f"⚠️ Short не залился (основное видео ок): {e}"
+                    )
             except Exception as e:
                 logger.exception("yt upload failed")
                 yt_ok = False
@@ -2867,7 +2909,7 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # символами; при обрезке должна резаться description, а не warning.
         yt_preview_head = (
             f"👁 Превью YouTube:\n"
-            f"⚠️ Ссылка buy_{reserved_beat_id} заработает после «🚀 YT + TG»\n\n"
+            f"⚠️ Ссылка buy_{reserved_beat_id} заработает после публикации\n\n"
             f"🎬 Title:\n{yt_post.title}\n\n"
             f"🏷 Tags ({len(yt_post.tags)}): {', '.join(yt_post.tags[:6])}...\n\n"
             f"📝 Description:\n"
@@ -2875,9 +2917,9 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
         desc_budget = max(0, 1024 - len(yt_preview_head) - 3)  # 3 — на "..."
         yt_preview = yt_preview_head + yt_post.description[:desc_budget] + "..."
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🚀 YT + TG сейчас", callback_data=f"bu_all_{token}")],
+            [InlineKeyboardButton("🚀 YT + Short + TG сейчас", callback_data=f"bu_all_{token}")],
             [InlineKeyboardButton("📅 В лучшее время (авто)", callback_data=f"bu_sched_{token}")],
-            [InlineKeyboardButton("🎬 Только YouTube", callback_data=f"bu_yt_{token}")],
+            [InlineKeyboardButton("🎬 YT + Short (без TG)", callback_data=f"bu_yt_{token}")],
             [InlineKeyboardButton("📡 Только в канал TG", callback_data=f"bu_tg_{token}")],
             [InlineKeyboardButton("🔄 Переписать TG-подпись", callback_data=f"bu_regen_{token}")],
             [InlineKeyboardButton("❌ Отмена", callback_data=f"bu_cancel_{token}")],

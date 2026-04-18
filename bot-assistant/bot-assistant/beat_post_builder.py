@@ -390,6 +390,70 @@ def build_yt_description(
     )
 
 
+def build_shorts_title(beat: BeatMeta) -> str:
+    """Title для YT Short. Обязательный `#Shorts` — попадает в Shorts feed.
+
+    Лимит title в YT — 100 симв. Держим запас под `#Shorts` (8 симв).
+    """
+    base = f'(FREE) {beat.artist_display} Type Beat - "{beat.name}"'
+    tag = " #Shorts"
+    if len(base) + len(tag) <= 95:
+        return base + tag
+    # Сокращаем до влезающей длины
+    return base[:95 - len(tag)].rstrip() + tag
+
+
+def build_shorts_description(
+    beat: BeatMeta,
+    beat_id: int | None = None,
+    full_video_url: str | None = None,
+) -> str:
+    """Короткое описание YT Short с CTA на полную версию + покупку."""
+    prof = _get_profile(beat.artist_raw)
+    buy = _buy_link(beat_id)
+    primary_slug = beat.artist_display.split(" x ")[0].lower().replace(" ", "")
+    scene_slug = prof["scene"].lower().replace(" ", "")
+    hashtags = f"#{primary_slug}typebeat #{scene_slug}typebeat #typebeat #Shorts"
+
+    parts = [hashtags, ""]
+    parts.append(f'{prof["mood"]} {beat.artist_display} type beat.')
+    parts.append(f"⚡ BPM {beat.bpm} · 🎹 {beat.key}")
+    parts.append("")
+    if full_video_url:
+        parts.append(f"🎧 FULL version → {full_video_url}")
+    parts.append(f"💰 MP3 Lease 500⭐ / 7 USDT → {buy}")
+    parts.append(f"💎 WAV / Exclusive → DM {TG_HANDLE}")
+    return "\n".join(parts)
+
+
+def build_shorts_tags(beat: BeatMeta) -> list[str]:
+    """Тэги для YT Short — компактнее обычного набора. Обязательно 'shorts'."""
+    prof = _get_profile(beat.artist_raw)
+    primary = beat.artist_display.split(" x ")[0].lower()
+    scene = prof["scene"].lower()
+    tags = [
+        "shorts",
+        f"{primary} type beat",
+        f"{primary} type beat {YEAR}",
+        f"{scene} type beat",
+        f"hard {scene} instrumental",
+        f"{beat.bpm} bpm trap beat",
+        "free type beat",
+        "hard trap instrumental",
+        "type beat",
+    ]
+    # Related artists
+    for rel in prof.get("related_tags", [])[:3]:
+        tags.append(f"{rel} type beat")
+    # Dedupe сохраняя порядок
+    seen, out = set(), []
+    for t in tags:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out[:15]
+
+
 def build_yt_tags(beat: BeatMeta) -> list[str]:
     prof = _get_profile(beat.artist_raw)
     artist_slug = beat.artist_display.lower().replace(" x ", " ")
