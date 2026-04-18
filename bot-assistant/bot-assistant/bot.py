@@ -343,9 +343,17 @@ def kb_admin():
     beats = len([b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == "beat"])
     tracks = len([b for b in beats_db.BEATS_CACHE if b.get("content_type") == "track"])
     remixes = len([b for b in beats_db.BEATS_CACHE if b.get("content_type") == "remix"])
+    # Счётчик запланированных публикаций
+    try:
+        import publish_scheduler
+        queue_n = publish_scheduler.queue_size()
+    except Exception:
+        queue_n = 0
+    queue_label = f"📅 Очередь публикаций ({queue_n})" if queue_n else "📅 Очередь публикаций (пусто)"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Статистика (" + str(len(all_users)) + " польз.)", callback_data="admin_stats")],
         [InlineKeyboardButton("🎹 " + str(beats) + " / 🎤 " + str(tracks) + " / 🔀 " + str(remixes), callback_data="admin_catalog")],
+        [InlineKeyboardButton(queue_label, callback_data="admin_queue")],
         [InlineKeyboardButton("🎤 Добавить треки", callback_data="admin_addbeats_track"),
          InlineKeyboardButton("🔀 Добавить ремиксы", callback_data="admin_addbeats_remix")],
         [InlineKeyboardButton("🗑 Очистить", callback_data="admin_clearbeats")],
@@ -353,6 +361,26 @@ def kb_admin():
         [InlineKeyboardButton("🎬 YouTube", callback_data="admin_yt_menu")],
         [InlineKeyboardButton("🎁 Розыгрыш: " + ("🟢 Активен" if giveaway["active"] else "🔴 Нет"), callback_data="admin_giveaway")],
     ])
+
+
+def kb_admin_queue():
+    """Список запланированных публикаций с кнопкой отмены per-item."""
+    import publish_scheduler
+    from datetime import datetime
+    rows = []
+    # Получаем raw data — нужны token'ы
+    for q in sorted(publish_scheduler._QUEUE, key=lambda x: x["publish_at"]):
+        token = q.get("token", "")
+        meta = q.get("meta", {})
+        name = meta.get("name", "?")[:20]
+        artist = meta.get("artist_display", "?")[:20]
+        dt = publish_scheduler._parse_dt(q["publish_at"])
+        when = dt.strftime("%a %d %H:%M")
+        label = f"{when} · {name} — {artist}"[:56]
+        rows.append([InlineKeyboardButton(label, callback_data="noop")])
+        rows.append([InlineKeyboardButton(f"   ❌ Отменить {name[:15]}", callback_data=f"qcancel_{token}")])
+    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(rows)
 
 
 def kb_admin_yt():
@@ -1623,6 +1651,58 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "admin_panel":
         if user_id != ADMIN_ID: return
         await query.message.reply_text("🎛 Панель управления:", reply_markup=kb_admin())
+        return
+
+    if data == "admin_queue":
+        if user_id != ADMIN_ID: return
+        import publish_scheduler
+        n = publish_scheduler.queue_size()
+        if n == 0:
+            await query.message.reply_text(
+                "📭 Очередь пуста. Загружай битеки — жми «📅 В лучшее время» в превью.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")]])
+            )
+        else:
+            await query.message.reply_text(
+                f"📅 Запланировано: {n}\nНажми «❌ Отменить» под нужной публикацией:",
+                reply_markup=kb_admin_queue(),
+            )
+        return
+
+    if data.startswith("qcancel_"):
+        if user_id != ADMIN_ID: return
+        token = data[len("qcancel_"):]
+        import publish_scheduler
+        # Перед удалением чистим temp-файлы этого item'а
+        items_to_remove = [q for q in publish_scheduler._QUEUE if q.get("token") == token]
+        for item in items_to_remove:
+            for key in ("mp3_path", "video_path", "thumb_path"):
+                p = item.get(key)
+                if p:
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
+        ok = publish_scheduler.cancel(token)
+        if ok:
+            await query.answer("✅ Отменено", show_alert=False)
+            # Refresh admin_queue view
+            n = publish_scheduler.queue_size()
+            if n == 0:
+                try:
+                    await query.message.edit_text(
+                        "📭 Очередь пуста. Загружай битеки и планируй публикации.",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")]])
+                    )
+                except Exception:
+                    pass
+            else:
+                try:
+                    await query.message.edit_reply_markup(reply_markup=kb_admin_queue())
+                except Exception:
+                    pass
+        else:
+            await query.answer("⚠️ Не нашёл в очереди (возможно уже опубликован)", show_alert=True)
         return
 
     if data == "admin_stats":
