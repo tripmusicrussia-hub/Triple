@@ -1064,8 +1064,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if action == "cancel":
+            await _delete_preview_messages(context.bot, payload)
             _cleanup_upload(token)
-            await query.message.reply_text("❌ Отменено")
+            try:
+                await query.message.reply_text("❌ Отменено")
+            except Exception:
+                pass
             return
 
         if action == "sched":
@@ -1073,21 +1077,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Сохраняем token в payload чтобы потом matching при публикации
             payload["token"] = token
             publish_at = publish_scheduler.enqueue(payload, actions=["yt", "tg"])
-            # НЕ удаляем payload из pending_uploads и НЕ чистим temp-файлы —
-            # они нужны scheduler'у в назначенное время.
-            # Но также удаляем token из pending_uploads → чтоб нельзя было
-            # ещё раз нажать кнопку → чистка только ПОСЛЕ публикации.
+            # Чистим превью-сообщения (audio + photo) — они больше не нужны
+            await _delete_preview_messages(context.bot, payload)
             pending_uploads.pop(token, None)
-            try:
-                await query.message.edit_reply_markup(reply_markup=None)
-            except Exception:
-                pass
             now = datetime.now(MSK_TZ)
             delta = publish_at - now
             days, rem = divmod(int(delta.total_seconds()), 86400)
             hours, _ = divmod(rem, 3600)
             human = f"{days}д {hours}ч" if days else f"{hours}ч"
-            await query.message.reply_text(
+            await context.bot.send_message(
+                user_id,
                 f"📅 Запланировано на {publish_at.strftime('%a %d %b %H:%M МСК')} (через {human})\n"
                 f"В назначенное время — авто-upload YT + пост в канал @iiiplfiii.\n\n"
                 f"В очереди: {publish_scheduler.queue_size()} битов"
@@ -1246,8 +1245,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if tg_ok:
             parts_msg.append("✅ TG: опубликовано в канал")
         if parts_msg:
-            await query.message.reply_text("\n".join(parts_msg))
+            await context.bot.send_message(user_id, "\n".join(parts_msg))
 
+        # Чистим превью-сообщения чтобы чат не засорялся
+        await _delete_preview_messages(context.bot, payload)
         _cleanup_upload(token)
         return
 
@@ -2121,15 +2122,35 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
             [InlineKeyboardButton("🔄 Переписать TG-подпись", callback_data=f"bu_regen_{token}")],
             [InlineKeyboardButton("❌ Отмена", callback_data=f"bu_cancel_{token}")],
         ])
-        await update.message.reply_photo(
+        yt_preview_msg = await update.message.reply_photo(
             photo=open(thumb_path, "rb"),
             caption=yt_preview[:1024],
             reply_markup=kb,
         )
+        pending_uploads[token]["yt_preview_chat_id"] = yt_preview_msg.chat_id
+        pending_uploads[token]["yt_preview_msg_id"] = yt_preview_msg.message_id
     except Exception as e:
         logger.exception("beat_upload failed")
         await status.edit_text(f"❌ Ошибка: {e}")
         _cleanup_upload(token)
+
+
+async def _delete_preview_messages(bot, payload: dict):
+    """Чистит превью-сообщения в чате (TG audio preview + YT photo preview)
+    после финального действия (publish / schedule / cancel). Позволяет
+    держать chat чистым — остаётся только финальное подтверждение.
+    """
+    for chat_key, msg_key in [
+        ("tg_preview_chat_id", "tg_preview_msg_id"),
+        ("yt_preview_chat_id", "yt_preview_msg_id"),
+    ]:
+        chat_id = payload.get(chat_key)
+        msg_id = payload.get(msg_key)
+        if chat_id and msg_id:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            except Exception:
+                pass  # сообщение могло быть уже удалено / старше 48ч
 
 
 def _cleanup_upload(token: str):
