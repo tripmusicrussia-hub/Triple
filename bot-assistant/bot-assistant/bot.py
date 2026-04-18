@@ -345,6 +345,10 @@ def kb_admin():
     beats = len([b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == "beat"])
     tracks = len([b for b in beats_db.BEATS_CACHE if b.get("content_type") == "track"])
     remixes = len([b for b in beats_db.BEATS_CACHE if b.get("content_type") == "remix"])
+    products_n = len([
+        b for b in beats_db.BEATS_CACHE
+        if b.get("content_type") in ("drumkit", "samplepack", "looppack")
+    ])
     # Счётчик запланированных публикаций
     try:
         import publish_scheduler
@@ -352,10 +356,13 @@ def kb_admin():
     except Exception:
         queue_n = 0
     queue_label = f"📅 Очередь публикаций ({queue_n})" if queue_n else "📅 Очередь публикаций (пусто)"
+    products_label = f"📦 Kits & Packs ({products_n})" if products_n else "📦 Kits & Packs — залить первый"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Статистика (" + str(len(all_users)) + " польз.)", callback_data="admin_stats")],
         [InlineKeyboardButton("🎹 " + str(beats) + " / 🎤 " + str(tracks) + " / 🔀 " + str(remixes), callback_data="admin_catalog")],
+        [InlineKeyboardButton(products_label, callback_data="admin_products")],
         [InlineKeyboardButton(queue_label, callback_data="admin_queue")],
+        [InlineKeyboardButton("📌 Обновить закреп-пост (навигация)", callback_data="admin_pin_hub")],
         [InlineKeyboardButton("🗑 Удалить бит из каталога", callback_data="admin_clearbeats")],
         [InlineKeyboardButton("📡 Автопост в канал", callback_data="admin_channelpost")],
         [InlineKeyboardButton("🎬 YouTube", callback_data="admin_yt_menu")],
@@ -746,6 +753,19 @@ async def cmd_cancel_product(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ── /upload_product — FSM для заливки kit/pack/loop ───────────
 
+async def _start_product_upload(bot, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Общий старт FSM: reply через cmd_upload_product ИЛИ через кнопку
+    «📦 Kits & Packs» в /admin → «➕ Залить новый»."""
+    context.user_data["product_upload"] = {"step": "await_type"}
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🥁 Drum Kit (1500⭐)", callback_data="prod_type_drumkit")],
+        [InlineKeyboardButton("🎵 Sample Pack (1000⭐)", callback_data="prod_type_samplepack")],
+        [InlineKeyboardButton("🔄 Loop Pack (1000⭐)", callback_data="prod_type_looppack")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="prod_abort")],
+    ])
+    await bot.send_message(chat_id, "📦 Новый продукт в каталог. Выбери тип:", reply_markup=kb)
+
+
 async def cmd_upload_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Старт FSM загрузки продукта. Админ выбирает тип → бот ведёт по шагам:
     zip → имя → цена → описание → preview → save.
@@ -758,29 +778,13 @@ async def cmd_upload_product(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """
     if update.effective_user.id != ADMIN_ID:
         return
-    # Сбрасываем любое незавершённое состояние — начинаем с нуля.
-    context.user_data["product_upload"] = {"step": "await_type"}
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🥁 Drum Kit (1500⭐)", callback_data="prod_type_drumkit")],
-        [InlineKeyboardButton("🎵 Sample Pack (1000⭐)", callback_data="prod_type_samplepack")],
-        [InlineKeyboardButton("🔄 Loop Pack (1000⭐)", callback_data="prod_type_looppack")],
-        [InlineKeyboardButton("❌ Отмена", callback_data="prod_abort")],
-    ])
-    await update.message.reply_text(
-        "📦 Новый продукт в каталог. Выбери тип:",
-        reply_markup=kb,
-    )
+    await _start_product_upload(context.bot, update.effective_chat.id, context)
 
 
 # ── /pin_hub — навигационный закреп-пост в канал ──────────────
 
-async def cmd_pin_hub(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Генерирует navigation hub-пост по текущему каталогу и предлагает
-    админу опубликовать + закрепить в канале. Обновлять раз в 2 недели
-    (появились новые сцены/артисты в каталоге).
-    """
-    if update.effective_user.id != ADMIN_ID:
-        return
+async def _show_pin_hub_preview(bot, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Общий preview-sender для /pin_hub И кнопки в /admin."""
     text = beat_post_builder.build_pinned_hub()
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📌 Опубликовать и закрепить", callback_data="pin_hub_go")],
@@ -790,11 +794,21 @@ async def cmd_pin_hub(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # а не пересчитывал каталог заново (вдруг между превью и кликом что-то
     # успело измениться).
     context.user_data["pin_hub_text"] = text
-    await update.message.reply_text(
+    await bot.send_message(
+        chat_id,
         f"👁 Превью hub-поста:\n\n{text}",
         reply_markup=kb,
         disable_web_page_preview=True,
     )
+
+
+async def cmd_pin_hub(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Генерирует navigation hub-пост по текущему каталогу и предлагает
+    админу опубликовать + закрепить в канале. Обновлять раз в 2 недели.
+    """
+    if update.effective_user.id != ADMIN_ID:
+        return
+    await _show_pin_hub_preview(context.bot, update.effective_chat.id, context)
 
 
 # ── /stats — сводка публикаций ────────────────────────────────
@@ -1944,6 +1958,67 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "admin_panel":
         if user_id != ADMIN_ID: return
         await query.message.reply_text("🎛 Панель управления:", reply_markup=kb_admin())
+        return
+
+    if data == "admin_pin_hub":
+        if user_id != ADMIN_ID: return
+        await _show_pin_hub_preview(bot, query.message.chat_id, context)
+        return
+
+    if data == "admin_products":
+        if user_id != ADMIN_ID: return
+        products = [
+            b for b in beats_db.BEATS_CACHE
+            if b.get("content_type") in ("drumkit", "samplepack", "looppack")
+        ]
+        rows = []
+        if products:
+            # Сортируем по id desc — новые сверху.
+            for p in sorted(products, key=lambda x: x["id"], reverse=True)[:20]:
+                label = licensing.PRODUCT_TYPE_LABELS.get(
+                    p.get("content_type", ""), "?"
+                )
+                price = p.get("price_stars") or "?"
+                title = f"{label}: {p['name']} — {price}⭐"[:55]
+                rows.append([InlineKeyboardButton(title, callback_data=f"admin_prod_{p['id']}")])
+        rows.append([InlineKeyboardButton("➕ Залить новый продукт", callback_data="admin_upload_prod")])
+        rows.append([InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")])
+        await query.message.reply_text(
+            f"📦 Каталог продуктов ({len(products)}):",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return
+
+    if data == "admin_upload_prod":
+        if user_id != ADMIN_ID: return
+        await _start_product_upload(bot, query.message.chat_id, context)
+        return
+
+    if data.startswith("admin_prod_"):
+        if user_id != ADMIN_ID: return
+        try:
+            pid = int(data[len("admin_prod_"):])
+        except ValueError:
+            return
+        p = beats_db.get_beat_by_id(pid)
+        if not p or p.get("content_type") not in licensing.PRODUCT_TYPE_LABELS:
+            await query.answer("Продукт не найден", show_alert=True)
+            return
+        label = licensing.PRODUCT_TYPE_LABELS[p["content_type"]]
+        size_mb = (p.get("file_size") or 0) / (1024 * 1024) if p.get("file_size") else 0
+        info = (
+            f"📦 <b>{label}</b>: {p['name']}\n"
+            f"🆔 id={p['id']}\n"
+            f"💰 {p.get('price_stars', '?')}⭐ / {p.get('price_usdt', '?')} USDT\n"
+            f"📎 {p.get('file_name','?')} ({size_mb:.1f} MB)\n\n"
+            f"📝 {p.get('description') or '<i>(без описания)</i>'}"
+        )
+        await query.message.reply_text(
+            info, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀️ К списку", callback_data="admin_products")],
+            ]),
+        )
         return
 
     if data == "admin_queue":
