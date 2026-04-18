@@ -48,6 +48,29 @@ giveaway = {"active": False, "prize_file": None, "prize_name": "", "end_time": N
 pending_posts: dict[str, dict] = {}
 CHANNEL_POST_HOUR = 16  # МСК
 
+# Общий helper для user-facing ошибок. Полный exception должен быть уже
+# залогирован через logger.exception() выше по стеку — юзеру показываем
+# generic сообщение без технических деталей, чтобы API-URL / stack trace /
+# credentials не утекли в чат.
+USER_ERROR_FALLBACK_CONTACT = "@iiiplfiii"
+
+
+def _user_error_msg(short_hint: str = "") -> str:
+    """Дружелюбный generic текст для юзера.
+
+    Usage: `logger.exception("...")` → `reply_text(_user_error_msg("оплата"))`.
+    Примеры hint: "оплата", "поиск", "генерация". Если hint пуст — общий текст.
+    """
+    if short_hint:
+        return (
+            f"⚠️ {short_hint.capitalize()} временно недоступна. "
+            f"Попробуй ещё раз через минуту или напиши {USER_ERROR_FALLBACK_CONTACT}."
+        )
+    return (
+        f"⚠️ Что-то сломалось. Попробуй ещё раз или напиши {USER_ERROR_FALLBACK_CONTACT}."
+    )
+
+
 # Превью upload-флоу (новый бит от админа) — НЕ персистим: mp3/video/thumb
 # живут в temp_uploads/ на локальном диске, при redeploy они пропадут, так
 # что восстанавливать бесполезно.
@@ -2047,7 +2070,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             logger.exception("cryptobot.create_invoice failed")
-            await query.answer(f"⚠️ CryptoBot недоступен: {str(e)[:150]}", show_alert=True)
+            await query.answer(_user_error_msg("оплата"), show_alert=True)
             return
         pay_url = inv.get("pay_url") or inv.get("mini_app_invoice_url") or inv.get("bot_invoice_url")
         invoice_id = int(inv.get("invoice_id"))
@@ -2092,7 +2115,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             logger.exception("cryptobot.create_invoice failed (product)")
-            await query.answer(f"⚠️ CryptoBot недоступен: {str(e)[:150]}", show_alert=True)
+            await query.answer(_user_error_msg("оплата"), show_alert=True)
             return
         pay_url = inv.get("pay_url") or inv.get("mini_app_invoice_url") or inv.get("bot_invoice_url")
         invoice_id = int(inv.get("invoice_id"))
@@ -2151,7 +2174,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             logger.exception("send_invoice error (product)")
-            await query.answer(f"⚠️ {e}", show_alert=True)
+            await query.answer(_user_error_msg("оплата"), show_alert=True)
         return
 
     if data.startswith("buy_mp3_"):
@@ -2191,7 +2214,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             logger.exception("send_invoice error")
-            await query.answer(f"⚠️ {e}", show_alert=True)
+            await query.answer(_user_error_msg("оплата"), show_alert=True)
         return
 
     if data == "search_prompt":

@@ -164,7 +164,7 @@ async def handle(user_text: str, user_id: int | None = None) -> str:
             logger.warning("user_agent: catalog_search bad args %s: %s", tool_args, e)
         except Exception as e:
             logger.exception("user_agent: catalog_search failed")
-            return f"🔍 Поиск сломался: {str(e)[:150]}"
+            return "🔍 Поиск временно недоступен — попробуй чуть позже или напиши @iiiplfiii"
 
     # Plain text ответ — снимаем markdown (LLM иногда игнорит инструкцию в промпте)
     text = _strip_markdown(raw.strip().strip("`").strip())
