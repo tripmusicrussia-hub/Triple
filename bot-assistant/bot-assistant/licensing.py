@@ -25,20 +25,20 @@ PRODUCER_CONTACT = "@iiiplfiii"
 # Человекочитаемые лейблы + дефолтные цены по типу продукта.
 # При upload админ может переопределить цену (3-я строка caption), но
 # лейбл фиксирован — используется везде в UI/каталоге/license.
-PRODUCT_TYPE_LABELS = {
+PRODUCT_TYPE_LABELS: dict[str, str] = {
     "drumkit":    "Drum Kit",
     "samplepack": "Sample Pack",
     "looppack":   "Loop Pack",
 }
 
-DEFAULT_PRICES = {
+DEFAULT_PRICES: dict[str, tuple[int, float]] = {
     "drumkit":    (PRICE_KIT_STARS, PRICE_KIT_USDT),
     "samplepack": (PRICE_PACK_STARS, PRICE_PACK_USDT),
     "looppack":   (PRICE_PACK_STARS, PRICE_PACK_USDT),
 }
 
 # Алиасы в caption (1-я строка) → канонический content_type.
-PRODUCT_TYPE_ALIASES = {
+PRODUCT_TYPE_ALIASES: dict[str, str] = {
     "kit":        "drumkit",
     "drumkit":    "drumkit",
     "drums":      "drumkit",
