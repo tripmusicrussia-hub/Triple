@@ -1743,6 +1743,90 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(poll_usdt_invoice(bot, invoice_id, user_id, beat_id))
         return
 
+    # ── Покупка продукта (drum kit / sample pack / loop pack)
+    #    buy_prod_usdt_<id> — USDT через Cryptobot, buy_prod_<id> — Telegram Stars
+    if data.startswith("buy_prod_usdt_"):
+        try:
+            pid = int(data[len("buy_prod_usdt_"):])
+        except ValueError:
+            return
+        product = beats_db.get_beat_by_id(pid)
+        if not product or product.get("content_type") not in licensing.PRODUCT_TYPE_LABELS:
+            await query.answer("Продукт не найден", show_alert=True)
+            return
+        type_label = licensing.PRODUCT_TYPE_LABELS[product["content_type"]]
+        usdt = float(product.get("price_usdt") or licensing.DEFAULT_PRICES[product["content_type"]][1])
+        try:
+            inv = await cryptobot.create_invoice(
+                amount=usdt,
+                asset="USDT",
+                description=f"{type_label}: «{product['name']}»",
+                payload=f"product:{pid}:{user_id}",
+            )
+        except Exception as e:
+            logger.exception("cryptobot.create_invoice failed (product)")
+            await query.answer(f"⚠️ CryptoBot недоступен: {str(e)[:150]}", show_alert=True)
+            return
+        pay_url = inv.get("pay_url") or inv.get("mini_app_invoice_url") or inv.get("bot_invoice_url")
+        invoice_id = int(inv.get("invoice_id"))
+        pending_usdt_invoices[invoice_id] = {"user_id": user_id, "beat_id": pid, "kind": "product"}
+        try:
+            await bot.send_message(
+                user_id,
+                f"💵 Счёт на {usdt:g} USDT — {type_label}: «{product['name']}»\n\n"
+                f"Жми кнопку — откроется CryptoBot, оплата из @wallet.\n"
+                f"Как пройдёт — zip и лицензия автоматом придут сюда (ждать 10-30 сек).\n\n"
+                f"⏱ Счёт активен 30 минут.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💳 Оплатить в CryptoBot", url=pay_url)]]),
+            )
+            if query.message.chat_id != user_id:
+                await query.answer("💵 Счёт отправил в ЛС бота", show_alert=False)
+        except TelegramError as e:
+            logger.warning("send USDT invoice msg failed (product): %s", e)
+            await query.answer("Сначала напиши /start боту в ЛС — тогда пришлю счёт.", show_alert=True)
+            return
+        asyncio.create_task(poll_usdt_invoice(bot, invoice_id, user_id, pid, kind="product"))
+        return
+
+    if data.startswith("buy_prod_"):
+        try:
+            pid = int(data[len("buy_prod_"):])
+        except ValueError:
+            return
+        product = beats_db.get_beat_by_id(pid)
+        if not product or product.get("content_type") not in licensing.PRODUCT_TYPE_LABELS:
+            await query.answer("Продукт не найден", show_alert=True)
+            return
+        type_label = licensing.PRODUCT_TYPE_LABELS[product["content_type"]]
+        stars = int(product.get("price_stars") or licensing.DEFAULT_PRICES[product["content_type"]][0])
+        title = f"{type_label} — {product['name']}"[:32]
+        description = (
+            f"{type_label}: «{product['name']}». Non-exclusive: безлимит в своих треках, "
+            f"запрет перепродажи сэмплов. После оплаты — zip + txt-лицензия в ЛС."
+        )[:255]
+        try:
+            await bot.send_invoice(
+                chat_id=user_id,
+                title=title,
+                description=description,
+                payload=f"product:{pid}",
+                provider_token="",
+                currency="XTR",
+                prices=[LabeledPrice(label=type_label, amount=stars)],
+            )
+            if query.message.chat_id != user_id:
+                await query.answer("💰 Счёт отправил в ЛС бота", show_alert=False)
+        except TelegramError as e:
+            logger.warning("send_invoice failed for user %s (product): %s", user_id, e)
+            await query.answer(
+                "Сначала напиши /start боту в ЛС — тогда пришлю счёт.",
+                show_alert=True,
+            )
+        except Exception as e:
+            logger.exception("send_invoice error (product)")
+            await query.answer(f"⚠️ {e}", show_alert=True)
+        return
+
     if data.startswith("buy_mp3_"):
         try:
             beat_id = int(data[len("buy_mp3_"):])
@@ -2690,28 +2774,119 @@ async def _deliver_mp3_lease(bot, user, beat: dict, *, payment_charge_id: str,
         pass
 
 
+async def _deliver_product(bot, user, product: dict, *, payment_charge_id: str,
+                            amount: int | float, currency: str) -> None:
+    """Отправляет zip-архив + txt-лицензию покупателю для drum kit / sample
+    pack / loop pack. protect_content=True блокирует forward/save в TG —
+    файл можно только скачать, не переслать.
+    """
+    buyer_name = (user.full_name or user.username or str(user.id)).strip()
+    content_type = product.get("content_type", "samplepack")
+    type_label = licensing.PRODUCT_TYPE_LABELS.get(content_type, content_type)
+    license_text = licensing.product_license_text(
+        buyer_name=buyer_name,
+        buyer_tg_id=user.id,
+        product_type=content_type,
+        product_name=product["name"],
+        payment_charge_id=payment_charge_id,
+    )
+    try:
+        await bot.send_document(
+            user.id,
+            document=product["file_id"],
+            caption=(
+                f"📦 {type_label}: {product['name']}\n\n"
+                f"Красавчик, забирай 🔥\n"
+                f"Лицензия и условия — во втором файле."
+            ),
+            protect_content=True,
+        )
+        license_bytes = io.BytesIO(license_text.encode("utf-8"))
+        license_bytes.name = f"LICENSE_{product['name'].replace(' ', '_')}_{user.id}.txt"
+        await bot.send_document(
+            user.id,
+            document=InputFile(license_bytes, filename=license_bytes.name),
+            caption="📄 Лицензионное соглашение — сохрани этот файл.",
+            protect_content=True,
+        )
+    except Exception as e:
+        logger.exception("product delivery failed")
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                f"🚨 Оплата прошла, доставка продукта сломалась!\n"
+                f"User: {user.id} @{user.username}\nProduct: {product['name']} ({type_label})\n"
+                f"charge: {payment_charge_id}\nError: {e}",
+            )
+        except Exception:
+            pass
+
+    try:
+        sales.log_sale(
+            buyer_tg_id=user.id,
+            buyer_username=user.username,
+            buyer_name=buyer_name,
+            beat_id=product["id"],
+            beat_name=product["name"],
+            license_type=content_type,
+            stars_amount=int(amount) if currency == "XTR" else 0,
+            currency=currency,
+            payment_charge_id=payment_charge_id,
+            provider_charge_id=None,
+            status="completed",
+        )
+    except Exception:
+        logger.exception("sales.log_sale failed (product)")
+
+    try:
+        amount_disp = f"{amount}⭐" if currency == "XTR" else f"{amount} {currency}"
+        await bot.send_message(
+            ADMIN_ID,
+            f"📦 Продажа {type_label}\n"
+            f"Продукт: {product['name']}\n"
+            f"Покупатель: {buyer_name} (@{user.username or '—'}, id={user.id})\n"
+            f"Сумма: {amount_disp}\n"
+            f"charge: {payment_charge_id}",
+        )
+    except Exception:
+        pass
+
+
 # ── Telegram Stars payments ───────────────────────────────────
 
 async def handle_precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """PreCheckout: апрувим всё валидное. Отказ — только если payload битый / бит пропал."""
+    """PreCheckout: апрувим всё валидное. Отказ — только если payload битый
+    или товар (бит/пак) пропал.
+
+    Payload форматы:
+        mp3_lease:<beat_id>          — MP3 Lease на бит
+        product:<product_id>         — drum kit / sample pack / loop pack
+    """
     pcq = update.pre_checkout_query
     payload = pcq.invoice_payload or ""
-    if not payload.startswith("mp3_lease:"):
-        await pcq.answer(ok=False, error_message="Неизвестный тип покупки")
-        return
     try:
-        beat_id = int(payload.split(":", 1)[1])
+        if payload.startswith("mp3_lease:"):
+            beat_id = int(payload.split(":", 1)[1])
+            if not beats_db.get_beat_by_id(beat_id):
+                await pcq.answer(ok=False, error_message="Бит больше недоступен")
+                return
+        elif payload.startswith("product:"):
+            pid = int(payload.split(":", 1)[1])
+            prod = beats_db.get_beat_by_id(pid)
+            if not prod or prod.get("content_type") not in licensing.PRODUCT_TYPE_LABELS:
+                await pcq.answer(ok=False, error_message="Продукт больше недоступен")
+                return
+        else:
+            await pcq.answer(ok=False, error_message="Неизвестный тип покупки")
+            return
     except ValueError:
         await pcq.answer(ok=False, error_message="Некорректный payload")
-        return
-    if not beats_db.get_beat_by_id(beat_id):
-        await pcq.answer(ok=False, error_message="Бит больше недоступен")
         return
     await pcq.answer(ok=True)
 
 
 async def handle_successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """После успешной оплаты Stars: вызываем общую доставку."""
+    """После успешной оплаты Stars: маршрутизируем доставку по payload."""
     msg = update.message
     if not msg or not msg.successful_payment:
         return
@@ -2720,32 +2895,48 @@ async def handle_successful_payment(update: Update, context: ContextTypes.DEFAUL
     bot = context.bot
     payload = sp.invoice_payload or ""
 
-    if not payload.startswith("mp3_lease:"):
-        logger.warning("successful_payment: unknown payload %s", payload)
-        return
     try:
-        beat_id = int(payload.split(":", 1)[1])
-    except ValueError:
-        return
-    beat = beats_db.get_beat_by_id(beat_id)
-    if not beat:
-        await msg.reply_text("⚠️ Бит пропал из каталога. Напишу автору — решим: @iiiplfiii")
-        try:
-            await bot.send_message(
-                ADMIN_ID,
-                f"🚨 Stars-оплата прошла, но бит id={beat_id} не найден.\n"
-                f"User: {user.id} @{user.username}\ncharge: {sp.telegram_payment_charge_id}",
+        if payload.startswith("mp3_lease:"):
+            beat_id = int(payload.split(":", 1)[1])
+            beat = beats_db.get_beat_by_id(beat_id)
+            if not beat:
+                await msg.reply_text("⚠️ Бит пропал из каталога. Напишу автору: @iiiplfiii")
+                await bot.send_message(
+                    ADMIN_ID,
+                    f"🚨 Stars-оплата прошла, но бит id={beat_id} не найден.\n"
+                    f"User: {user.id} @{user.username}\ncharge: {sp.telegram_payment_charge_id}",
+                )
+                return
+            await _deliver_mp3_lease(
+                bot, user, beat,
+                payment_charge_id=sp.telegram_payment_charge_id,
+                amount=sp.total_amount,
+                currency=sp.currency or "XTR",
             )
-        except Exception:
-            pass
-        return
+            return
 
-    await _deliver_mp3_lease(
-        bot, user, beat,
-        payment_charge_id=sp.telegram_payment_charge_id,
-        amount=sp.total_amount,
-        currency=sp.currency or "XTR",
-    )
+        if payload.startswith("product:"):
+            pid = int(payload.split(":", 1)[1])
+            product = beats_db.get_beat_by_id(pid)
+            if not product or product.get("content_type") not in licensing.PRODUCT_TYPE_LABELS:
+                await msg.reply_text("⚠️ Продукт пропал из каталога. Напишу автору: @iiiplfiii")
+                await bot.send_message(
+                    ADMIN_ID,
+                    f"🚨 Stars-оплата прошла, но продукт id={pid} не найден.\n"
+                    f"User: {user.id} @{user.username}\ncharge: {sp.telegram_payment_charge_id}",
+                )
+                return
+            await _deliver_product(
+                bot, user, product,
+                payment_charge_id=sp.telegram_payment_charge_id,
+                amount=sp.total_amount,
+                currency=sp.currency or "XTR",
+            )
+            return
+
+        logger.warning("successful_payment: unknown payload %s", payload)
+    except Exception:
+        logger.exception("handle_successful_payment failed")
 
 
 # ── CryptoBot (USDT) payments ─────────────────────────────────
@@ -2754,9 +2945,12 @@ async def handle_successful_payment(update: Update, context: ContextTypes.DEFAUL
 pending_usdt_invoices: dict[int, dict] = {}
 
 
-async def poll_usdt_invoice(bot, invoice_id: int, user_id: int, beat_id: int,
-                            timeout_sec: int = 1800):
-    """Пуллит инвойс до оплаты или expiry. Доставляет бит при paid."""
+async def poll_usdt_invoice(bot, invoice_id: int, user_id: int, item_id: int,
+                            kind: str = "beat", timeout_sec: int = 1800):
+    """Пуллит инвойс до оплаты/expiry. Доставляет бит или продукт при paid.
+
+    kind="beat" → _deliver_mp3_lease, kind="product" → _deliver_product.
+    """
     import time
     started = time.monotonic()
     while time.monotonic() - started < timeout_sec:
@@ -2770,10 +2964,14 @@ async def poll_usdt_invoice(bot, invoice_id: int, user_id: int, beat_id: int,
             continue
         status = inv.get("status")
         if status == "paid":
-            beat = beats_db.get_beat_by_id(beat_id)
-            if not beat:
+            item = beats_db.get_beat_by_id(item_id)
+            label = "продукт" if kind == "product" else "бит"
+            if not item:
                 try:
-                    await bot.send_message(user_id, "⚠️ Бит пропал из каталога. Напишу автору: @iiiplfiii")
+                    await bot.send_message(
+                        user_id,
+                        f"⚠️ {label.capitalize()} пропал из каталога. Напишу автору: @iiiplfiii",
+                    )
                 except Exception:
                     pass
                 pending_usdt_invoices.pop(invoice_id, None)
@@ -2787,12 +2985,19 @@ async def poll_usdt_invoice(bot, invoice_id: int, user_id: int, beat_id: int,
                 user.id = user_id
                 user.full_name = str(user_id)
                 user.username = None
-            await _deliver_mp3_lease(
-                bot, user, beat,
-                payment_charge_id=f"cryptobot:{invoice_id}:{inv.get('hash', '')}",
-                amount=float(inv.get("amount") or 0),
-                currency=inv.get("asset") or "USDT",
-            )
+            charge = f"cryptobot:{invoice_id}:{inv.get('hash', '')}"
+            amount = float(inv.get("amount") or 0)
+            currency = inv.get("asset") or "USDT"
+            if kind == "product":
+                await _deliver_product(
+                    bot, user, item,
+                    payment_charge_id=charge, amount=amount, currency=currency,
+                )
+            else:
+                await _deliver_mp3_lease(
+                    bot, user, item,
+                    payment_charge_id=charge, amount=amount, currency=currency,
+                )
             pending_usdt_invoices.pop(invoice_id, None)
             return
         if status == "expired":
