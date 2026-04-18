@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 BRAND = "TRIPLE FILL"
 TG_HANDLE = "@iiiplfiii"
 IG_HANDLE = "@iiiplfiii"
-BOT_USERNAME = "triplekillpost_bot"  # для deep-link покупки из YT
+BOT_USERNAME = "triplekillpost_bot"  # для deep-link покупки из TG
+LANDING_URL = "https://tripmusicrussia-hub.github.io/Triple/"  # YT → landing → bot
 YEAR = 2026
 
 
@@ -330,7 +331,8 @@ def build_yt_description(beat: BeatMeta, beat_id: int | None = None) -> str:
 
     return (
         f'{hashtags_top}\n\n'
-        f'🎧 BUY LEASE (MP3 · 500⭐ / 5 USDT): {buy}\n'
+        f'🎧 ALL BEATS + LEASE: {LANDING_URL}\n'
+        f'💰 Instant MP3 Lease (500⭐ / 5 USDT): {buy}\n'
         f'💎 WAV · Unlimited · Exclusive — DM {TG_HANDLE}\n\n'
         f'{artist_line} {energy_line}.\n\n'
         f'"{beat.name}" is a hard trap instrumental inspired by this sound. '

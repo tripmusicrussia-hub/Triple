@@ -2469,17 +2469,16 @@ BRAND_IMAGE_URL = (
 
 
 def _post_cta_comment(video_id: str, reserved_beat_id: int | None):
-    """Постит auto-CTA коммент под YT видео с deep-link в TG-бот.
+    """Постит auto-CTA коммент под YT видео с landing-ссылкой + deep-link.
 
     Pinning недоступен через API (убрали в 2024) — админ пиннит вручную
-    в YouTube Studio один раз. Но даже непиннутый коммент от owner'а
+    в YouTube Studio один раз. Даже непиннутый коммент от owner'а
     даёт engagement-signal YT алгоритму в первые минуты.
     """
     import yt_api, beat_post_builder
     buy_link = beat_post_builder._buy_link(reserved_beat_id)
-    catalog_link = f"https://t.me/{beat_post_builder.BOT_USERNAME}"
     text = (
-        f"🎧 Full catalog + lease in one tap → {catalog_link}\n"
+        f"🎧 All beats + lease → {beat_post_builder.LANDING_URL}\n"
         f"💰 Instant MP3 Lease (500⭐ / 5 USDT) → {buy_link}\n"
         f"💎 WAV / Unlimited / Exclusive — DM @iiiplfiii"
     )
