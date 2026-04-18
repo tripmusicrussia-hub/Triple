@@ -137,3 +137,76 @@ def get_video(video_id: str) -> Optional[dict]:
     resp = yt.videos().list(part="snippet,statistics", id=video_id).execute()
     items = resp.get("items") or []
     return items[0] if items else None
+
+
+# ── Playlists ────────────────────────────────────────────────
+# Winning-паттерн type-beat каналов (RichBlessed 1.3M / Fukk2Beatz / Versa):
+# один плейлист на артиста + один на сцену → session watch-time ×2.
+
+_PLAYLIST_CACHE: dict[str, str] = {}  # title_lower → playlist_id
+
+
+def _load_my_playlists() -> dict[str, str]:
+    """Возвращает {title_lower: playlist_id} всех playlists канала.
+
+    Кэшируется in-memory до рестарта процесса — плейлисты не меняются часто.
+    """
+    if _PLAYLIST_CACHE:
+        return _PLAYLIST_CACHE
+    yt = get_yt_client()
+    page = None
+    while True:
+        req = yt.playlists().list(part="snippet", mine=True, maxResults=50, pageToken=page)
+        resp = req.execute()
+        for pl in resp.get("items", []):
+            title = pl["snippet"]["title"].strip().lower()
+            _PLAYLIST_CACHE[title] = pl["id"]
+        page = resp.get("nextPageToken")
+        if not page:
+            break
+    logger.info("YT playlists loaded: %d", len(_PLAYLIST_CACHE))
+    return _PLAYLIST_CACHE
+
+
+def find_or_create_playlist(title: str, description: str = "", privacy: str = "public") -> str:
+    """Находит плейлист по title (case-insensitive) или создаёт новый. Возвращает playlistId."""
+    cache = _load_my_playlists()
+    key = title.strip().lower()
+    if key in cache:
+        return cache[key]
+    yt = get_yt_client()
+    body = {
+        "snippet": {"title": title, "description": description},
+        "status": {"privacyStatus": privacy},
+    }
+    resp = yt.playlists().insert(part="snippet,status", body=body).execute()
+    pl_id = resp["id"]
+    cache[key] = pl_id
+    logger.info("YT playlist CREATED: %s → %s", title, pl_id)
+    return pl_id
+
+
+def add_video_to_playlist(video_id: str, playlist_title: str, playlist_desc: str = "") -> bool:
+    """Добавляет видео в плейлист (создаёт если нет). Возвращает True при успехе."""
+    try:
+        pl_id = find_or_create_playlist(playlist_title, description=playlist_desc)
+        yt = get_yt_client()
+        body = {
+            "snippet": {
+                "playlistId": pl_id,
+                "resourceId": {"kind": "youtube#video", "videoId": video_id},
+            }
+        }
+        yt.playlistItems().insert(part="snippet", body=body).execute()
+        logger.info("YT added %s to playlist '%s'", video_id, playlist_title)
+        return True
+    except HttpError as e:
+        # 409 = duplicate (видео уже в плейлисте) — не критично
+        if "duplicate" in str(e).lower():
+            logger.info("YT %s already in playlist '%s'", video_id, playlist_title)
+            return True
+        logger.warning("YT playlist add FAIL %s → '%s': %s", video_id, playlist_title, e)
+        return False
+    except Exception as e:
+        logger.exception("YT playlist add error")
+        return False

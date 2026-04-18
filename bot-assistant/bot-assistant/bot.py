@@ -1023,6 +1023,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 yt_video_id = video_id
                 yt_url = f"https://youtu.be/{video_id}"
                 yt_ok = True
+                # Добавляем в плейлисты — winning-паттерн 4/4 топ-каналов:
+                # per-artist playlist + per-scene playlist → ×2 session watch-time
+                try:
+                    await loop.run_in_executor(
+                        None, lambda: _add_to_yt_playlists(video_id, meta)
+                    )
+                except Exception:
+                    logger.exception("yt playlists add failed (non-fatal)")
                 # Добавляем в каталог — используем reserved_beat_id (чтобы deep-link
                 # из YT description вёл именно на этот битек).
                 try:
@@ -2243,6 +2251,14 @@ async def _execute_scheduled_publish(bot, item: dict):
             )
             yt_video_id = vid
             yt_ok = True
+            # Playlists (artist + scene) — R3/R3 winning pattern
+            try:
+                from beat_upload import BeatMeta
+                # Восстанавливаем dataclass из dict (в очереди хранится asdict)
+                meta_obj = BeatMeta(**meta_d)
+                await loop.run_in_executor(None, lambda: _add_to_yt_playlists(vid, meta_obj))
+            except Exception:
+                logger.exception("scheduled: playlists add failed (non-fatal)")
             # Добавляем в каталог с reserved_beat_id
             try:
                 new_id = reserved_beat_id or (max([b["id"] for b in beats_db.BEATS_CACHE] + [0]) + 1)
@@ -2316,6 +2332,40 @@ BRAND_IMAGE_URL = (
     "https://github.com/tripmusicrussia-hub/Triple/releases/download/"
     "clip-loops-v1/iiiplfiii_brand.jpg"
 )
+
+
+def _add_to_yt_playlists(video_id: str, meta):
+    """Добавляет YT-видео в artist + scene плейлисты после успешного upload'а.
+
+    Формат названий (повторяем winning-паттерн Versa / RichBlessed):
+    - '<Artist> Type Beats'     — per-artist (обязательно)
+    - 'Hard <Scene> Type Beats' — per-scene (если известна)
+    Для коллабов добавляем отдельный плейлист коллаба.
+    """
+    import yt_api, beat_post_builder
+    # Per-artist — основной
+    artist_primary = meta.artist_display.split(" x ")[0].strip()
+    yt_api.add_video_to_playlist(
+        video_id,
+        f"{artist_primary} Type Beats",
+        playlist_desc=f"Free {artist_primary} type beats by TRIPLE FILL. MP3 Lease: @iiiplfiii",
+    )
+    # Per-collab если есть (Future x Don Toliver Type Beats)
+    if " x " in meta.artist_display:
+        yt_api.add_video_to_playlist(
+            video_id,
+            f"{meta.artist_display} Type Beats",
+            playlist_desc=f"Collab beats by TRIPLE FILL. Lease: @iiiplfiii",
+        )
+    # Per-scene — Memphis / Detroit / Atlanta / Florida и т.д.
+    prof = beat_post_builder._get_profile(meta.artist_raw)
+    scene = prof.get("scene", "")
+    if scene and scene.lower() not in ("hard trap", ""):
+        yt_api.add_video_to_playlist(
+            video_id,
+            f"Hard {scene} Type Beats",
+            playlist_desc=f"Hard {scene} type beats for upcoming rappers. @iiiplfiii",
+        )
 
 
 def _ensure_brand_image():
