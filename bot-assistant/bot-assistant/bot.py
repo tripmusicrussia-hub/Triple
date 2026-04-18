@@ -164,13 +164,104 @@ def kb_main_menu():
     tracks = len([b for b in beats_db.BEATS_CACHE if b.get("content_type") == "track"])
     remixes = len([b for b in beats_db.BEATS_CACHE if b.get("content_type") == "remix"])
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎹 Биты (" + str(beats) + ")", callback_data="menu_beat")],
-        [InlineKeyboardButton("🎤 Треки (" + str(tracks) + ")", callback_data="menu_track")],
-        [InlineKeyboardButton("🔀 Ремиксы (" + str(remixes) + ")", callback_data="menu_remix")],
+        [InlineKeyboardButton(f"🎹 Биты ({beats})", callback_data="menu_beat")],
+        [InlineKeyboardButton(f"🎤 Треки ({tracks})", callback_data="menu_track"),
+         InlineKeyboardButton(f"🔀 Ремиксы ({remixes})", callback_data="menu_remix")],
+        # Quick-filter chips — быстрый доступ к популярным сценам / mood
+        [InlineKeyboardButton("🔥 Hard", callback_data="qf_hard"),
+         InlineKeyboardButton("🌃 Memphis", callback_data="qf_memphis"),
+         InlineKeyboardButton("🏙 Detroit", callback_data="qf_detroit"),
+         InlineKeyboardButton("🇷🇺 RU", callback_data="qf_ru")],
+        [InlineKeyboardButton("⚡ 140+", callback_data="qf_bpm140"),
+         InlineKeyboardButton("⚡ 160+", callback_data="qf_bpm160"),
+         InlineKeyboardButton("🎲 Случайный", callback_data="random_beat")],
         [InlineKeyboardButton("❤️ Избранное", callback_data="my_favorites"),
          InlineKeyboardButton("🔍 Поиск", callback_data="search_prompt")],
-        [InlineKeyboardButton("🎲 Случайный бит", callback_data="random_beat")],
     ])
+
+
+# ── Quick-filter chips predicates ─────────────────────────────
+SCENE_TAGS = {
+    "memphis": {"kennymuney", "keyglock", "bigmoochiegrape", "youngdolph",
+                "poohshiesty", "moneybaggyo", "finesse2tymes", "three6mafia",
+                "glorilla", "memphis"},
+    "detroit": {"nardowick", "babytron", "teegrizzley", "detroit"},
+    "ru":      {"obladaet", "kizaru", "skriptonit", "ogbuda", "platina",
+                "slavamarlow", "bigbabytape", "mayot"},
+}
+HARD_TAGS = {"hard", "dark", "aggressive", "evil", "mean", "street"}
+
+# In-memory state для pagination между callback'ами
+user_search_state: dict[int, dict] = {}  # user_id → {'filter': str, 'page': int, 'results_ids': list[int]}
+SEARCH_PAGE_SIZE = 8
+
+
+def _filter_beats(filter_name: str) -> list[dict]:
+    """Возвращает отфильтрованный список битов под quick-filter."""
+    audio_only = [b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") != "non_audio"]
+    if filter_name == "hard":
+        return [b for b in audio_only
+                if any(t.lower() in HARD_TAGS for t in b.get("tags", []))
+                or any(h in b["name"].lower() for h in HARD_TAGS)]
+    if filter_name in SCENE_TAGS:
+        scene_set = SCENE_TAGS[filter_name]
+        return [b for b in audio_only
+                if any(t.lower() in scene_set for t in b.get("tags", []))]
+    if filter_name == "bpm140":
+        return [b for b in audio_only if (b.get("bpm") or 0) >= 140]
+    if filter_name == "bpm160":
+        return [b for b in audio_only if (b.get("bpm") or 0) >= 160]
+    return []
+
+
+def _kb_search_results(results: list[dict], filter_name: str, page: int) -> InlineKeyboardMarkup:
+    """Рендерит страницу результатов с pagination."""
+    total_pages = max(1, (len(results) + SEARCH_PAGE_SIZE - 1) // SEARCH_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    start = page * SEARCH_PAGE_SIZE
+    chunk = results[start:start + SEARCH_PAGE_SIZE]
+
+    rows = []
+    for b in chunk:
+        bpm = b.get("bpm") or "?"
+        key = b.get("key_short") or (b.get("key", "")[:3] if b.get("key") else "")
+        label = f"{b['name'][:32]}  {bpm}·{key}" if key else f"{b['name'][:38]}  {bpm}"
+        rows.append([InlineKeyboardButton(label, callback_data=f"play_{b['id']}")])
+
+    # Pagination row
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️ Prev", callback_data=f"sp_{filter_name}_{page-1}"))
+    nav.append(InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("Next ▶️", callback_data=f"sp_{filter_name}_{page+1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("◀️ Меню", callback_data="main_menu")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def do_quick_filter(bot, chat_id: int, user_id: int, filter_name: str, page: int = 0):
+    """Выполняет quick-filter поиск + показ paginated результатов."""
+    results = _filter_beats(filter_name)
+    user_search_state[user_id] = {"filter": filter_name, "page": page}
+    title = {
+        "hard": "🔥 Hard",
+        "memphis": "🌃 Memphis",
+        "detroit": "🏙 Detroit",
+        "ru": "🇷🇺 RU сцена",
+        "bpm140": "⚡ 140+ BPM",
+        "bpm160": "⚡ 160+ BPM",
+    }.get(filter_name, filter_name)
+    if not results:
+        await bot.send_message(chat_id, f"{title}: пусто, попробуй другой фильтр",
+                               reply_markup=kb_main_menu())
+        return
+    await bot.send_message(
+        chat_id,
+        f"{title} — нашёл {len(results)} треков:",
+        reply_markup=_kb_search_results(results, filter_name, page),
+    )
 
 def kb_beats_menu():
     beats = len([b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == "beat"])
@@ -1450,6 +1541,37 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "search_prompt":
         bulk_add_mode[str(user_id) + "_search"] = True
         await query.message.reply_text("🔍 Напиши название бита, имя артиста или тег — найду всё что есть!")
+        return
+
+    # Quick-filter chips (qf_hard / qf_memphis / qf_detroit / qf_ru / qf_bpm140 / qf_bpm160)
+    if data.startswith("qf_"):
+        filter_name = data[3:]
+        await do_quick_filter(bot, query.message.chat_id, user_id, filter_name, page=0)
+        return
+
+    # Search pagination: sp_<filter>_<page>
+    if data.startswith("sp_"):
+        try:
+            _, filter_name, page_str = data.split("_", 2)
+            page = int(page_str)
+        except Exception:
+            await query.answer("⚠️ bad pagination")
+            return
+        results = _filter_beats(filter_name)
+        if not results:
+            await query.answer("пусто", show_alert=False)
+            return
+        try:
+            await query.message.edit_reply_markup(
+                reply_markup=_kb_search_results(results, filter_name, page)
+            )
+            await query.answer()
+        except Exception:
+            logger.exception("edit pagination failed")
+        return
+
+    if data == "noop":
+        await query.answer()
         return
 
     if data == "join_giveaway":

@@ -93,18 +93,38 @@ def get_beats_by_tag(tag):
 
 
 def get_similar_beats(current_beat, exclude_ids=None):
+    """Ищет похожие биты. Scoring:
+    1. Общие теги (primary signal)
+    2. Fallback: BPM ±15 + тот же content_type (если тегов нет совпадений)
+    """
     if exclude_ids is None:
         exclude_ids = []
-    current_tags = set(current_beat["tags"])
+    current_tags = set(current_beat.get("tags", []))
+    current_bpm = current_beat.get("bpm") or 0
+    current_ct = current_beat.get("content_type", "beat")
     scored = []
+    bpm_fallback = []
     for beat in BEATS_CACHE:
         if beat["id"] == current_beat["id"] or beat["id"] in exclude_ids:
             continue
-        common = len(current_tags & set(beat["tags"]))
+        if beat.get("content_type", "beat") == "non_audio":
+            continue
+        common = len(current_tags & set(beat.get("tags", [])))
         if common > 0:
             scored.append((common, beat))
+        elif current_bpm and beat.get("bpm") and beat.get("content_type", "beat") == current_ct:
+            diff = abs(current_bpm - beat["bpm"])
+            if diff <= 15:
+                bpm_fallback.append((diff, beat))
     scored.sort(key=lambda x: x[0], reverse=True)
-    return [b for _, b in scored[:5]]
+    result = [b for _, b in scored[:5]]
+    # Если по тегам мало — добиваем BPM-соседями
+    if len(result) < 5 and bpm_fallback:
+        bpm_fallback.sort(key=lambda x: x[0])  # меньше разница = ближе
+        for _, b in bpm_fallback:
+            if b not in result and len(result) < 5:
+                result.append(b)
+    return result
 
 
 def get_next_similar(current_beat, exclude_ids=None):
