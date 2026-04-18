@@ -50,6 +50,8 @@ CHANNEL_POST_HOUR = 16  # МСК
 
 # Превью upload-флоу (новый бит от админа)
 pending_uploads: dict[str, dict] = {}
+# Превью upload-флоу для drum kit / sample pack / loop pack (zip от админа)
+pending_products: dict[str, dict] = {}
 TEMP_UPLOAD_DIR = os.path.join(BASE_DIR, "temp_uploads")
 os.makedirs(TEMP_UPLOAD_DIR, exist_ok=True)
 
@@ -1387,6 +1389,72 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await bot.send_message(user_id, "❌ Отменено")
             return
 
+    if data.startswith("prod_cancel_"):
+        if user_id != ADMIN_ID:
+            return
+        token = data[len("prod_cancel_"):]
+        pending_products.pop(token, None)
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await bot.send_message(user_id, "❌ Продукт не сохранён")
+        return
+
+    if data.startswith("prod_save_"):
+        if user_id != ADMIN_ID:
+            return
+        token = data[len("prod_save_"):]
+        pending = pending_products.pop(token, None)
+        if not pending:
+            await query.answer("⚠️ Токен устарел — пришли zip заново", show_alert=True)
+            return
+        meta = pending["meta"]
+        # Генерируем ID по тому же паттерну что у битов (max+1 в кэше).
+        if not beats_db.BEATS_CACHE:
+            beats_db.load_beats()
+        new_id = max([b["id"] for b in beats_db.BEATS_CACHE] + [0]) + 1
+        entry = {
+            "id": new_id,
+            "msg_id": 0,
+            "name": meta.name,
+            "tags": [meta.content_type],
+            "post_url": "",
+            "bpm": None,
+            "key": None,
+            "file_id": pending["file_id"],
+            "file_unique_id": pending.get("file_unique_id", ""),
+            "content_type": meta.content_type,
+            "classification_confidence": 1.0,
+            "description": meta.description,
+            "price_stars": meta.price_stars,
+            "price_usdt": meta.price_usdt,
+            "file_size": pending.get("file_size"),
+            "file_name": pending.get("file_name"),
+            "mime_type": pending.get("mime_type"),
+        }
+        try:
+            beats_db.BEATS_CACHE.append(entry)
+            beats_db._rebuild_index()
+            beats_db.save_beats()
+        except Exception as e:
+            logger.exception("prod_save: beats_db append failed")
+            await bot.send_message(user_id, f"❌ Не сохранил: {e}")
+            return
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        label = licensing.PRODUCT_TYPE_LABELS[meta.content_type]
+        await bot.send_message(
+            user_id,
+            f"✅ Сохранено в каталог\n"
+            f"📦 {label}: <b>{meta.name}</b>\n"
+            f"🆔 id={new_id} · 💰 {meta.price_stars}⭐ / {meta.price_usdt:g} USDT",
+            parse_mode="HTML",
+        )
+        return
+
     if data == "pin_hub_cancel":
         if user_id != ADMIN_ID:
             return
@@ -2080,6 +2148,78 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     audio = update.message.audio
     if audio and audio.file_name and "type beat" in audio.file_name.lower():
         await handle_beat_upload(update, context, audio)
+
+
+# ── Приём zip-файла для drum kit / sample pack / loop pack ────
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Приём zip-архива от админа → парсит caption → превью продукта с
+    кнопками «Сохранить / Отмена». Только admin, только zip/rar/7z.
+
+    Caption format (см. product_upload.py):
+        kit
+        Dark Memphis Drum Kit
+        1500
+        Описание пака
+
+    Реальный файл остаётся на серверах Telegram — мы храним только
+    `file_id` для последующей отдачи покупателю через send_document.
+    """
+    if not update.effective_user:
+        return
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    doc = update.message.document
+    if not doc:
+        return
+
+    # Игнорируем не-архивы тихо (юзер мог прислать PDF/скрин и т.п.).
+    fname = (doc.file_name or "").lower()
+    if not (fname.endswith(".zip") or fname.endswith(".rar") or fname.endswith(".7z")):
+        return
+
+    import product_upload
+
+    # Caption в TG живёт либо в message.caption (если прислали как "документ
+    # с подписью"), либо нигде. Без caption — подскажем формат.
+    caption = update.message.caption
+
+    try:
+        product_upload.validate_file(doc.file_name, doc.file_size)
+        meta = product_upload.parse_caption(caption)
+    except product_upload.CaptionError as e:
+        await update.message.reply_text(
+            f"⚠️ {e}\n\n{product_upload.CAPTION_EXAMPLE}",
+            parse_mode="Markdown",
+        )
+        return
+
+    token = uuid.uuid4().hex[:10]
+    pending_products[token] = {
+        "meta": meta,
+        "file_id": doc.file_id,
+        "file_unique_id": doc.file_unique_id,
+        "file_size": doc.file_size,
+        "file_name": doc.file_name,
+        "mime_type": doc.mime_type or "application/zip",
+    }
+
+    type_label = licensing.PRODUCT_TYPE_LABELS[meta.content_type]
+    size_mb = doc.file_size / (1024 * 1024)
+    preview = (
+        f"👁 Превью продукта:\n\n"
+        f"📦 Тип: <b>{type_label}</b>\n"
+        f"🎯 Имя: <b>{meta.name}</b>\n"
+        f"💰 Цена: <b>{meta.price_stars}⭐ / {meta.price_usdt:g} USDT</b>\n"
+        f"📎 Файл: {doc.file_name} ({size_mb:.1f} MB)\n\n"
+        f"📝 Описание:\n{meta.description or '<i>(не задано)</i>'}"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Сохранить в каталог", callback_data=f"prod_save_{token}")],
+        [InlineKeyboardButton("❌ Отмена", callback_data=f"prod_cancel_{token}")],
+    ])
+    await update.message.reply_text(preview, reply_markup=kb, parse_mode="HTML")
 
 
 async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE, audio):
@@ -2782,6 +2922,7 @@ async def run_bot():
     app.add_handler(PreCheckoutQueryHandler(handle_precheckout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, handle_successful_payment))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_assistant))
     app.add_handler(MessageHandler(filters.ALL, handle_message))
     logger.info("Starting bot...")
