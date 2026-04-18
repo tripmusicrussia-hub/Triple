@@ -532,6 +532,42 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
+    # Deep-link из канала на карточку продукта: /start prod_<product_id>
+    if context.args and context.args[0].startswith("prod_"):
+        try:
+            pid = int(context.args[0][5:])
+            p = beats_db.get_beat_by_id(pid)
+            if p and p.get("content_type") in licensing.PRODUCT_TYPE_LABELS:
+                label = licensing.PRODUCT_TYPE_LABELS[p["content_type"]]
+                size_mb = (p.get("file_size") or 0) / (1024 * 1024) if p.get("file_size") else 0
+                stars = p.get("price_stars", "?")
+                usdt = p.get("price_usdt", "?")
+                info = (
+                    f"📦 <b>{label}</b>\n"
+                    f"🎯 <b>{p['name']}</b>\n"
+                    f"📎 {size_mb:.1f} MB\n\n"
+                    f"{p.get('description') or '<i>(без описания)</i>'}\n\n"
+                    f"💎 WAV / Trackouts / Exclusive — DM @iiiplfiii"
+                )
+                usdt_label = f"💵 {usdt:g} USDT" if isinstance(usdt, (int, float)) else "💵 USDT"
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"⭐ {stars}", callback_data=f"buy_prod_{pid}"),
+                     InlineKeyboardButton(usdt_label, callback_data=f"buy_prod_usdt_{pid}")],
+                    [InlineKeyboardButton("📦 Все паки", callback_data="menu_products")],
+                ])
+                await bot.send_message(user_id, info, reply_markup=kb, parse_mode="HTML")
+                return
+            # Продукт не найден — graceful 404.
+            await bot.send_message(
+                user_id,
+                f"📦 Продукт по этой ссылке пока недоступен (id={pid}).\n"
+                "Вот весь каталог:",
+                reply_markup=kb_main_menu(),
+            )
+            return
+        except Exception as e:
+            logger.warning("deep-link prod_ failed for %r: %s", context.args[0], e)
+
     # Deep-link из YT-описания: /start buy_<beat_id> → сразу показать покупку этого бита
     if context.args and context.args[0].startswith("buy_"):
         try:
@@ -1534,13 +1570,70 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         label = licensing.PRODUCT_TYPE_LABELS[meta.content_type]
+        post_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📡 Опубликовать промо в канал",
+                                   callback_data=f"prod_post_{new_id}")],
+            [InlineKeyboardButton("🔕 Без публикации",
+                                   callback_data="prod_post_skip")],
+        ])
         await bot.send_message(
             user_id,
             f"✅ Сохранено в каталог\n"
             f"📦 {label}: <b>{meta.name}</b>\n"
             f"🆔 id={new_id} · 💰 {meta.price_stars}⭐ / {meta.price_usdt:g} USDT",
             parse_mode="HTML",
+            reply_markup=post_kb,
         )
+        return
+
+    if data == "prod_post_skip":
+        if user_id != ADMIN_ID:
+            return
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await bot.send_message(
+            user_id,
+            "🔕 Опубликуешь позже — кнопка будет в /admin → «📦 Kits & Packs» → карточка продукта.",
+        )
+        return
+
+    if data.startswith("prod_post_"):
+        if user_id != ADMIN_ID:
+            return
+        try:
+            pid = int(data[len("prod_post_"):])
+        except ValueError:
+            return
+        p = beats_db.get_beat_by_id(pid)
+        if not p or p.get("content_type") not in licensing.PRODUCT_TYPE_LABELS:
+            await query.answer("Продукт не найден", show_alert=True)
+            return
+        try:
+            text = beat_post_builder.build_product_channel_post(p)
+            channel_kb = beat_post_builder.build_product_channel_kb(p)
+            sent = await bot.send_message(
+                CHANNEL_ID, text,
+                reply_markup=channel_kb,
+                disable_web_page_preview=True,
+            )
+            # Запомним msg_id публикации в записи — чтобы в будущем можно
+            # было редактировать/удалять этот пост.
+            try:
+                p["channel_msg_id"] = sent.message_id
+                beats_db.save_beats()
+            except Exception:
+                logger.exception("save_beats после publish продукта: non-fatal")
+        except Exception as e:
+            logger.exception("prod_post: publish failed")
+            await bot.send_message(user_id, f"❌ Не смог запостить в канал: {e}")
+            return
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await bot.send_message(user_id, "✅ Промо-пост опубликован в канале")
         return
 
     if data == "pin_hub_cancel":

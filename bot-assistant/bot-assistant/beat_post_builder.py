@@ -547,6 +547,71 @@ def build_yt_post(
     )
 
 
+def build_product_channel_post(product: dict) -> str:
+    """Текст промо-поста продукта в канал.
+
+    Канал получает краткое описание + type + размер + CTA + хэштеги
+    для навигации. Сам zip в канал не постим — только промо-текст
+    с кнопкой «открыть в боте» (deep-link ниже в build_product_channel_kb).
+    """
+    from licensing import PRODUCT_TYPE_LABELS
+
+    ctype = product.get("content_type", "samplepack")
+    label = PRODUCT_TYPE_LABELS.get(ctype, "Pack")
+    name = product.get("name", "?")
+    stars = product.get("price_stars", "?")
+    usdt = product.get("price_usdt", "?")
+    size_mb = (product.get("file_size") or 0) / (1024 * 1024) if product.get("file_size") else 0
+    description = product.get("description") or ""
+
+    # Хэштеги: тип + typebeat универсально.
+    type_tag = f"#{ctype}"  # #drumkit / #samplepack / #looppack
+    extra_tags = []
+    if ctype == "looppack":
+        extra_tags.append("#loops")
+    if ctype == "samplepack":
+        extra_tags.append("#samples")
+    hashtags = " ".join([type_tag] + extra_tags + ["#iiiplfiii"])
+
+    usdt_disp = f"{usdt:g} USDT" if isinstance(usdt, (int, float)) else f"{usdt} USDT"
+
+    parts = [
+        f"📦 <b>{label}</b> — «{name}»",
+        "",
+    ]
+    if description:
+        parts.append(description)
+        parts.append("")
+    parts.extend([
+        f"💾 {size_mb:.1f} MB",
+        f"💰 {stars}⭐ / {usdt_disp}",
+        "",
+        hashtags,
+    ])
+    return "\n".join(parts)
+
+
+def build_product_channel_kb(product: dict):
+    """Inline-клавиатура под промо-постом продукта в канале.
+
+    Используем url-кнопку с deep-link в бот — клик ведёт в ЛС, где
+    открывается карточка продукта с реальными inline-кнопками покупки
+    (callback'и из канала в ЛС не ходят надёжно; deep-link — ходит).
+    """
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    pid = product["id"]
+    stars = product.get("price_stars", "?")
+    usdt = product.get("price_usdt", "?")
+    usdt_label = f"💵 {usdt:g} USDT" if isinstance(usdt, (int, float)) else "💵 USDT"
+    deep = f"https://t.me/{BOT_USERNAME}?start=prod_{pid}"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"⭐ {stars} — в боте", url=deep),
+         InlineKeyboardButton(usdt_label, url=deep)],
+        [InlineKeyboardButton("✍️ WAV / Exclusive — DM", url=f"https://t.me/{TG_HANDLE.lstrip('@')}")],
+    ])
+
+
 def _slugify(s: str) -> str:
     """lowercase + убрать пробелы/дефисы — для сравнения тегов."""
     return re.sub(r"[\s_\-]+", "", s.lower())
@@ -585,7 +650,8 @@ def build_pinned_hub() -> str:
     for b in beats_db.BEATS_CACHE:
         ctype = b.get("content_type", "beat")
         by_type[ctype] += 1
-        # Считаем только beat'ы для hub (treck/remix не продаются)
+        # Scene/artist/bpm counters считаем только по битам (track/remix/pack
+        # не имеют type-beat артиста).
         if ctype != "beat":
             continue
         for raw_tag in b.get("tags", []):
@@ -609,13 +675,35 @@ def build_pinned_hub() -> str:
     total_beats = by_type.get("beat", 0)
     tracks = by_type.get("track", 0)
     remixes = by_type.get("remix", 0)
+    kits = by_type.get("drumkit", 0)
+    packs = by_type.get("samplepack", 0)
+    loops = by_type.get("looppack", 0)
 
     counts_line_parts = [f"{total_beats} битов"]
     if tracks:
         counts_line_parts.append(f"{tracks} треков")
     if remixes:
         counts_line_parts.append(f"{remixes} ремиксов")
+    if kits or packs or loops:
+        packs_total = kits + packs + loops
+        counts_line_parts.append(f"{packs_total} паков/китов")
     counts_line = " · ".join(counts_line_parts)
+
+    # Секция Packs — показываем только если есть хоть один продукт.
+    packs_block = ""
+    if kits or packs or loops:
+        pack_tags = []
+        if kits:
+            pack_tags.append(f"#drumkit ({kits})")
+        if packs:
+            pack_tags.append(f"#samplepack ({packs})")
+        if loops:
+            pack_tags.append(f"#looppack ({loops})")
+        packs_block = (
+            f"📦 Паки и киты\n"
+            f"{' · '.join(pack_tags)}\n"
+            f"Открыть каталог → https://t.me/{BOT_USERNAME}\n\n"
+        )
 
     return (
         f"🗺 НАВИГАЦИЯ ПО КАНАЛУ\n\n"
@@ -624,6 +712,7 @@ def build_pinned_hub() -> str:
         f"📍 Сцены\n{scenes_line}\n\n"
         f"🎤 Артисты (type beat под)\n{artists_line}\n\n"
         f"⚡ BPM\n{bpm_line}\n\n"
+        f"{packs_block}"
         f"🔍 Поиск по каталогу + lease → https://t.me/{BOT_USERNAME}\n"
         f"🎧 Все биты + landing → {LANDING_URL}\n"
         f"💎 WAV · Trackouts · Unlimited · Exclusive — DM {TG_HANDLE}\n\n"
