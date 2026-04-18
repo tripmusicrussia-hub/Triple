@@ -38,11 +38,9 @@ MSK_TZ = timezone(timedelta(hours=3))
 SB_TABLE = "scheduled_uploads"
 SB_BUCKET = "scheduled-uploads"
 
-# Optimal slots per data-analysis
-OPTIMAL_SLOTS = [
-    (4, 21, 30),  # Fri 21:30 (primary)
-    (0, 21, 0),   # Mon 21:00 (secondary)
-]
+# Optimal slots — настраиваются через env PUBLISH_OPTIMAL_SLOTS, дефолт
+# Fri 21:30 + Mon 21:00 МСК (из анализа окон type-beat каналов).
+from config import PUBLISH_OPTIMAL_SLOTS as OPTIMAL_SLOTS
 JITTER_MINUTES = 5
 
 _QUEUE: list[dict] = []

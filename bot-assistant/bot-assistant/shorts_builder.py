@@ -20,9 +20,9 @@ from pathlib import Path
 
 import imageio_ffmpeg
 
-logger = logging.getLogger(__name__)
+from config import SHORTS_DURATION_SEC as SHORTS_MAX_DURATION_SEC
 
-SHORTS_MAX_DURATION_SEC = 45  # YT Shorts лимит 60, держим запас
+logger = logging.getLogger(__name__)
 
 _FFMPEG_CACHE: str | None = None
 

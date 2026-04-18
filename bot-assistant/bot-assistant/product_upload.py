@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-MAX_SIZE_BYTES = 50 * 1024 * 1024  # Bot API лимит send_document → 50MB
+from config import PRODUCT_MAX_SIZE_BYTES as MAX_SIZE_BYTES
 
 
 @dataclass

@@ -15,7 +15,10 @@ from telegram.ext import (
     CallbackQueryHandler, PreCheckoutQueryHandler, filters, ContextTypes
 )
 from telegram.error import TelegramError
-from config import BOT_TOKEN, CHANNEL_ID, CHANNEL_LINK, SAMPLE_PACK_PATH, SAMPLE_PACK_FILE_ID, WELCOME_TEXT, CATALOG_INTRO, ADMIN_ID
+from config import (
+    BOT_TOKEN, CHANNEL_ID, CHANNEL_LINK, SAMPLE_PACK_PATH, SAMPLE_PACK_FILE_ID,
+    WELCOME_TEXT, CATALOG_INTRO, ADMIN_ID, CHANNEL_POST_HOUR,
+)
 import beats_db
 import post_generator
 import licensing
@@ -46,7 +49,7 @@ giveaway = {"active": False, "prize_file": None, "prize_name": "", "end_time": N
 # Превью автопостов в канал: token → payload (rubric, kind, text, beat)
 # Живёт в RAM; если бот перезапустится до подтверждения — превью теряется (ок, сгенерится снова по таймеру)
 pending_posts: dict[str, dict] = {}
-CHANNEL_POST_HOUR = 16  # МСК
+# CHANNEL_POST_HOUR теперь в config.py (env-configurable с дефолтом 16 МСК)
 
 # Общий helper для user-facing ошибок. Полный exception должен быть уже
 # залогирован через logger.exception() выше по стеку — юзеру показываем
