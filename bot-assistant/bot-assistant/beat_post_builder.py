@@ -92,6 +92,109 @@ ARTIST_PROFILE = {
         "best_for": ["Don Toliver type vocals", "Future flow", "Melodic trap", "Atmospheric night rap"],
         "related_tags": ["dontoliver", "future", "melodic"],
     },
+    # Memphis core + related
+    "young dolph": {
+        "scene": "Memphis",
+        "mood": "Hard Memphis",
+        "adjectives": ["hard", "aggressive", "street"],
+        "best_for": ["Young Dolph type vocals", "Key Glock flow", "Memphis trap", "Hard street rap"],
+        "related_tags": ["youngdolph", "keyglock", "kennymuney", "memphis"],
+    },
+    "pooh shiesty": {
+        "scene": "Memphis",
+        "mood": "Hard Memphis",
+        "adjectives": ["hard", "aggressive", "dark"],
+        "best_for": ["Pooh Shiesty type vocals", "Key Glock flow", "Memphis street trap", "Gucci Mane style"],
+        "related_tags": ["poohshiesty", "keyglock", "memphis"],
+    },
+    "moneybagg yo": {
+        "scene": "Memphis",
+        "mood": "Hard melodic",
+        "adjectives": ["hard", "melodic", "street"],
+        "best_for": ["Moneybagg Yo type vocals", "Memphis melodic flow", "Hard trap", "Street rap"],
+        "related_tags": ["moneybaggyo", "keyglock", "memphis"],
+    },
+    "finesse2tymes": {
+        "scene": "Memphis",
+        "mood": "Hard street",
+        "adjectives": ["hard", "aggressive", "raw"],
+        "best_for": ["Finesse2Tymes type vocals", "Memphis street trap", "Hard raw rap"],
+        "related_tags": ["finesse2tymes", "moneybaggyo", "memphis"],
+    },
+    "three 6 mafia": {
+        "scene": "Memphis",
+        "mood": "Dark Memphis classic",
+        "adjectives": ["dark", "sinister", "classic"],
+        "best_for": ["Three 6 Mafia type vocals", "Classic Memphis horrorcore", "Dark trap", "Juicy J style"],
+        "related_tags": ["three6mafia", "juicyj", "memphis"],
+    },
+    # Atlanta / universal dark
+    "21 savage": {
+        "scene": "Atlanta",
+        "mood": "Dark aggressive",
+        "adjectives": ["dark", "aggressive", "cold"],
+        "best_for": ["21 Savage type vocals", "Metro Boomin style", "Dark Atlanta trap", "Cold aggressive rap"],
+        "related_tags": ["21savage", "metroboomin", "atlanta"],
+    },
+    # Detroit
+    "babytron": {
+        "scene": "Detroit",
+        "mood": "Dark comedic",
+        "adjectives": ["dark", "quirky", "aggressive"],
+        "best_for": ["BabyTron type vocals", "Detroit meme-rap", "ShittyBoyz style", "Dark sample trap"],
+        "related_tags": ["babytron", "detroit"],
+    },
+    "tee grizzley": {
+        "scene": "Detroit",
+        "mood": "Hard Detroit",
+        "adjectives": ["hard", "aggressive", "street"],
+        "best_for": ["Tee Grizzley type vocals", "Detroit hard street", "Trap drums", "Gritty rap"],
+        "related_tags": ["teegrizzley", "detroit"],
+    },
+    # Female hard
+    "glorilla": {
+        "scene": "Memphis",
+        "mood": "Hard female",
+        "adjectives": ["hard", "aggressive", "street"],
+        "best_for": ["GloRilla type vocals", "Memphis female hard rap", "Sexyy Red style", "Hard female trap"],
+        "related_tags": ["glorilla", "sexyyred", "memphis"],
+    },
+    # RU — dark/hard
+    "kizaru": {
+        "scene": "Hard trap",
+        "mood": "Dark atmospheric",
+        "adjectives": ["dark", "atmospheric", "cold"],
+        "best_for": ["Kizaru type vocals", "Dark RU trap", "Atmospheric hard rap", "Night drive beats"],
+        "related_tags": ["kizaru", "bigbabytape", "obladaet"],
+    },
+    "скриптонит": {
+        "scene": "Hard trap",
+        "mood": "Dark melodic",
+        "adjectives": ["dark", "melodic", "cold"],
+        "best_for": ["Скриптонит type vocals", "RU dark melodic rap", "Atmospheric trap", "Cold melodic flow"],
+        "related_tags": ["skriptonit", "obladaet", "kizaru"],
+    },
+    "og buda": {
+        "scene": "Hard trap",
+        "mood": "Dark aggressive",
+        "adjectives": ["dark", "aggressive", "street"],
+        "best_for": ["OG Buda type vocals", "RU dark aggressive rap", "Hard trap", "Street flow"],
+        "related_tags": ["ogbuda", "obladaet", "mayot"],
+    },
+    "платина": {
+        "scene": "Hard trap",
+        "mood": "Dark aggressive",
+        "adjectives": ["dark", "aggressive", "fast"],
+        "best_for": ["Платина type vocals", "RU fast aggressive trap", "Dark drums", "Hard street flow"],
+        "related_tags": ["platina", "obladaet", "mayot"],
+    },
+    "slava marlow": {
+        "scene": "Hard trap",
+        "mood": "Melodic dark",
+        "adjectives": ["melodic", "dark", "cold"],
+        "best_for": ["Slava Marlow type vocals", "RU melodic dark trap", "Atmospheric rap", "Modern RU hip hop"],
+        "related_tags": ["slavamarlow", "obladaet"],
+    },
 }
 
 GENERIC_PROFILE = {
@@ -278,13 +381,27 @@ def build_yt_tags(beat: BeatMeta) -> list[str]:
     return tags[:15]
 
 
-def build_tg_caption(beat: BeatMeta) -> str:
+def _bot_footer(beat_id: int | None = None) -> str:
+    """Стандартный футер для TG-постов: ссылка в бот + CTA покупки.
+
+    Показывается в channel-постах чтобы подписчики могли листать каталог и
+    покупать биты прямо из канала.
+    """
+    catalog = f"https://t.me/{BOT_USERNAME}"
+    if beat_id:
+        return (
+            f"🎧 Весь каталог → {catalog}\n"
+            f"💰 MP3 Lease 500⭐ / 5 USDT → {_buy_link(beat_id)}"
+        )
+    return f"🎧 Весь каталог + lease → {catalog}"
+
+
+def build_tg_caption(beat: BeatMeta, beat_id: int | None = None) -> str:
     """Fallback-шаблон если LLM недоступен. Короткий, нейтральный."""
-    prof = _get_profile(beat.artist_raw)
     return (
         f"{beat.name} — {beat.artist_line}\n\n"
         f"🎧 {beat.key}  ⚡ {beat.bpm} BPM\n\n"
-        f"Пиши в ЛС — @iiiplfiii"
+        f"{_bot_footer(beat_id)}"
     )
 
 
@@ -299,10 +416,14 @@ TG_CAPTION_STYLES = [
 ]
 
 
-async def build_tg_caption_async(beat: BeatMeta) -> tuple[str, str]:
-    """LLM-генерация подписи в голосе iiiplfiii-voice.
-    Возвращает (text, style_label). При сбое — fallback на шаблон с label 'fallback'.
+async def build_tg_caption_async(beat: BeatMeta, beat_id: int | None = None) -> tuple[str, str]:
+    """LLM-генерация подписи в голосе iiiplfiii-voice + bot-footer.
+
+    LLM пишет основную часть (в voice автора), после неё deterministic
+    bot-footer с ссылкой на бот для каталога и покупки. Возвращает
+    (text, style_label). При сбое LLM — fallback на шаблон.
     """
+    footer = _bot_footer(beat_id)
     try:
         import post_generator
         prof = _get_profile(beat.artist_raw)
@@ -318,13 +439,13 @@ async def build_tg_caption_async(beat: BeatMeta) -> tuple[str, str]:
             f"- Key: {beat.key}\n\n"
             f"Стиль этой подписи: {style}\n\n"
             f"Жёсткие требования:\n"
-            f"- 2-6 строк, plain text. ЗАПРЕЩЕНО: хэштеги (#что_угодно), markdown (**, __, ~~), кавычки вокруг всего поста\n"
+            f"- 2-5 строк, plain text. ЗАПРЕЩЕНО: хэштеги (#что_угодно), markdown (**, __, ~~), кавычки вокруг всего поста\n"
             f"- От первого лица, в голосе автора (см. system-prompt)\n"
             f"- ОБЯЗАТЕЛЬНО упомянуть имя бита «{beat.name}» и артиста «{beat.artist_display}»\n"
             f"- BPM и key — где-то в тексте (можно одной строкой типа «{beat.key} · {beat.bpm}»)\n"
             f"- Минимум эмодзи (0-3 шт), только из whitelist (🎧 🎵 🔥 🎹 ⚡)\n"
-            f"- Контакт «@iiiplfiii» в конце или другая форма CTA\n"
-            f"- Никаких «Пиши в ЛС за beat» — звучит как продаван. Найди живой вариант.\n\n"
+            f"- НЕ ПИШИ ссылки / контакты / @handles — они добавляются автоматически снизу\n"
+            f"- Никаких «Пиши в ЛС за beat» — звучит как продаван.\n\n"
             f"Верни ТОЛЬКО подпись, без преамбулы, без кавычек."
         )
         text = await post_generator._call_llm(user_msg, max_tokens=200, temperature=0.95)
@@ -333,11 +454,11 @@ async def build_tg_caption_async(beat: BeatMeta) -> tuple[str, str]:
         text = re.sub(r"\n+#[\w_]+(\s+#[\w_]+)*\s*$", "", text).rstrip()
         if beat.name.lower() not in text.lower():
             logger.warning("LLM caption не содержит имя бита, fallback. Got: %r", text[:120])
-            return build_tg_caption(beat), "fallback"
-        return text, style_label
+            return build_tg_caption(beat, beat_id=beat_id), "fallback"
+        return f"{text}\n\n{footer}", style_label
     except Exception as e:
         logger.warning("build_tg_caption_async failed: %s — fallback", e)
-        return build_tg_caption(beat), "fallback"
+        return build_tg_caption(beat, beat_id=beat_id), "fallback"
 
 
 @dataclass

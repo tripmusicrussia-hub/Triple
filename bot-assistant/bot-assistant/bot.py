@@ -971,7 +971,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             import beat_post_builder
             meta = payload["meta"]
             try:
-                new_caption, new_style = await beat_post_builder.build_tg_caption_async(meta)
+                new_caption, new_style = await beat_post_builder.build_tg_caption_async(
+                    meta, beat_id=payload.get("reserved_beat_id"),
+                )
             except Exception as e:
                 logger.exception("regen caption failed")
                 await query.answer(f"❌ LLM: {e}", show_alert=True)
@@ -1023,14 +1025,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 yt_video_id = video_id
                 yt_url = f"https://youtu.be/{video_id}"
                 yt_ok = True
-                # Добавляем в плейлисты — winning-паттерн 4/4 топ-каналов:
-                # per-artist playlist + per-scene playlist → ×2 session watch-time
+                # Добавляем в плейлисты — winning-паттерн 4/4 топ-каналов
                 try:
                     await loop.run_in_executor(
                         None, lambda: _add_to_yt_playlists(video_id, meta)
                     )
                 except Exception:
                     logger.exception("yt playlists add failed (non-fatal)")
+                # Авто-CTA коммент — engagement signal с первой минуты
+                try:
+                    await loop.run_in_executor(
+                        None, lambda: _post_cta_comment(video_id, payload.get("reserved_beat_id"))
+                    )
+                except Exception:
+                    logger.exception("yt cta comment failed (non-fatal)")
                 # Добавляем в каталог — используем reserved_beat_id (чтобы deep-link
                 # из YT description вёл именно на этот битек).
                 try:
@@ -1858,7 +1866,7 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
         reserved_beat_id = max([b["id"] for b in beats_db.BEATS_CACHE] + [0]) + 1
 
         yt_post = beat_post_builder.build_yt_post(meta, beat_id=reserved_beat_id)
-        tg_caption, tg_style = await beat_post_builder.build_tg_caption_async(meta)
+        tg_caption, tg_style = await beat_post_builder.build_tg_caption_async(meta, beat_id=reserved_beat_id)
 
         pending_uploads[token] = {
             "meta": meta,
@@ -2181,7 +2189,6 @@ async def post_init(application):
         beats_db.load_beats()
     load_users()
     logger.info("Bot started: " + str(len(beats_db.BEATS_CACHE)) + " beats, " + str(len(all_users)) + " users")
-    _janitor_clip_loops()
     # Восстанавливаем очередь плановых публикаций с диска
     try:
         import publish_scheduler
@@ -2251,14 +2258,19 @@ async def _execute_scheduled_publish(bot, item: dict):
             )
             yt_video_id = vid
             yt_ok = True
-            # Playlists (artist + scene) — R3/R3 winning pattern
+            # Playlists (artist + scene) + auto-CTA comment
             try:
                 from beat_upload import BeatMeta
-                # Восстанавливаем dataclass из dict (в очереди хранится asdict)
                 meta_obj = BeatMeta(**meta_d)
                 await loop.run_in_executor(None, lambda: _add_to_yt_playlists(vid, meta_obj))
             except Exception:
                 logger.exception("scheduled: playlists add failed (non-fatal)")
+            try:
+                await loop.run_in_executor(
+                    None, lambda: _post_cta_comment(vid, reserved_beat_id)
+                )
+            except Exception:
+                logger.exception("scheduled: CTA comment failed (non-fatal)")
             # Добавляем в каталог с reserved_beat_id
             try:
                 new_id = reserved_beat_id or (max([b["id"] for b in beats_db.BEATS_CACHE] + [0]) + 1)
@@ -2334,6 +2346,24 @@ BRAND_IMAGE_URL = (
 )
 
 
+def _post_cta_comment(video_id: str, reserved_beat_id: int | None):
+    """Постит auto-CTA коммент под YT видео с deep-link в TG-бот.
+
+    Pinning недоступен через API (убрали в 2024) — админ пиннит вручную
+    в YouTube Studio один раз. Но даже непиннутый коммент от owner'а
+    даёт engagement-signal YT алгоритму в первые минуты.
+    """
+    import yt_api, beat_post_builder
+    buy_link = beat_post_builder._buy_link(reserved_beat_id)
+    catalog_link = f"https://t.me/{beat_post_builder.BOT_USERNAME}"
+    text = (
+        f"🎧 Full catalog + lease in one tap → {catalog_link}\n"
+        f"💰 Instant MP3 Lease (500⭐ / 5 USDT) → {buy_link}\n"
+        f"💎 WAV / Unlimited / Exclusive — DM @iiiplfiii"
+    )
+    yt_api.post_comment(video_id, text)
+
+
 def _add_to_yt_playlists(video_id: str, meta):
     """Добавляет YT-видео в artist + scene плейлисты после успешного upload'а.
 
@@ -2393,27 +2423,6 @@ def _ensure_brand_image():
     except Exception as e:
         logger.warning("brand image fetch failed: %s", e)
         return None
-
-
-def _janitor_clip_loops():
-    """Подчищает clip-лупы оставшиеся от крашнувшихся upload-сессий.
-    НЕ трогает assets/brand/ — там brand-кадр канала, reused постоянно."""
-    try:
-        from pathlib import Path as _P
-        loops_dir = _P(__file__).parent / "assets" / "loops"
-        if not loops_dir.exists():
-            return
-        removed = 0
-        for f in loops_dir.iterdir():
-            try:
-                f.unlink()
-                removed += 1
-            except Exception:
-                pass
-        if removed:
-            logger.info("janitor: cleaned %d stale clip loops", removed)
-    except Exception:
-        logger.exception("janitor: clip loops cleanup failed (non-fatal)")
 
 
 def _warmup_ffmpeg():

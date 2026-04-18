@@ -186,6 +186,29 @@ def find_or_create_playlist(title: str, description: str = "", privacy: str = "p
     return pl_id
 
 
+def post_comment(video_id: str, text: str) -> bool:
+    """Постит top-level comment под видео. Pinning через API недоступен
+    (убрали из публичного API в 2024) — коммент постится от имени канала.
+
+    Даже без pinning это даёт engagement signal в первые минуты — алгоритм
+    считает «у видео есть активность сразу».
+    """
+    try:
+        yt = get_yt_client()
+        body = {
+            "snippet": {
+                "videoId": video_id,
+                "topLevelComment": {"snippet": {"textOriginal": text}},
+            }
+        }
+        yt.commentThreads().insert(part="snippet", body=body).execute()
+        logger.info("YT comment posted on %s", video_id)
+        return True
+    except HttpError as e:
+        logger.warning("YT comment FAIL on %s: %s", video_id, e)
+        return False
+
+
 def add_video_to_playlist(video_id: str, playlist_title: str, playlist_desc: str = "") -> bool:
     """Добавляет видео в плейлист (создаёт если нет). Возвращает True при успехе."""
     try:
