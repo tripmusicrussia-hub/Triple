@@ -2115,7 +2115,7 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
         file = await context.bot.get_file(audio.file_id)
         await file.download_to_drive(str(mp3_path))
 
-        # Brand-кадр канала — один JPG на весь канал (паттерн RichBlessed 1.3M views).
+        # Brand-кадр канала — один JPG на весь канал (winner-паттерн ниши).
         # Качаем с GH Release при первом upload, кэшируем в assets/brand/ (не wipe'ится janitor'ом).
         loop = asyncio.get_running_loop()
         await status.edit_text(status.text + "\n🖼 Готовлю brand-кадр...")
@@ -2132,7 +2132,7 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
         await status.edit_text(status.text + "\n🎬 Собираю видео (ffmpeg)...")
         logger.info("upload: starting ffmpeg for %s", mp3_path)
-        # Статичный кадр + mp3 — winning-паттерн (RichBlessed/Versa/beha2py etc.)
+        # Статичный кадр + mp3 — winning-паттерн ниши.
         await loop.run_in_executor(
             None,
             lambda: video_builder.build_video(thumb_path, mp3_path, video_path),
@@ -2148,7 +2148,7 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
             beats_db.load_beats()
         reserved_beat_id = max([b["id"] for b in beats_db.BEATS_CACHE] + [0]) + 1
 
-        # Длительность mp3 для YT-timestamps (RichBlessed pattern). Если probe
+        # Длительность mp3 для YT-timestamps (winner-паттерн). Если probe
         # упадёт — description соберётся без timestamps-блока, не критично.
         try:
             mp3_duration = video_builder.probe_duration(mp3_path)
@@ -2685,7 +2685,7 @@ def _post_cta_comment(video_id: str, reserved_beat_id: int | None):
 def _add_to_yt_playlists(video_id: str, meta):
     """Добавляет YT-видео в artist + scene плейлисты после успешного upload'а.
 
-    Формат названий (повторяем winning-паттерн Versa / RichBlessed):
+    Формат названий (повторяем winning-паттерн ниши):
     - '<Artist> Type Beats'     — per-artist (обязательно)
     - 'Hard <Scene> Type Beats' — per-scene (если известна)
     Для коллабов добавляем отдельный плейлист коллаба.

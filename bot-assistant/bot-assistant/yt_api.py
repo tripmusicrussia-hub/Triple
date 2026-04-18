@@ -140,8 +140,8 @@ def get_video(video_id: str) -> Optional[dict]:
 
 
 # ── Playlists ────────────────────────────────────────────────
-# Winning-паттерн type-beat каналов (RichBlessed 1.3M / Fukk2Beatz / Versa):
-# один плейлист на артиста + один на сцену → session watch-time ×2.
+# Winning-паттерн type-beat каналов: один плейлист на артиста + один на сцену
+# → session watch-time ×2.
 
 _PLAYLIST_CACHE: dict[str, str] = {}  # title_lower → playlist_id
 

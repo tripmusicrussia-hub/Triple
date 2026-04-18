@@ -339,7 +339,7 @@ def build_yt_description(
             kw_wall.append(k)
     keyword_wall = ", ".join(kw_wall)
 
-    # Timestamps (RichBlessed pattern, 1.3M views) — retention через chapters.
+    # Timestamps — retention через chapters (winner-паттерн ниши).
     # Опциональный блок: если duration не известен — пропускаем без вреда.
     timestamps_block = ""
     if duration_sec and duration_sec > 10:
@@ -349,7 +349,7 @@ def build_yt_description(
             f'{_fmt_ts(duration_sec)} — Thanks for listening all the way through\n\n'
         )
 
-    # FAQ-блок (Fukk2Beatz pattern) — снимает 80% DM-возражений ДО того как юзер
+    # FAQ-блок (winner-паттерн ниши) — снимает 80% DM-возражений ДО того как юзер
     # уходит читать. Вопросы пишем в реальном user-voice, не в маркетинг-voice.
     faq_block = (
         f'❓ FAQ\n\n'

@@ -65,8 +65,8 @@ def build_video(image_path: Path, mp3_path: Path, out_path: Path) -> Path:
     `-tune stillimage` — x264 преset для статичных видео: encode в ~10x быстрее
     обычного, финальный mp4 ~5 MB (vs 50 MB с waveform+clip-loop).
 
-    Паттерн скопирован с winning type-beat каналов (RichBlessed 1.3M, Versa 203k,
-    bxxgiemane 185k, beha2py 114k — все используют один статичный кадр на видео).
+    Паттерн скопирован с winning type-beat каналов ниши — большинство winners
+    использует один статичный кадр на весь трек, без waveform и нарезок.
     """
     if not image_path.exists():
         raise FileNotFoundError(f"image not found: {image_path}")
