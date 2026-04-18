@@ -332,7 +332,7 @@ def build_yt_description(beat: BeatMeta, beat_id: int | None = None) -> str:
     return (
         f'{hashtags_top}\n\n'
         f'🎧 ALL BEATS + LEASE: {LANDING_URL}\n'
-        f'💰 Instant MP3 Lease (500⭐ / 5 USDT): {buy}\n'
+        f'💰 Instant MP3 Lease (500⭐ / 7 USDT): {buy}\n'
         f'💎 WAV · Unlimited · Exclusive — DM {TG_HANDLE}\n\n'
         f'{artist_line} {energy_line}.\n\n'
         f'"{beat.name}" is a hard trap instrumental inspired by this sound. '
@@ -393,7 +393,7 @@ def _bot_footer(beat_id: int | None = None) -> str:
     if beat_id:
         return (
             f"🎧 Весь каталог → {catalog}\n"
-            f"💰 MP3 Lease 500⭐ / 5 USDT → {_buy_link(beat_id)}"
+            f"💰 MP3 Lease 500⭐ / 7 USDT → {_buy_link(beat_id)}"
         )
     return f"🎧 Весь каталог + lease → {catalog}"
 

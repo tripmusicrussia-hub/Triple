@@ -10,7 +10,7 @@ Hard trap — Memphis / Detroit root. Работаю в сторону: Key Gloc
 ## Как купить бит / лицензия
 Типы лицензий: **MP3 / WAV / Unlimited / Exclusive**.
 
-**MP3 Lease — автоматически через Telegram Stars: 500⭐ (~$5).**
+**MP3 Lease — автоматически в Telegram: 500⭐ (~$7) или 7 USDT через CryptoBot.**
 Жмёшь 💰 под битом в канале или в поиске бота → оплата → сразу приходит mp3 + txt-лицензия.
 Лимиты MP3 Lease: до 100k стримов, до 2000 копий, 1 музыкальное видео (без монетизации), кредит `prod. by TRIPLE FILL`, non-exclusive.
 

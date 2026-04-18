@@ -2477,9 +2477,10 @@ def _post_cta_comment(video_id: str, reserved_beat_id: int | None):
     """
     import yt_api, beat_post_builder
     buy_link = beat_post_builder._buy_link(reserved_beat_id)
+    import licensing
     text = (
         f"🎧 All beats + lease → {beat_post_builder.LANDING_URL}\n"
-        f"💰 Instant MP3 Lease (500⭐ / 5 USDT) → {buy_link}\n"
+        f"💰 Instant MP3 Lease ({licensing.PRICE_MP3_STARS}⭐ / {licensing.PRICE_MP3_USDT:g} USDT) → {buy_link}\n"
         f"💎 WAV / Unlimited / Exclusive — DM @iiiplfiii"
     )
     yt_api.post_comment(video_id, text)
