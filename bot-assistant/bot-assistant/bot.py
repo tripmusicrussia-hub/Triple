@@ -733,6 +733,45 @@ async def cmd_cancel_sched(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ Не нашёл в очереди: {token}")
 
 
+async def cmd_cancel_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Прерывает любой шаг FSM upload_product."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    had = bool(context.user_data.pop("product_upload", None))
+    if had:
+        await update.message.reply_text("❌ Загрузка продукта прервана")
+    else:
+        await update.message.reply_text("Нечего отменять — нет активной загрузки")
+
+
+# ── /upload_product — FSM для заливки kit/pack/loop ───────────
+
+async def cmd_upload_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Старт FSM загрузки продукта. Админ выбирает тип → бот ведёт по шагам:
+    zip → имя → цена → описание → preview → save.
+
+    State хранится в context.user_data["product_upload"] dict:
+        {"step": "await_type|await_zip|await_name|await_price|await_desc",
+         "content_type": "drumkit|samplepack|looppack",
+         "file_id", "file_size", "file_name", "mime_type",
+         "name", "price_stars", "price_usdt", "description"}
+    """
+    if update.effective_user.id != ADMIN_ID:
+        return
+    # Сбрасываем любое незавершённое состояние — начинаем с нуля.
+    context.user_data["product_upload"] = {"step": "await_type"}
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🥁 Drum Kit (1500⭐)", callback_data="prod_type_drumkit")],
+        [InlineKeyboardButton("🎵 Sample Pack (1000⭐)", callback_data="prod_type_samplepack")],
+        [InlineKeyboardButton("🔄 Loop Pack (1000⭐)", callback_data="prod_type_looppack")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="prod_abort")],
+    ])
+    await update.message.reply_text(
+        "📦 Новый продукт в каталог. Выбери тип:",
+        reply_markup=kb,
+    )
+
+
 # ── /pin_hub — навигационный закреп-пост в канал ──────────────
 
 async def cmd_pin_hub(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1388,6 +1427,40 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
             await bot.send_message(user_id, "❌ Отменено")
             return
+
+    if data == "prod_abort":
+        if user_id != ADMIN_ID:
+            return
+        context.user_data.pop("product_upload", None)
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await bot.send_message(user_id, "❌ Загрузка продукта отменена")
+        return
+
+    if data.startswith("prod_type_"):
+        if user_id != ADMIN_ID:
+            return
+        ctype = data[len("prod_type_"):]
+        if ctype not in licensing.PRODUCT_TYPE_LABELS:
+            await query.answer("Неизвестный тип", show_alert=True)
+            return
+        state = context.user_data.get("product_upload") or {}
+        state["content_type"] = ctype
+        state["step"] = "await_zip"
+        context.user_data["product_upload"] = state
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        label = licensing.PRODUCT_TYPE_LABELS[ctype]
+        await bot.send_message(
+            user_id,
+            f"📦 {label} выбран.\n\nПришли zip-архив (≤50MB) следующим сообщением.\n\n"
+            "Отмена — /cancel_product",
+        )
+        return
 
     if data.startswith("prod_cancel_"):
         if user_id != ADMIN_ID:
@@ -2150,76 +2223,172 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_beat_upload(update, context, audio)
 
 
+async def handle_admin_fsm_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """FSM-шаги на текстовых ответах админа: name → price → desc → preview.
+
+    Возвращает True если обработал (чтобы handle_assistant не брал сообщение
+    себе), False — если state не активен, пропускаем дальше по chain.
+    """
+    if update.effective_user.id != ADMIN_ID:
+        return False
+    state = context.user_data.get("product_upload") or {}
+    step = state.get("step")
+    if step not in ("await_name", "await_price", "await_desc"):
+        return False
+
+    text = (update.message.text or "").strip()
+    if not text:
+        return True  # не ловим пустые
+
+    if step == "await_name":
+        if len(text) < 3:
+            await update.message.reply_text("⚠️ Имя слишком короткое (мин 3 симв). Ещё раз:")
+            return True
+        if len(text) > 120:
+            await update.message.reply_text("⚠️ Имя слишком длинное (макс 120 симв). Ещё раз:")
+            return True
+        state["name"] = text
+        state["step"] = "await_price"
+        context.user_data["product_upload"] = state
+        default_stars, default_usdt = licensing.DEFAULT_PRICES[state["content_type"]]
+        await update.message.reply_text(
+            f"✅ Имя: <b>{text}</b>\n\n"
+            f"Теперь цена в ⭐ (число) или <code>default</code> для "
+            f"{default_stars}⭐ / {default_usdt:g} USDT.\n\n"
+            "Отмена — /cancel_product",
+            parse_mode="HTML",
+        )
+        return True
+
+    if step == "await_price":
+        default_stars, default_usdt = licensing.DEFAULT_PRICES[state["content_type"]]
+        if text.lower() in ("default", "дефолт", "-", "skip"):
+            price_stars, price_usdt = default_stars, default_usdt
+        else:
+            try:
+                price_stars = int(text)
+            except ValueError:
+                await update.message.reply_text(
+                    "⚠️ Цена — число в ⭐ (или 'default'). Ещё раз:"
+                )
+                return True
+            if price_stars < 100 or price_stars > 50000:
+                await update.message.reply_text(
+                    "⚠️ Цена вне разумных границ (100-50000⭐). Ещё раз:"
+                )
+                return True
+            price_usdt = round(price_stars * (default_usdt / default_stars), 1)
+        state["price_stars"] = price_stars
+        state["price_usdt"] = price_usdt
+        state["step"] = "await_desc"
+        context.user_data["product_upload"] = state
+        await update.message.reply_text(
+            f"✅ Цена: <b>{price_stars}⭐ / {price_usdt:g} USDT</b>\n\n"
+            "Теперь <b>описание</b> (что внутри пака, под какой вайб).\n"
+            "Или <code>skip</code> — без описания.\n\n"
+            "Отмена — /cancel_product",
+            parse_mode="HTML",
+        )
+        return True
+
+    if step == "await_desc":
+        if text.lower() in ("skip", "-", "пропустить"):
+            description = ""
+        elif len(text) < 10:
+            await update.message.reply_text(
+                "⚠️ Описание слишком короткое (мин 10 симв либо 'skip'). Ещё раз:"
+            )
+            return True
+        else:
+            description = text
+        state["description"] = description
+        state["step"] = "await_confirm"
+        context.user_data["product_upload"] = state
+
+        import product_upload
+        # Preview + save/cancel inline buttons.
+        token = uuid.uuid4().hex[:10]
+        pending_products[token] = {
+            "meta": product_upload.ProductMeta(
+                content_type=state["content_type"],
+                name=state["name"],
+                price_stars=state["price_stars"],
+                price_usdt=state["price_usdt"],
+                description=description,
+            ),
+            "file_id": state["file_id"],
+            "file_unique_id": state.get("file_unique_id", ""),
+            "file_size": state.get("file_size"),
+            "file_name": state.get("file_name"),
+            "mime_type": state.get("mime_type", "application/zip"),
+        }
+        type_label = licensing.PRODUCT_TYPE_LABELS[state["content_type"]]
+        size_mb = (state.get("file_size") or 0) / (1024 * 1024)
+        preview = (
+            f"👁 Превью продукта:\n\n"
+            f"📦 Тип: <b>{type_label}</b>\n"
+            f"🎯 Имя: <b>{state['name']}</b>\n"
+            f"💰 Цена: <b>{state['price_stars']}⭐ / {state['price_usdt']:g} USDT</b>\n"
+            f"📎 Файл: {state.get('file_name','?')} ({size_mb:.1f} MB)\n\n"
+            f"📝 Описание:\n{description or '<i>(не задано)</i>'}"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Сохранить в каталог", callback_data=f"prod_save_{token}")],
+            [InlineKeyboardButton("❌ Отмена", callback_data=f"prod_cancel_{token}")],
+        ])
+        await update.message.reply_text(preview, reply_markup=kb, parse_mode="HTML")
+        return True
+
+    return False
+
+
 # ── Приём zip-файла для drum kit / sample pack / loop pack ────
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Приём zip-архива от админа → парсит caption → превью продукта с
-    кнопками «Сохранить / Отмена». Только admin, только zip/rar/7z.
+    """FSM-шаг: ждём zip после выбора типа через /upload_product.
 
-    Caption format (см. product_upload.py):
-        kit
-        Dark Memphis Drum Kit
-        1500
-        Описание пака
-
-    Реальный файл остаётся на серверах Telegram — мы храним только
-    `file_id` для последующей отдачи покупателю через send_document.
+    Файл остаётся на серверах Telegram — мы храним только `file_id` для
+    последующей отдачи покупателю через send_document.
     """
     if not update.effective_user:
         return
     if update.effective_user.id != ADMIN_ID:
         return
 
+    state = context.user_data.get("product_upload") or {}
+    if state.get("step") != "await_zip":
+        # Не в режиме загрузки — игнорим document тихо (админ мог прислать
+        # PDF/скрин/что-то ещё по другому поводу).
+        return
+
     doc = update.message.document
     if not doc:
         return
 
-    # Игнорируем не-архивы тихо (юзер мог прислать PDF/скрин и т.п.).
-    fname = (doc.file_name or "").lower()
-    if not (fname.endswith(".zip") or fname.endswith(".rar") or fname.endswith(".7z")):
-        return
-
     import product_upload
-
-    # Caption в TG живёт либо в message.caption (если прислали как "документ
-    # с подписью"), либо нигде. Без caption — подскажем формат.
-    caption = update.message.caption
-
     try:
         product_upload.validate_file(doc.file_name, doc.file_size)
-        meta = product_upload.parse_caption(caption)
     except product_upload.CaptionError as e:
         await update.message.reply_text(
-            f"⚠️ {e}\n\n{product_upload.CAPTION_EXAMPLE}",
-            parse_mode="Markdown",
+            f"⚠️ {e}\n\nПришли другой файл или /cancel_product чтобы прервать."
         )
         return
 
-    token = uuid.uuid4().hex[:10]
-    pending_products[token] = {
-        "meta": meta,
-        "file_id": doc.file_id,
-        "file_unique_id": doc.file_unique_id,
-        "file_size": doc.file_size,
-        "file_name": doc.file_name,
-        "mime_type": doc.mime_type or "application/zip",
-    }
+    state["file_id"] = doc.file_id
+    state["file_unique_id"] = doc.file_unique_id
+    state["file_size"] = doc.file_size
+    state["file_name"] = doc.file_name
+    state["mime_type"] = doc.mime_type or "application/zip"
+    state["step"] = "await_name"
+    context.user_data["product_upload"] = state
 
-    type_label = licensing.PRODUCT_TYPE_LABELS[meta.content_type]
     size_mb = doc.file_size / (1024 * 1024)
-    preview = (
-        f"👁 Превью продукта:\n\n"
-        f"📦 Тип: <b>{type_label}</b>\n"
-        f"🎯 Имя: <b>{meta.name}</b>\n"
-        f"💰 Цена: <b>{meta.price_stars}⭐ / {meta.price_usdt:g} USDT</b>\n"
-        f"📎 Файл: {doc.file_name} ({size_mb:.1f} MB)\n\n"
-        f"📝 Описание:\n{meta.description or '<i>(не задано)</i>'}"
+    await update.message.reply_text(
+        f"✅ Файл принят: {doc.file_name} ({size_mb:.1f} MB)\n\n"
+        "Теперь пришли **имя продукта** (одно сообщение).\n\n"
+        "Отмена — /cancel_product",
+        parse_mode="Markdown",
     )
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Сохранить в каталог", callback_data=f"prod_save_{token}")],
-        [InlineKeyboardButton("❌ Отмена", callback_data=f"prod_cancel_{token}")],
-    ])
-    await update.message.reply_text(preview, reply_markup=kb, parse_mode="HTML")
 
 
 async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE, audio):
@@ -2399,6 +2568,12 @@ def _cleanup_upload(token: str):
 
 async def handle_assistant(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not update.message: return
+    # FSM админа (product upload) — приоритет выше любого другого текстового
+    # хэндлера. Если шаг активен — обрабатываем и выходим.
+    if update.effective_user.id == ADMIN_ID:
+        handled = await handle_admin_fsm_text(update, context)
+        if handled:
+            return
     user_id = update.effective_user.id
     text = update.message.text or ""
     if not text.strip() or text.startswith("/"):
@@ -2918,6 +3093,8 @@ async def run_bot():
     app.add_handler(CommandHandler("queue", cmd_queue))
     app.add_handler(CommandHandler("cancel_sched", cmd_cancel_sched))
     app.add_handler(CommandHandler("pin_hub", cmd_pin_hub))
+    app.add_handler(CommandHandler("upload_product", cmd_upload_product))
+    app.add_handler(CommandHandler("cancel_product", cmd_cancel_product))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(PreCheckoutQueryHandler(handle_precheckout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, handle_successful_payment))
