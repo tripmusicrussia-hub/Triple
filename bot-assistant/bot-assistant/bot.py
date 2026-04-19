@@ -58,6 +58,27 @@ beat_plays_users = {}
 USER_ERROR_FALLBACK_CONTACT = "@iiiplfiii"
 
 
+async def _nav_reply(query, text: str, reply_markup=None, parse_mode=None):
+    """Навигационный reply — редактирует текущее сообщение вместо создания нового.
+
+    Используется в callback-handler'ах для меню / фильтров / админки, чтобы
+    чат юзера не засорялся десятком одинаковых сообщений при навигации.
+    Если исходное сообщение — media (audio/photo/document), edit_text упадёт
+    с BadRequest → fallback на обычный reply_text.
+    """
+    try:
+        await query.message.edit_text(
+            text, reply_markup=reply_markup, parse_mode=parse_mode,
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        # Media message или неизменяемое — fallback на новое сообщение.
+        await query.message.reply_text(
+            text, reply_markup=reply_markup, parse_mode=parse_mode,
+            disable_web_page_preview=True,
+        )
+
+
 def _user_error_msg(short_hint: str = "") -> str:
     """Дружелюбный generic текст для юзера.
 
@@ -329,8 +350,14 @@ def _kb_search_results(results: list[dict], filter_name: str, page: int) -> Inli
     return InlineKeyboardMarkup(rows)
 
 
-async def do_quick_filter(bot, chat_id: int, user_id: int, filter_name: str, page: int = 0):
-    """Выполняет quick-filter поиск + показ paginated результатов."""
+async def do_quick_filter(bot, chat_id: int, user_id: int, filter_name: str,
+                          page: int = 0, query=None):
+    """Выполняет quick-filter поиск + показ paginated результатов.
+
+    Если передан `query` (callback) — редактирует текущее сообщение через
+    _nav_reply (чтоб чат не засорялся). Если нет (вызов из /команды) —
+    отправляет новое сообщение.
+    """
     results = _filter_beats(filter_name)
     user_search_state[user_id] = {"filter": filter_name, "page": page}
     title = {
@@ -344,14 +371,18 @@ async def do_quick_filter(bot, chat_id: int, user_id: int, filter_name: str, pag
         "bpm160": "⚡ 160+ BPM",
     }.get(filter_name, filter_name)
     if not results:
-        await bot.send_message(chat_id, f"{title}: пусто, попробуй другой фильтр",
-                               reply_markup=kb_main_menu())
+        text = f"{title}: пусто, попробуй другой фильтр"
+        if query is not None:
+            await _nav_reply(query, text, reply_markup=kb_main_menu())
+        else:
+            await bot.send_message(chat_id, text, reply_markup=kb_main_menu())
         return
-    await bot.send_message(
-        chat_id,
-        f"{title} — нашёл {len(results)} треков:",
-        reply_markup=_kb_search_results(results, filter_name, page),
-    )
+    text = f"{title} — нашёл {len(results)} треков:"
+    kb = _kb_search_results(results, filter_name, page)
+    if query is not None:
+        await _nav_reply(query, text, reply_markup=kb)
+    else:
+        await bot.send_message(chat_id, text, reply_markup=kb)
 
 def kb_beats_menu():
     beats = len([b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == "beat"])
@@ -957,7 +988,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "admin_yt_menu":
         if user_id != ADMIN_ID:
             return
-        await query.message.reply_text("🎬 YouTube:", reply_markup=kb_admin_yt())
+        await _nav_reply(query, "🎬 YouTube:", reply_markup=kb_admin_yt())
         return
 
     if data == "admin_yt_stats":
@@ -1465,12 +1496,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "main_menu":
-        await show_main_menu(bot, query.message.chat_id)
+        beats = len([b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == "beat"])
+        tracks = len([b for b in beats_db.BEATS_CACHE if b.get("content_type") == "track"])
+        remixes = len([b for b in beats_db.BEATS_CACHE if b.get("content_type") == "remix"])
+        text = "Привет! 👋 Что слушаем сегодня?\n\nВ каталоге: " + str(beats) + " битов, " + str(tracks) + " треков, " + str(remixes) + " ремиксов.\nВыбирай по настроению или жми случайный — не прогадаешь 🎲"
+        await _nav_reply(query, text, reply_markup=kb_main_menu())
         return
 
     if data == "menu_beat":
         beats = len([b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == "beat"])
-        await query.message.reply_text("🎹 Целых " + str(beats) + " битов! Ищешь что-то конкретное или просто серфишь?", reply_markup=kb_beats_menu())
+        await _nav_reply(query, "🎹 Целых " + str(beats) + " битов! Ищешь что-то конкретное или просто серфишь?", reply_markup=kb_beats_menu())
         return
 
     if data == "menu_products":
@@ -1482,7 +1517,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 counts[ct] += 1
         total = sum(counts.values())
         if total == 0:
-            await query.message.reply_text(
+            await _nav_reply(
+                query,
                 "📦 Паков и китов пока нет — скоро будет.\n"
                 "Пока лучшее — биты: тыкай 🎹 Биты в главном меню.",
                 reply_markup=InlineKeyboardMarkup([
@@ -1507,7 +1543,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 callback_data="prodcat_looppack_0",
             )])
         rows.append([InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")])
-        await query.message.reply_text(
+        await _nav_reply(
+            query,
             f"📦 Паки и киты ({total}) — выбирай категорию:",
             reply_markup=InlineKeyboardMarkup(rows),
         )
@@ -1549,7 +1586,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rows.append(nav)
         rows.append([InlineKeyboardButton("◀️ К категориям", callback_data="menu_products")])
         label = licensing.PRODUCT_TYPE_LABELS[ctype]
-        await query.message.reply_text(
+        await _nav_reply(
+            query,
             f"{label}s — {len(items)} шт.\nТыкай название чтобы посмотреть.",
             reply_markup=InlineKeyboardMarkup(rows),
         )
@@ -1582,7 +1620,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton(f"◀️ К {label}s",
                                    callback_data=f"prodcat_{p['content_type']}_0")],
         ])
-        await query.message.reply_text(info, reply_markup=kb, parse_mode="HTML")
+        await _nav_reply(query, info, reply_markup=kb, parse_mode="HTML")
         return
 
     if data == "noop":
@@ -1594,7 +1632,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not tracks:
             await query.answer("Треков пока нет!", show_alert=True)
             return
-        await query.message.reply_text("🎤 " + str(len(tracks)) + " треков от IIIPLKIII — слушай на здоровье!", reply_markup=kb_tracks_menu())
+        await _nav_reply(query, "🎤 " + str(len(tracks)) + " треков от IIIPLKIII — слушай на здоровье!", reply_markup=kb_tracks_menu())
         return
 
     if data == "menu_remix":
@@ -1602,11 +1640,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not remixes:
             await query.answer("Ремиксов пока нет!", show_alert=True)
             return
-        await query.message.reply_text("🔀 " + str(len(remixes)) + " ремиксов — узнаешь мелодию? 😄", reply_markup=kb_remixes_menu())
+        await _nav_reply(query, "🔀 " + str(len(remixes)) + " ремиксов — узнаешь мелодию? 😄", reply_markup=kb_remixes_menu())
         return
 
     if data == "beats_by_artist":
-        await query.message.reply_text("🎤 Под кого делаем? Выбирай артиста — найду похожие биты!", reply_markup=kb_artists())
+        await _nav_reply(query, "🎤 Под кого делаем? Выбирай артиста — найду похожие биты!", reply_markup=kb_artists())
         return
 
     if data.startswith("cattag_"):
@@ -1684,13 +1722,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "my_favorites":
         favs = user_favorites.get(user_id, [])
         if not favs:
-            await query.message.reply_text("Тут пока пусто 🙈\nСлушай биты и жми ❤️ — сохраню сюда!")
+            await _nav_reply(query, "Тут пока пусто 🙈\nСлушай биты и жми ❤️ — сохраню сюда!",
+                             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Меню", callback_data="main_menu")]]))
             return
         beats_list = [beats_db.get_beat_by_id(bid) for bid in favs]
         beats_list = [b for b in beats_list if b]
         rows = [[InlineKeyboardButton(b["name"][:40], callback_data="play_" + str(b["id"]))] for b in beats_list[-10:]]
         rows.append([InlineKeyboardButton("◀️ Меню", callback_data="main_menu")])
-        await query.message.reply_text("❤️ Избранное (" + str(len(beats_list)) + "):", reply_markup=InlineKeyboardMarkup(rows))
+        await _nav_reply(query, "❤️ Избранное (" + str(len(beats_list)) + "):", reply_markup=InlineKeyboardMarkup(rows))
         return
 
     if data.startswith("play_"):
@@ -1868,13 +1907,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "search_prompt":
         bulk_add_mode[str(user_id) + "_search"] = True
-        await query.message.reply_text("🔍 Напиши название бита, имя артиста или тег — найду всё что есть!")
+        await _nav_reply(query, "🔍 Напиши название бита, имя артиста или тег — найду всё что есть!")
         return
 
     # Quick-filter chips (qf_hard / qf_memphis / qf_detroit / qf_ru / qf_bpm140 / qf_bpm160)
     if data.startswith("qf_"):
         filter_name = data[3:]
-        await do_quick_filter(bot, query.message.chat_id, user_id, filter_name, page=0)
+        await do_quick_filter(bot, query.message.chat_id, user_id, filter_name, page=0, query=query)
         return
 
     # Search pagination: sp_<filter>_<page>
@@ -1904,7 +1943,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "admin_panel":
         if user_id != ADMIN_ID: return
-        await query.message.reply_text("🎛 Панель управления:", reply_markup=kb_admin())
+        await _nav_reply(query, "🎛 Панель управления:", reply_markup=kb_admin())
         return
 
     if data == "admin_pin_hub":
@@ -1930,7 +1969,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 rows.append([InlineKeyboardButton(title, callback_data=f"admin_prod_{p['id']}")])
         rows.append([InlineKeyboardButton("➕ Залить новый продукт", callback_data="admin_upload_prod")])
         rows.append([InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")])
-        await query.message.reply_text(
+        await _nav_reply(
+            query,
             f"📦 Каталог продуктов ({len(products)}):",
             reply_markup=InlineKeyboardMarkup(rows),
         )
@@ -1960,8 +2000,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📎 {p.get('file_name','?')} ({size_mb:.1f} MB)\n\n"
             f"📝 {p.get('description') or '<i>(без описания)</i>'}"
         )
-        await query.message.reply_text(
-            info, parse_mode="HTML",
+        await _nav_reply(
+            query, info, parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("◀️ К списку", callback_data="admin_products")],
             ]),
@@ -1973,12 +2013,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         import publish_scheduler
         n = publish_scheduler.queue_size()
         if n == 0:
-            await query.message.reply_text(
+            await _nav_reply(
+                query,
                 "📭 Очередь пуста. Загружай битеки — жми «📅 В лучшее время» в превью.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")]])
             )
         else:
-            await query.message.reply_text(
+            await _nav_reply(
+                query,
                 f"📅 Запланировано: {n}\nНажми «❌ Отменить» под нужной публикацией:",
                 reply_markup=kb_admin_queue(),
             )
@@ -2032,7 +2074,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         beats_c = len([b for b in beats_db.BEATS_CACHE if b.get("content_type","beat")=="beat"])
         tracks_c = len([b for b in beats_db.BEATS_CACHE if b.get("content_type")=="track"])
         remixes_c = len([b for b in beats_db.BEATS_CACHE if b.get("content_type")=="remix"])
-        await query.message.reply_text(
+        await _nav_reply(
+            query,
             "📊 Статистика\n\n"
             "👥 Пользователей: " + str(len(all_users)) + "\n"
             "🎁 Получили пак: " + str(len(users_received_pack)) + "\n"
@@ -2051,7 +2094,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id != ADMIN_ID: return
         top = sorted(beat_plays.items(), key=lambda x: x[1], reverse=True)[:20]
         if not top:
-            await query.message.reply_text("Нет данных.")
+            await _nav_reply(query, "Нет данных.")
             return
         text = "📈 Топ-20:\n\n"
         for i, (bid, count) in enumerate(top):
@@ -2060,13 +2103,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             uniq = len(beat_plays_users.get(bid, set()))
             favs = sum(1 for fl in user_favorites.values() if bid in fl)
             text += str(i+1) + ". " + name + "\n   ▶️ " + str(count) + "  👥 " + str(uniq) + "  ❤️ " + str(favs) + "\n\n"
-        await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="admin_stats")]]))
+        await _nav_reply(query, text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="admin_stats")]]))
         return
 
     if data == "admin_catalog":
         if user_id != ADMIN_ID: return
         tags = beats_db.get_all_tags()
-        await query.message.reply_text(
+        await _nav_reply(
+            query,
             "📂 Каталог: " + str(len(beats_db.BEATS_CACHE)) + " шт.\nТеги: " + ", ".join(tags[:20]),
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")]])
         )
@@ -2077,7 +2121,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mode_type = data.replace("admin_addbeats_", "")
         bulk_add_mode[ADMIN_ID] = mode_type
         icons = {"track": "🎤 треки", "remix": "🔀 ремиксы"}
-        await query.message.reply_text(
+        await _nav_reply(
+            query,
             "✅ Режим включён! Всё пойдёт как: " + icons[mode_type] + "\n\nПересылай посты из канала.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⛔ Закончить", callback_data="admin_stopadd")]]))
         return
@@ -2085,7 +2130,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "admin_addbeats":
         if user_id != ADMIN_ID: return
         bulk_add_mode[ADMIN_ID] = "beat"
-        await query.message.reply_text("✅ Режим добавления ВКЛЮЧЁН!\nПересылай посты из канала.",
+        await _nav_reply(query, "✅ Режим добавления ВКЛЮЧЁН!\nПересылай посты из канала.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⛔ Закончить", callback_data="admin_stopadd")]]))
         return
 
@@ -2095,13 +2140,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         beats_c = len([b for b in beats_db.BEATS_CACHE if b.get("content_type","beat")=="beat"])
         tracks_c = len([b for b in beats_db.BEATS_CACHE if b.get("content_type")=="track"])
         remixes_c = len([b for b in beats_db.BEATS_CACHE if b.get("content_type")=="remix"])
-        await query.message.reply_text("⛔ Добавление завершено.\n🎹 " + str(beats_c) + " / 🎤 " + str(tracks_c) + " / 🔀 " + str(remixes_c),
+        await _nav_reply(query, "⛔ Добавление завершено.\n🎹 " + str(beats_c) + " / 🎤 " + str(tracks_c) + " / 🔀 " + str(remixes_c),
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ В панель", callback_data="admin_panel")]]))
         return
 
     if data == "admin_clearbeats":
         if user_id != ADMIN_ID: return
-        await query.message.reply_text("🗑 Что удаляем?", reply_markup=InlineKeyboardMarkup([
+        await _nav_reply(query, "🗑 Что удаляем?", reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🎹 Удалить из битов", callback_data="admin_delete_cat_beat")],
             [InlineKeyboardButton("🎤 Удалить из треков", callback_data="admin_delete_cat_track")],
             [InlineKeyboardButton("🔀 Удалить из ремиксов", callback_data="admin_delete_cat_remix")],
@@ -2126,7 +2171,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 callback_data="admin_del_" + str(b["id"])
             )])
         rows.append([InlineKeyboardButton("◀️ Назад", callback_data="admin_clearbeats")])
-        await query.message.reply_text(
+        await _nav_reply(
+            query,
             icons[cat] + " " + labels[cat].capitalize() + " (" + str(len(items)) + " шт.) — выбери что удалить:",
             reply_markup=InlineKeyboardMarkup(rows)
         )
@@ -2160,7 +2206,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         beats_db.BEATS_CACHE.clear()
         beats_db.BEATS_BY_ID.clear()
         asyncio.create_task(asyncio.to_thread(beats_db.save_beats))
-        await query.message.reply_text("🗑 Каталог очищен!",
+        await _nav_reply(query, "🗑 Каталог очищен!",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ В панель", callback_data="admin_panel")]]))
         return
 
