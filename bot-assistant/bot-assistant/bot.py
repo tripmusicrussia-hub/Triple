@@ -514,11 +514,11 @@ def kb_admin_channel():
         [InlineKeyboardButton(f"⚡ {dry}Сгенерить на сегодня", callback_data="admin_postnow_today")],
         [InlineKeyboardButton("Пн Memphis Monday", callback_data="admin_postnow_0"),
          InlineKeyboardButton("Пт Hard Friday", callback_data="admin_postnow_4")],
-        [InlineKeyboardButton("Вт Quick Tip", callback_data="admin_postnow_1"),
-         InlineKeyboardButton("Ср Hard Lifehack", callback_data="admin_postnow_2")],
-        [InlineKeyboardButton("Чт Studio Story", callback_data="admin_postnow_3"),
-         InlineKeyboardButton("Сб За кулисами", callback_data="admin_postnow_5")],
-        [InlineKeyboardButton("Вс Итог + вопрос", callback_data="admin_postnow_6")],
+        [InlineKeyboardButton("Вт Trick of the week", callback_data="admin_postnow_1"),
+         InlineKeyboardButton("Ср Flow moments", callback_data="admin_postnow_2")],
+        [InlineKeyboardButton("Чт Что слушаю", callback_data="admin_postnow_3"),
+         InlineKeyboardButton("Сб Звук из воздуха", callback_data="admin_postnow_5")],
+        [InlineKeyboardButton("Вс Low & dark", callback_data="admin_postnow_6")],
         [InlineKeyboardButton("➕ Добавить тему в бэклог", callback_data="admin_idea_menu")],
         [InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")],
     ])
@@ -526,11 +526,11 @@ def kb_admin_channel():
 
 def kb_admin_idea_day():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Вт Quick Tip", callback_data="admin_idea_1"),
-         InlineKeyboardButton("Ср Hard Lifehack", callback_data="admin_idea_2")],
-        [InlineKeyboardButton("Чт Studio Story", callback_data="admin_idea_3"),
-         InlineKeyboardButton("Сб За кулисами", callback_data="admin_idea_5")],
-        [InlineKeyboardButton("Вс Итог + вопрос", callback_data="admin_idea_6")],
+        [InlineKeyboardButton("Вт Trick of the week", callback_data="admin_idea_1"),
+         InlineKeyboardButton("Ср Flow moments", callback_data="admin_idea_2")],
+        [InlineKeyboardButton("Чт Что слушаю", callback_data="admin_idea_3"),
+         InlineKeyboardButton("Сб Звук из воздуха", callback_data="admin_idea_5")],
+        [InlineKeyboardButton("Вс Low & dark", callback_data="admin_idea_6")],
         [InlineKeyboardButton("◀️ Назад", callback_data="admin_channelpost")],
     ])
 
