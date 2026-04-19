@@ -23,15 +23,40 @@ def _rebuild_index() -> None:
 
 
 def save_beats() -> None:
+    """Атомарная запись beats_data.json: tmp-файл + os.replace.
+
+    Защита от порчи файла при прерывании (Render restart, kill -9, etc).
+    Без этого `open(path, "w")` сначала truncate'ит target до 0 bytes,
+    потом пишет — в окне между truncate и write файл может остаться
+    пустым/битым, что ломает весь каталог после рестарта.
+    """
+    tmp = BEATS_FILE + ".tmp"
     try:
-        with open(BEATS_FILE, "w", encoding="utf-8") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(BEATS_CACHE, f, ensure_ascii=False, indent=2)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass  # не все FS поддерживают fsync (docker/overlayfs)
+        os.replace(tmp, BEATS_FILE)  # atomic на Linux+Windows
         logger.info("Beats saved: %d", len(BEATS_CACHE))
     except Exception as e:
         logger.error("Save error: %s", e)
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
 
 
 def load_beats() -> None:
+    """Загружает beats_data.json в BEATS_CACHE + строит BEATS_BY_ID индекс.
+
+    При ошибке парсинга — оставляет пустые CACHE/INDEX (критично: оба
+    должны быть синхронизированы, иначе get_beat_by_id() вернёт stale
+    запись из пустого каталога).
+    """
     import traceback
     global BEATS_CACHE
     try:
@@ -45,9 +70,11 @@ def load_beats() -> None:
         else:
             logger.warning("load_beats: file not found at %s", BEATS_FILE)
             BEATS_CACHE = []
+            _rebuild_index()
     except Exception as e:
         logger.error("Load error: %s\n%s", e, traceback.format_exc())
         BEATS_CACHE = []
+        _rebuild_index()  # критично: синхронизируем индекс с пустым кэшем
 
 
 def parse_tags_from_text(text: str | None) -> list[str]:

@@ -552,9 +552,12 @@ async def send_sample_pack(bot, chat_id):
         logger.error("Sample pack error: " + str(e))
 
 async def show_main_menu(bot, chat_id):
-    # Защитная перезагрузка: если кэш пуст, но файл с данными на диске есть —
-    # значит post_init не успел / упал молча. Дешевле перечитать.
-    if not beats_db.BEATS_CACHE and os.path.exists(beats_db.BEATS_FILE) and os.path.getsize(beats_db.BEATS_FILE) > 1024:
+    # Защитная перезагрузка: кэш пуст, но файл на диске есть — пробуем снова.
+    # Размер не проверяем: даже корректные 2 байта "[]" — валидный JSON,
+    # а битые 500 байт всё равно выявятся парсером (load_beats ловит и
+    # логирует). Главное — дать шанс на retry, пока юзер смотрит в главное
+    # меню, иначе каталог остаётся пустым навсегда.
+    if not beats_db.BEATS_CACHE and os.path.exists(beats_db.BEATS_FILE):
         logger.warning("show_main_menu: cache пуст, перечитываю beats_data.json")
         beats_db.load_beats()
     beats = len([b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == "beat"])
@@ -3439,8 +3442,12 @@ async def post_init(application):
     except Exception as e:
         logger.warning("post_init: delete_webhook failed: %s", e)
     beats_db.load_beats()
-    if not beats_db.BEATS_CACHE and os.path.exists(beats_db.BEATS_FILE) and os.path.getsize(beats_db.BEATS_FILE) > 1024:
-        logger.warning("post_init: cache empty but file has content — retrying load_beats after 2s")
+    if not beats_db.BEATS_CACHE and os.path.exists(beats_db.BEATS_FILE):
+        # Файл есть, кэш пуст → значит парсинг упал. Ждём 2 сек (вдруг
+        # файл ещё пишется после рестарта) и пробуем ещё раз. Без размер-
+        # условия: даже битые 500 байт заслуживают повторной попытки —
+        # если всё ещё битые, load_beats() молча оставит пусто.
+        logger.warning("post_init: cache empty but file exists — retrying load_beats after 2s")
         await asyncio.sleep(2)
         beats_db.load_beats()
     load_users()
