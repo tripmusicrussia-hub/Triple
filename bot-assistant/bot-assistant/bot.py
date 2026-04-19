@@ -20,6 +20,7 @@ from config import (
     WELCOME_TEXT, CATALOG_INTRO, ADMIN_ID, CHANNEL_POST_HOUR,
 )
 import beats_db
+import users_db
 import post_generator
 import licensing
 import sales
@@ -184,50 +185,25 @@ ARTIST_TAGS = [
 # ── Сохранение / загрузка ─────────────────────────────────────
 
 def save_users():
-    """Атомарная запись users_data.json: tmp + os.replace.
+    """Local JSON snapshot — backup. Primary truth = Supabase bot_users table.
 
-    Тот же паттерн что у save_beats — защита от corruption при Render
-    restart в середине записи. Без этого юзер терял `users_received_pack`
-    и получал sample_pack при каждом /start, плюс все подписчики
-    пропадали из all_users (и `/admin` показывал 0 польз.).
+    Supabase пишется write-through в точках мутации (upsert_user,
+    mark_sample_pack_received, set_favorites, set_subscribed). Local
+    файл — fallback если Supabase недоступен при старте следующей
+    сессии Render.
     """
-    tmp = USERS_FILE + ".tmp"
-    try:
-        data = {
-            "all_users": {str(k): v for k, v in all_users.items()},
-            "users_received_pack": list(users_received_pack),
-            "subscribed_users": list(subscribed_users),
-            "user_favorites": {str(k): v for k, v in user_favorites.items()},
-        }
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-            f.flush()
-            try:
-                os.fsync(f.fileno())
-            except OSError:
-                pass
-        os.replace(tmp, USERS_FILE)
-    except Exception as e:
-        logger.error("Save users error: %s", e)
-        try:
-            if os.path.exists(tmp):
-                os.remove(tmp)
-        except Exception:
-            pass
+    users_db.save_local(all_users, users_received_pack, subscribed_users, user_favorites)
+
 
 def load_users():
+    """Загружает users из Supabase (primary) → в in-memory кеш bot.py.
+    При недоступности Supabase — fallback на local JSON.
+    """
     global all_users, users_received_pack, subscribed_users, user_favorites
     try:
-        if os.path.exists(USERS_FILE):
-            with open(USERS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            all_users = {int(k): v for k, v in data.get("all_users", {}).items()}
-            users_received_pack = set(int(x) for x in data.get("users_received_pack", []))
-            subscribed_users = set(int(x) for x in data.get("subscribed_users", []))
-            user_favorites = {int(k): v for k, v in data.get("user_favorites", {}).items()}
-            logger.info("Users loaded: " + str(len(all_users)))
+        all_users, users_received_pack, subscribed_users, user_favorites = users_db.load_to_memory()
     except Exception as e:
-        logger.error("Load users error: " + str(e))
+        logger.error("Load users error: %s", e)
 
 def write_heartbeat():
     try:
@@ -643,14 +619,20 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot = context.bot
     write_heartbeat()
 
-    is_new = user_id not in all_users
-    if is_new:
+    # is_new определяется через Supabase (source of truth между Render
+    # redeploy'ями). Fallback — in-memory all_users (свежий процесс).
+    supabase_is_new = await asyncio.to_thread(
+        users_db.upsert_user, user_id, user.full_name, user.username
+    )
+    is_new = user_id not in all_users and supabase_is_new is not False
+    if user_id not in all_users:
         all_users[user_id] = {
             "name": user.full_name,
             "username": user.username or "",
-            "joined": datetime.now().strftime("%d.%m.%Y %H:%M")
+            "joined": datetime.now().strftime("%d.%m.%Y %H:%M"),
         }
         asyncio.create_task(asyncio.to_thread(save_users))
+    if is_new:
         try:
             uname = "@" + user.username if user.username else user.full_name
             await bot.send_message(ADMIN_ID, "🔔 Новый: " + uname + " | Всего: " + str(len(all_users)))
@@ -727,9 +709,16 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(WELCOME_TEXT, reply_markup=kb_subscribe())
         return
 
-    if user_id not in users_received_pack:
+    # Sample pack: primary check через Supabase (переживает redeploy),
+    # fallback — in-memory set. True/False — уже получал/не получал.
+    sp_state = await asyncio.to_thread(users_db.has_received_sample_pack, user_id)
+    already_received = (
+        user_id in users_received_pack if sp_state is None else sp_state
+    )
+    if not already_received:
         await send_sample_pack(bot, user_id)
         users_received_pack.add(user_id)
+        await asyncio.to_thread(users_db.mark_sample_pack_received, user_id)
         asyncio.create_task(asyncio.to_thread(save_users))
         try:
             uname = "@" + user.username if user.username else user.full_name
@@ -1774,9 +1763,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         subscribed_users.discard(user_id)
         if await is_subscribed(bot, user_id):
             await query.message.delete()
-            if user_id not in users_received_pack:
+            sp_state = await asyncio.to_thread(users_db.has_received_sample_pack, user_id)
+            already = user_id in users_received_pack if sp_state is None else sp_state
+            if not already:
                 await send_sample_pack(bot, user_id)
                 users_received_pack.add(user_id)
+                await asyncio.to_thread(users_db.mark_sample_pack_received, user_id)
                 asyncio.create_task(asyncio.to_thread(save_users))
             await show_main_menu(bot, user_id)
         else:
@@ -1990,6 +1982,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_favorites[user_id] = []
         if beat_id not in user_favorites[user_id]:
             user_favorites[user_id].append(beat_id)
+            # Supabase write-through (primary truth); local JSON — backup
+            asyncio.create_task(asyncio.to_thread(
+                users_db.set_favorites, user_id, user_favorites[user_id]
+            ))
             asyncio.create_task(asyncio.to_thread(save_users))
             await query.answer("❤️ Добавлено в избранное!")
         else:
