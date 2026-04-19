@@ -3050,7 +3050,6 @@ async def heartbeat_scheduler():
 
 
 async def post_init(application):
-    print("[POSTINIT] entered", flush=True)
     try:
         await application.bot.delete_webhook(drop_pending_updates=True)
         logger.info("post_init: webhook cleared, pending updates dropped")
@@ -3068,14 +3067,11 @@ async def post_init(application):
     load_users()
     logger.info("Bot started: " + str(len(beats_db.BEATS_CACHE)) + " beats, " + str(len(all_users)) + " users")
     # Восстанавливаем очередь плановых публикаций с диска
-    print("[POSTINIT] before load_queue", flush=True)
     try:
         import publish_scheduler
         n = publish_scheduler.load_queue()
-        print(f"[POSTINIT] after load_queue: n={n}", flush=True)
         logger.info("publish_scheduler: restored %d queued items on startup", n)
-    except Exception as e:
-        print(f"[POSTINIT] load_queue FAILED: {type(e).__name__}: {e}", flush=True)
+    except Exception:
         logger.exception("publish_scheduler restore failed (non-fatal)")
     # Восстанавливаем pending_products — недосохранённые продукты на preview-шаге.
     try:

@@ -63,10 +63,8 @@ def _get_supabase():
         from supabase import create_client
         _supabase = create_client(url, key)
         logger.info("publish_scheduler: Supabase client initialized")
-        print("[SCHED] _get_supabase: client initialized", flush=True)
         return _supabase
     except Exception as e:
-        print(f"[SCHED] _get_supabase: init FAILED: {type(e).__name__}: {e}", flush=True)
         logger.warning("publish_scheduler: Supabase init failed (%s), JSON-only mode", e)
         _supabase = False
         return None
@@ -177,15 +175,12 @@ def load_queue() -> int:
     Fallback: local JSON (only useful during local dev).
     """
     global _QUEUE
-    print("[SCHED] load_queue() called", flush=True)
     _QUEUE = []
     sb = _get_supabase()
-    print(f"[SCHED] sb client = {sb!r}", flush=True)
     if sb is not None:
         try:
             resp = sb.table(SB_TABLE).select("*").eq("status", "pending").execute()
             rows = resp.data or []
-            print(f"[SCHED] SELECT returned {len(rows)} rows", flush=True)
             for row in rows:
                 # Mapping DB columns → queue item format
                 item = {
@@ -207,11 +202,9 @@ def load_queue() -> int:
                 item["thumb_path"] = str(files.get("thumb", TEMP_UPLOAD_DIR / f"{row['token']}.jpg"))
                 _QUEUE.append(item)
             logger.info("publish_scheduler: loaded %d items from Supabase", len(_QUEUE))
-            print(f"[SCHED] returning {len(_QUEUE)} items from Supabase branch", flush=True)
             _save_queue()  # sync to local JSON for visibility
             return len(_QUEUE)
         except Exception as e:
-            print(f"[SCHED] EXCEPTION: {type(e).__name__}: {e}", flush=True)
             logger.exception("publish_scheduler: Supabase load failed (%s), trying JSON fallback", e)
 
     # Fallback: local JSON (эта ветка работает только локально)
