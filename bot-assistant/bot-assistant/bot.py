@@ -1180,6 +1180,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer()
 
+    # Defensive reload — если callback пришёл сразу после cold start и
+    # cache ещё не прогрет, любой хэндлер использующий BEATS_CACHE
+    # получит пустой ответ (было видно в /admin → pin_hub: "0 битов").
+    # cmd_admin это уже делает, дублируем для callback-ветки.
+    if not beats_db.BEATS_CACHE and os.path.exists(beats_db.BEATS_FILE):
+        logger.warning("handle_callback: cache пуст, перечитываю beats_data.json")
+        beats_db.load_beats()
+
     if data == "admin_channelpost":
         if user_id != ADMIN_ID:
             return
