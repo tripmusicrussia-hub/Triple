@@ -2,9 +2,8 @@
 
 LLM-роутер классифицирует свободный текст админа в один из тулов:
   1. recent_posts     — «что постилось за неделю» → Supabase post_events
-  2. today_post       — «что сегодня в канал»     → post_generator (без preview)
-  3. catalog_search   — «найди биты Am 140+»      → beats_db.BEATS_CACHE
-  4. none             — не про эти три штуки
+  2. catalog_search   — «найди биты Am 140+»      → beats_db.BEATS_CACHE
+  3. none             — не про эти две штуки
 """
 from __future__ import annotations
 
@@ -26,17 +25,14 @@ HERE = Path(__file__).parent
 
 ROUTER_SYSTEM = """\
 Ты — роутер запросов от автора музыкального канала @iiiplfiii. Его речь разговорная, на русском.
-Классифицируй запрос в один из 4 тулов и верни ТОЛЬКО JSON, без пояснений и markdown.
+Классифицируй запрос в один из 3 тулов и верни ТОЛЬКО JSON, без пояснений и markdown.
 
 Доступные тулы:
 
 1. recent_posts — «что постилось», «последние посты», «что за неделю ушло», «какие биты публиковал».
    args: {"days": <int, по умолчанию 7>}
 
-2. today_post — «что сегодня в канал», «какой пост запланирован», «что на сегодня», «покажи превью».
-   args: {}
-
-3. catalog_search — «найди биты», «покажи биты», «есть что в Am 140», «покажи nardo wick», «биты с BPM».
+2. catalog_search — «найди биты», «покажи биты», «есть что в Am 140», «покажи nardo wick», «биты с BPM».
    args: {
      "bpm_min": <int|null>,
      "bpm_max": <int|null>,
@@ -45,7 +41,7 @@ ROUTER_SYSTEM = """\
      "limit":   <int, по умолчанию 5>
    }
 
-4. none — если запрос не про эти три штуки.
+3. none — если запрос не про эти две штуки.
    args: {"reason": "<кратко почему не подошло>"}
 
 Формат ответа СТРОГО:
@@ -164,33 +160,6 @@ async def tool_recent_posts(days: int = 7) -> str:
     return "\n".join(lines)
 
 
-async def tool_today_post() -> str:
-    """Описать, какая рубрика сегодня и какой материал подтянется. БЕЗ full preview."""
-    import post_generator
-    wd = datetime.now(MSK_TZ).weekday()
-    rubric = post_generator.RUBRIC_SCHEDULE[wd]
-    days_ru = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-    lines = [f"📅 Сегодня {days_ru[wd]} — рубрика «{rubric['name']}» ({rubric['kind']})."]
-
-    if rubric["kind"] == "audio":
-        beat = post_generator.pick_audio_beat()
-        if beat is None:
-            lines.append("⚠️ Все биты в cooldown (<30 дн.) — scheduler откатится на рубрику вторника.")
-        else:
-            bpm = beat.get("bpm") or "?"
-            key = beat.get("key") or "?"
-            lines.append(f"🎧 Материал: «{beat.get('name', '—')}» ({bpm} BPM, {key})")
-    else:
-        topic = post_generator.pick_text_topic(rubric["section"])
-        if topic:
-            lines.append(f"📝 Тема из post_ideas.md: {topic}")
-        else:
-            lines.append("⚠️ В post_ideas.md не осталось невостребованных тем в этом разделе.")
-
-    lines.append("\nПолное превью с кнопками публикации — /postnow")
-    return "\n".join(lines)
-
-
 _KEY_RE = re.compile(r"\b([A-G][#b]?m?)\b", re.IGNORECASE)
 
 
@@ -275,7 +244,6 @@ async def tool_catalog_search(
 
 TOOLS = {
     "recent_posts": tool_recent_posts,
-    "today_post": tool_today_post,
     "catalog_search": tool_catalog_search,
 }
 

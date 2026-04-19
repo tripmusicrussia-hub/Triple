@@ -525,68 +525,68 @@ def _hashtag_nav(beat: BeatMeta) -> str:
     return " ".join(out)
 
 
+def _tech_line(beat: BeatMeta) -> str:
+    """Техническая строка с BPM/key — отдельно от художественного текста."""
+    return f"⚡ {beat.bpm} BPM · 🎹 {beat.key}"
+
+
 def build_tg_caption(beat: BeatMeta, beat_id: int | None = None) -> str:
     """Fallback-шаблон если LLM недоступен. Короткий, нейтральный."""
     return (
-        f"{beat.name} — {beat.artist_line}\n\n"
-        f"🎧 {beat.key}  ⚡ {beat.bpm} BPM\n\n"
+        f"{beat.name} — {beat.artist_line}\n"
+        f"{_tech_line(beat)}\n\n"
         f"{_bot_footer(beat_id)}\n\n"
         f"{_hashtag_nav(beat)}"
     )
 
 
-# Стили для рандомизации LLM-генерации каждого нового бита.
-# Порядок синхронизирован с post_analytics.STYLE_LABELS для индексации.
-TG_CAPTION_STYLES = [
-    ("short_hook", "короткий хук в одну строку + BPM/key + контакт. Без воды."),
-    ("minimal", "минимал — почти без слов, голые факты (имя, артист-тип, BPM/key, @iiiplfiii). 3-4 строки."),
-    ("storytelling", "сторителл — 3-4 строки про настроение бита и под что зайдёт. Затем BPM/key + контакт."),
-    ("question", "вопрос аудитории в конце — 2-3 строки, потом BPM/key, потом вопрос («кто пишет такое?» / «кому в работу?»)."),
-    ("emotional", "эмоциональный — короткие фразы, восклицание, скобки)) или многоточие… BPM/key + контакт."),
-]
-
-
 async def build_tg_caption_async(beat: BeatMeta, beat_id: int | None = None) -> tuple[str, str]:
-    """LLM-генерация подписи в голосе iiiplfiii-voice + bot-footer.
+    """LLM-генерация подписи к upload'у бита в voice автора.
 
-    LLM пишет основную часть (в voice автора), после неё deterministic
-    bot-footer с ссылкой на бот для каталога и покупки. Возвращает
-    (text, style_label). При сбое LLM — fallback на шаблон.
+    Структура результата:
+        <LLM-текст: 1-3 короткие строки в тоне автора>
+        <tech-line: BPM / key>
+        <footer: каталог + MP3 Lease deep-link>
+        <hashtag-nav: #artist #scene #bpmXXX #typebeat>
+
+    LLM пишет ТОЛЬКО художественную часть. BPM/key и прочая техника
+    добавляются deterministic'но. Это делает LLM «помощником который
+    подкинул 2 строки», а не маркетологом который всё упаковывает.
+
+    Возвращает (full_caption, style_label) — label всегда "minimal"
+    после 2026-04-20 (один стиль вместо 5 ротирующихся).
     """
     footer = _bot_footer(beat_id)
+    tech = _tech_line(beat)
     try:
         import post_generator
         prof = _get_profile(beat.artist_raw)
-        style_label, style = random.choice(TG_CAPTION_STYLES)
         user_msg = (
-            f"Сгенерируй подпись к АУДИО-посту в канал @iiiplfiii для свежего бита.\n\n"
-            f"Метаданные:\n"
-            f"- Имя бита: {beat.name}\n"
-            f"- Артист (type beat для): {beat.artist_line}\n"
+            f"Короткая подпись к аудио-посту для канала @iiiplfiii. Свежий бит.\n\n"
+            f"Метаданные (для контекста, можешь использовать что хочешь):\n"
+            f"- Имя: {beat.name}\n"
+            f"- Type beat для: {beat.artist_display}\n"
             f"- Сцена: {prof['scene']}\n"
-            f"- Настроение/mood: {prof['mood']}\n"
-            f"- BPM: {beat.bpm}\n"
-            f"- Key: {beat.key}\n\n"
-            f"Стиль этой подписи: {style}\n\n"
-            f"Жёсткие требования:\n"
-            f"- 2-5 строк, plain text. ЗАПРЕЩЕНО: хэштеги (#что_угодно), markdown (**, __, ~~), кавычки вокруг всего поста\n"
-            f"- От первого лица, в голосе автора (см. system-prompt)\n"
-            f"- ОБЯЗАТЕЛЬНО упомянуть имя бита «{beat.name}» и артиста «{beat.artist_display}»\n"
-            f"- BPM и key — где-то в тексте (можно одной строкой типа «{beat.key} · {beat.bpm}»)\n"
-            f"- Минимум эмодзи (0-3 шт), только из whitelist (🎧 🎵 🔥 🎹 ⚡)\n"
-            f"- НЕ ПИШИ ссылки / контакты / @handles — они добавляются автоматически снизу\n"
-            f"- Никаких «Пиши в ЛС за beat» — звучит как продаван.\n"
+            f"- Настроение: {prof['mood']}\n\n"
+            f"Правила:\n"
+            f"- 1-3 короткие строки, не больше\n"
+            f"- ОБЯЗАТЕЛЬНО упомянуть имя бита «{beat.name}»\n"
+            f"- БЕЗ BPM/key — они добавятся отдельно\n"
+            f"- БЕЗ хэштегов, БЕЗ ссылок, БЕЗ @handles — тоже добавятся отдельно\n"
+            f"- БЕЗ markdown (**, __, ~~)\n"
+            f"- 0-1 эмодзи (часто 0)\n"
+            f"- Живой тон автора: короткие рваные фразы, первое лицо, можно lowercase\n"
             f"{post_generator.ANTI_AI_BLOCK}\n"
-            f"Верни ТОЛЬКО подпись, без преамбулы, без кавычек."
+            f"Верни ТОЛЬКО эти 1-3 строки подписи. Без заголовков, без 'Caption:'."
         )
-        text = await post_generator._call_llm(user_msg, max_tokens=200, temperature=0.95)
-        text = text.strip().strip('"\'')
+        text = await post_generator._call_llm(user_msg, max_tokens=150, temperature=0.95)
+        text = text.strip().strip('"\'').strip()
         # Удаляем хэштег-простыни в конце (LLM иногда добавляет вопреки промпту)
         text = re.sub(r"\n+#[\w_]+(\s+#[\w_]+)*\s*$", "", text).rstrip()
         if beat.name.lower() not in text.lower():
             logger.warning("LLM caption не содержит имя бита, fallback. Got: %r", text[:120])
             return build_tg_caption(beat, beat_id=beat_id), "fallback"
-        return f"{text}\n\n{footer}\n\n{_hashtag_nav(beat)}", style_label
+        return f"{text}\n{tech}\n\n{footer}\n\n{_hashtag_nav(beat)}", "minimal"
     except Exception as e:
         logger.warning("build_tg_caption_async failed: %s — fallback", e)
         return build_tg_caption(beat, beat_id=beat_id), "fallback"

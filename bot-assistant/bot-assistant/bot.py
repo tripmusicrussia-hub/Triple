@@ -47,43 +47,9 @@ batch_report_task = None  # текущий таймер отчёта
 beat_plays = {}
 beat_plays_users = {}
 
-# Превью автопостов в канал: token → payload (rubric, kind, text, beat).
-# Персистится на диск (Render free tier часто перезапускается — без persist
-# после рестарта юзер жал "Опубликовать" и получал "Превью устарело" вместо
-# публикации; это был скрытый баг). Файл ниже обновляется при append/pop.
-pending_posts: dict[str, dict] = {}
-PENDING_POSTS_PATH = os.path.join(BASE_DIR, "pending_posts.json")
-
-
-def _persist_pending_posts() -> None:
-    """Сбрасывает pending_posts на диск. Payload уже JSON-serializable
-    (kind/rubric/text/topic/issues/weekday — примитивы, beat — dict).
-    """
-    try:
-        import json as _json
-        with open(PENDING_POSTS_PATH, "w", encoding="utf-8") as f:
-            _json.dump(pending_posts, f, ensure_ascii=False, indent=2)
-    except Exception:
-        logger.exception("persist pending_posts failed (non-fatal)")
-
-
-def _restore_pending_posts() -> int:
-    """Восстанавливает pending_posts с диска в post_init."""
-    if not os.path.exists(PENDING_POSTS_PATH):
-        return 0
-    try:
-        import json as _json
-        with open(PENDING_POSTS_PATH, "r", encoding="utf-8") as f:
-            data = _json.load(f)
-        if isinstance(data, dict):
-            pending_posts.update(data)
-            return len(data)
-    except Exception:
-        logger.exception("restore pending_posts failed")
-    return 0
-
-
-# CHANNEL_POST_HOUR теперь в config.py (env-configurable с дефолтом 16 МСК)
+# (Автопостинг текстовых рубрик удалён 2026-04-20 — автор сам пишет посты.
+# Остаётся только upload-flow битов, превью которого через pending_uploads
+# в памяти — при redeploy файлы mp3/video всё равно пропадают.)
 
 # Общий helper для user-facing ошибок. Полный exception должен быть уже
 # залогирован через logger.exception() выше по стеку — юзеру показываем
@@ -475,7 +441,6 @@ def kb_admin():
         [InlineKeyboardButton(queue_label, callback_data="admin_queue")],
         [InlineKeyboardButton("📌 Обновить закреп-пост (навигация)", callback_data="admin_pin_hub")],
         [InlineKeyboardButton("🗑 Удалить бит из каталога", callback_data="admin_clearbeats")],
-        [InlineKeyboardButton("📡 Автопост в канал", callback_data="admin_channelpost")],
         [InlineKeyboardButton("🎬 YouTube", callback_data="admin_yt_menu")],
     ])
 
@@ -507,32 +472,6 @@ def kb_admin_yt():
         [InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")],
     ])
 
-
-def kb_admin_channel():
-    dry = "🧪 DRY " if os.getenv("POST_DRY_RUN") == "1" else ""
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"⚡ {dry}Сгенерить на сегодня", callback_data="admin_postnow_today")],
-        [InlineKeyboardButton("Пн Memphis Monday", callback_data="admin_postnow_0"),
-         InlineKeyboardButton("Пт Hard Friday", callback_data="admin_postnow_4")],
-        [InlineKeyboardButton("Вт Trick of the week", callback_data="admin_postnow_1"),
-         InlineKeyboardButton("Ср Flow moments", callback_data="admin_postnow_2")],
-        [InlineKeyboardButton("Чт Что слушаю", callback_data="admin_postnow_3"),
-         InlineKeyboardButton("Сб Звук из воздуха", callback_data="admin_postnow_5")],
-        [InlineKeyboardButton("Вс Low & dark", callback_data="admin_postnow_6")],
-        [InlineKeyboardButton("➕ Добавить тему в бэклог", callback_data="admin_idea_menu")],
-        [InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")],
-    ])
-
-
-def kb_admin_idea_day():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Вт Trick of the week", callback_data="admin_idea_1"),
-         InlineKeyboardButton("Ср Flow moments", callback_data="admin_idea_2")],
-        [InlineKeyboardButton("Чт Что слушаю", callback_data="admin_idea_3"),
-         InlineKeyboardButton("Сб Звук из воздуха", callback_data="admin_idea_5")],
-        [InlineKeyboardButton("Вс Low & dark", callback_data="admin_idea_6")],
-        [InlineKeyboardButton("◀️ Назад", callback_data="admin_channelpost")],
-    ])
 
 # ── Утилиты ───────────────────────────────────────────────────
 
@@ -782,83 +721,6 @@ async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 
-# ── /postnow и /idea — автопостинг в канал ────────────────────
-
-RUBRIC_ALIASES = {
-    "пн": 0, "mon": 0, "0": 0,
-    "вт": 1, "tue": 1, "1": 1,
-    "ср": 2, "wed": 2, "2": 2,
-    "чт": 3, "thu": 3, "3": 3,
-    "пт": 4, "fri": 4, "4": 4,
-    "сб": 5, "sat": 5, "5": 5,
-    "вс": 6, "sun": 6, "6": 6,
-}
-
-
-async def cmd_postnow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Сгенерировать preview автопоста сейчас. /postnow [день]. Только админ."""
-    if update.effective_user.id != ADMIN_ID:
-        return
-    weekday = None
-    if context.args:
-        arg = context.args[0].lower()
-        if arg in RUBRIC_ALIASES:
-            weekday = RUBRIC_ALIASES[arg]
-        else:
-            await update.message.reply_text("Рубрика: пн/вт/ср/чт/пт/сб/вс или 0-6")
-            return
-    await update.message.reply_text("⏳ Генерирую превью...")
-    await preview_daily_post(context.bot, ADMIN_ID, weekday=weekday)
-
-
-async def _append_idea(update: Update, wd: int, topic: str) -> None:
-    if wd not in (1, 2, 3, 5, 6):
-        await update.message.reply_text("Только текстовые рубрики: вт/ср/чт/сб/вс")
-        return
-    section = post_generator.RUBRIC_SCHEDULE[wd]["section"]
-    ideas_path = post_generator.POST_IDEAS_PATH
-    try:
-        text = ideas_path.read_text(encoding="utf-8")
-        lines = text.splitlines()
-        insert_idx = None
-        for i, line in enumerate(lines):
-            if line.startswith("## ") and section in line:
-                j = i + 1
-                while j < len(lines) and not lines[j].startswith("## "):
-                    j += 1
-                while j > i + 1 and lines[j - 1].strip() == "":
-                    j -= 1
-                insert_idx = j
-                break
-        if insert_idx is None:
-            await update.message.reply_text(f"⚠️ Раздел не найден: {section}")
-            return
-        lines.insert(insert_idx, f"- [ ] {topic}")
-        ideas_path.write_text("\n".join(lines) + ("\n" if text.endswith("\n") else ""), encoding="utf-8")
-        await update.message.reply_text(f"✅ Добавлено в «{section}»:\n- [ ] {topic}")
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ Ошибка: {e}")
-
-
-async def cmd_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Добавить тему в post_ideas.md. Формат: /idea <день> <тема>. Только админ."""
-    if update.effective_user.id != ADMIN_ID:
-        return
-    if len(context.args) < 2:
-        await update.message.reply_text(
-            "Формат: /idea <день> <тема>\n"
-            "Дни: вт, ср, чт, сб, вс"
-        )
-        return
-    day = context.args[0].lower()
-    topic = " ".join(context.args[1:]).strip()
-    wd = RUBRIC_ALIASES.get(day)
-    if wd is None:
-        await update.message.reply_text("Неизвестный день. Дни: вт/ср/чт/сб/вс")
-        return
-    await _append_idea(update, wd, topic)
-
-
 # ── /search ───────────────────────────────────────────────────
 
 async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1071,102 +933,6 @@ async def do_search(bot, chat_id, query, user_id):
                            reply_markup=InlineKeyboardMarkup(rows))
 
 
-# ── Автопостинг в канал @iiiplfiii ────────────────────────────
-WEEKDAY_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-
-
-def _post_preview_keyboard(token: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Опубликовать", callback_data="pub_" + token),
-         InlineKeyboardButton("🔄 Перегенерировать", callback_data="regen_" + token)],
-        [InlineKeyboardButton("❌ Отмена", callback_data="cancel_" + token)],
-    ])
-
-
-async def send_preview(bot, admin_id: int, payload: dict) -> None:
-    """Показывает preview админу в ЛС с кнопками."""
-    token = uuid.uuid4().hex[:12]
-    pending_posts[token] = payload
-    _persist_pending_posts()
-    wd = datetime.now().weekday()
-    header = f"📅 {WEEKDAY_RU[wd]} — {payload['rubric']} [{payload['kind']}]"
-    issues = payload.get("issues") or []
-    if issues:
-        header = "⚠️ automod не прошёл: " + "; ".join(issues) + "\n" + header
-    kb = _post_preview_keyboard(token)
-    try:
-        if payload["kind"] == "audio" and payload.get("beat"):
-            beat = payload["beat"]
-            caption = header + "\n\n" + payload["text"]
-            if len(caption) > 1024:
-                caption = caption[:1020] + "..."
-            await bot.send_audio(admin_id, audio=beat["file_id"], caption=caption, reply_markup=kb)
-        else:
-            await bot.send_message(admin_id, header + "\n\n" + payload["text"], reply_markup=kb)
-    except Exception as e:
-        logger.error("send_preview error: %s", e)
-        await bot.send_message(admin_id, f"⚠️ Ошибка preview: {e}")
-
-
-async def preview_daily_post(bot, admin_id: int, weekday: int | None = None) -> None:
-    try:
-        payload = await post_generator.generate_today_post(weekday=weekday)
-    except Exception as e:
-        logger.error("generate_today_post failed: %s", e)
-        await bot.send_message(admin_id, f"⚠️ Генерация упала: {e}")
-        return
-    await send_preview(bot, admin_id, payload)
-
-
-async def daily_channel_scheduler(bot, admin_id: int):
-    """Каждый день в 16:00 МСК готовит preview автопоста и шлёт админу в ЛС."""
-    while True:
-        try:
-            now = datetime.now(MSK_TZ)
-            target = now.replace(hour=CHANNEL_POST_HOUR, minute=0, second=0, microsecond=0)
-            if now >= target:
-                target += timedelta(days=1)
-            wait_s = (target - now).total_seconds()
-            logger.info("daily_channel_scheduler: sleep until %s MSK (%.0fs)", target.isoformat(), wait_s)
-            await asyncio.sleep(wait_s)
-            if admin_id:
-                await preview_daily_post(bot, admin_id)
-        except Exception as e:
-            logger.error("daily_channel_scheduler: %s", e)
-            await asyncio.sleep(60)
-
-
-async def publish_to_channel(bot, payload: dict) -> bool:
-    """Публикует payload в CHANNEL_ID. Возвращает True при успехе.
-    Если POST_DRY_RUN=1 — шлёт в ЛС админа с пометкой и НЕ трогает cooldown/темы."""
-    dry_run = os.getenv("POST_DRY_RUN") == "1"
-    target = ADMIN_ID if dry_run else CHANNEL_ID
-    if not target:
-        logger.error("Не задан target (CHANNEL_ID или ADMIN_ID)")
-        return False
-    prefix = "🧪 [DRY RUN — было бы в канале]\n\n" if dry_run else ""
-    try:
-        if payload["kind"] == "audio" and payload.get("beat"):
-            beat = payload["beat"]
-            caption = prefix + payload["text"]
-            if len(caption) > 1024:
-                caption = caption[:1020] + "..."
-            buy_kb = kb_channel_beat_buy(beat["id"])
-            await bot.send_audio(target, audio=beat["file_id"], caption=caption, reply_markup=buy_kb)
-            if not dry_run:
-                post_generator.mark_beat_posted(beat["id"])
-        else:
-            await bot.send_message(target, prefix + payload["text"])
-            if not dry_run:
-                topic = payload.get("topic")
-                if topic:
-                    post_generator.mark_topic_used(topic)
-        return True
-    except Exception as e:
-        logger.error("publish_to_channel error: %s", e)
-        return False
-
-
 # ══════════════════════════════════════════════════════════════
 # CALLBACK HANDLER
 # ══════════════════════════════════════════════════════════════
@@ -1187,13 +953,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not beats_db.BEATS_CACHE and os.path.exists(beats_db.BEATS_FILE):
         logger.warning("handle_callback: cache пуст, перечитываю beats_data.json")
         beats_db.load_beats()
-
-    if data == "admin_channelpost":
-        if user_id != ADMIN_ID:
-            return
-        dry_hint = "\n🧪 DRY_RUN включён — публикация пойдёт тебе в ЛС" if os.getenv("POST_DRY_RUN") == "1" else ""
-        await query.message.reply_text("📡 Автопост в канал:" + dry_hint, reply_markup=kb_admin_channel())
-        return
 
     if data == "admin_yt_menu":
         if user_id != ADMIN_ID:
@@ -1485,85 +1244,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _delete_preview_messages(context.bot, payload)
         _cleanup_upload(token)
         return
-
-    if data.startswith("admin_postnow_"):
-        if user_id != ADMIN_ID:
-            return
-        arg = data[len("admin_postnow_"):]
-        wd = None if arg == "today" else int(arg)
-        await query.message.reply_text("⏳ Генерирую превью...")
-        await preview_daily_post(bot, ADMIN_ID, weekday=wd)
-        return
-
-    if data == "admin_idea_menu":
-        if user_id != ADMIN_ID:
-            return
-        await query.message.reply_text(
-            "➕ Выбери рубрику для новой темы:", reply_markup=kb_admin_idea_day()
-        )
-        return
-
-    if data.startswith("admin_idea_") and data != "admin_idea_menu":
-        if user_id != ADMIN_ID:
-            return
-        wd = int(data[len("admin_idea_"):])
-        bulk_add_mode[str(ADMIN_ID) + "_idea"] = wd
-        section = post_generator.RUBRIC_SCHEDULE[wd]["section"]
-        await query.message.reply_text(
-            f"✍️ Пришли следующим сообщением текст темы для «{section}».\n"
-            "Пример: «Pro-Q 3 dynamic EQ на 200 Hz у 808»\n\n"
-            "Отменить — /cancel"
-        )
-        return
-
-    if data.startswith(("pub_", "regen_", "cancel_")):
-        if user_id != ADMIN_ID:
-            await query.answer("Только админ", show_alert=True)
-            return
-        action, token = data.split("_", 1)
-        payload = pending_posts.get(token)
-        if not payload:
-            await query.answer("Превью уже обработано или устарело", show_alert=True)
-            try:
-                await query.message.edit_reply_markup(reply_markup=None)
-            except Exception:
-                pass
-            return
-
-        if action == "pub":
-            ok = await publish_to_channel(bot, payload)
-            pending_posts.pop(token, None)
-            _persist_pending_posts()
-            try:
-                await query.message.edit_reply_markup(reply_markup=None)
-            except Exception:
-                pass
-            if ok:
-                await bot.send_message(user_id, f"✅ Опубликовано в канал ({payload['rubric']})")
-            else:
-                await bot.send_message(user_id, "⚠️ Не удалось опубликовать — смотри логи")
-            return
-
-        if action == "regen":
-            pending_posts.pop(token, None)
-            _persist_pending_posts()
-            try:
-                await query.message.edit_reply_markup(reply_markup=None)
-            except Exception:
-                pass
-            await bot.send_message(user_id, "🔄 Перегенерирую...")
-            await preview_daily_post(bot, user_id, weekday=payload.get("weekday"))
-            return
-
-        if action == "cancel":
-            pending_posts.pop(token, None)
-            _persist_pending_posts()
-            try:
-                await query.message.edit_reply_markup(reply_markup=None)
-            except Exception:
-                pass
-            await bot.send_message(user_id, "❌ Отменено")
-            return
 
     if data == "prod_abort":
         if user_id != ADMIN_ID:
@@ -2983,17 +2663,6 @@ async def handle_assistant(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if bulk_add_mode.get(ADMIN_ID) in ("beat", "track", "remix"):
             return
 
-        # Ввод новой темы в post_ideas.md (из inline-меню)
-        idea_key = str(ADMIN_ID) + "_idea"
-        if idea_key in bulk_add_mode:
-            if text.strip() == "/cancel":
-                del bulk_add_mode[idea_key]
-                await update.message.reply_text("❌ Отменено")
-                return
-            wd = bulk_add_mode.pop(idea_key)
-            await _append_idea(update, wd, text.strip())
-            return
-
         import agent_router
         agent_handle = agent_router.handle
     else:
@@ -3356,16 +3025,6 @@ async def post_init(application):
             logger.info("pending_products: restored %d items on startup", restored)
     except Exception:
         logger.exception("pending_products restore failed (non-fatal)")
-    # Восстанавливаем pending_posts — превью автопостов, на которые админ
-    # ещё не нажал "Опубликовать". Без restore после redeploy клик на кнопку
-    # приводил к "Превью устарело" вместо публикации.
-    try:
-        restored = _restore_pending_posts()
-        if restored:
-            logger.info("pending_posts: restored %d items on startup", restored)
-    except Exception:
-        logger.exception("pending_posts restore failed (non-fatal)")
-    asyncio.create_task(daily_channel_scheduler(application.bot, ADMIN_ID))
     asyncio.create_task(scheduled_publish_loop(application.bot))
     asyncio.create_task(heartbeat_scheduler())
     asyncio.create_task(asyncio.to_thread(_warmup_ffmpeg))
@@ -3621,8 +3280,6 @@ async def run_bot():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("admin", cmd_admin))
     app.add_handler(CommandHandler("diag", cmd_diag))
-    app.add_handler(CommandHandler("postnow", cmd_postnow))
-    app.add_handler(CommandHandler("idea", cmd_idea))
     app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("queue", cmd_queue))
