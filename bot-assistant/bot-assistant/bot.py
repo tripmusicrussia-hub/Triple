@@ -2012,6 +2012,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id != ADMIN_ID: return
         import publish_scheduler
         n = publish_scheduler.queue_size()
+        # Safety net: если память пустая — перечитать из Supabase on-demand.
+        # Покрывает случай когда post_init.load_queue молча вернул 0 (SDK quirk,
+        # RLS, cold-start timeout). Юзер может кликом «разбудить» очередь.
+        if n == 0:
+            try:
+                n = publish_scheduler.load_queue()
+                logger.info("admin_queue: reloaded %d items from Supabase on-demand", n)
+            except Exception:
+                logger.exception("admin_queue: on-demand reload failed")
         if n == 0:
             await _nav_reply(
                 query,
@@ -3041,6 +3050,7 @@ async def heartbeat_scheduler():
 
 
 async def post_init(application):
+    print("[POSTINIT] entered", flush=True)
     try:
         await application.bot.delete_webhook(drop_pending_updates=True)
         logger.info("post_init: webhook cleared, pending updates dropped")
@@ -3058,11 +3068,14 @@ async def post_init(application):
     load_users()
     logger.info("Bot started: " + str(len(beats_db.BEATS_CACHE)) + " beats, " + str(len(all_users)) + " users")
     # Восстанавливаем очередь плановых публикаций с диска
+    print("[POSTINIT] before load_queue", flush=True)
     try:
         import publish_scheduler
         n = publish_scheduler.load_queue()
+        print(f"[POSTINIT] after load_queue: n={n}", flush=True)
         logger.info("publish_scheduler: restored %d queued items on startup", n)
-    except Exception:
+    except Exception as e:
+        print(f"[POSTINIT] load_queue FAILED: {type(e).__name__}: {e}", flush=True)
         logger.exception("publish_scheduler restore failed (non-fatal)")
     # Восстанавливаем pending_products — недосохранённые продукты на preview-шаге.
     try:
