@@ -20,6 +20,7 @@ from config import (
     WELCOME_TEXT, CATALOG_INTRO, ADMIN_ID, CHANNEL_POST_HOUR,
 )
 import beats_db
+import beat_post_builder
 import users_db
 import post_generator
 import licensing
