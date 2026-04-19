@@ -23,15 +23,32 @@ def _rebuild_index() -> None:
 
 
 def save_beats() -> None:
-    """Атомарная запись beats_data.json: tmp-файл + os.replace.
+    """Атомарная запись beats_data.json: tmp-файл + os.replace + .bak rotation.
 
-    Защита от порчи файла при прерывании (Render restart, kill -9, etc).
-    Без этого `open(path, "w")` сначала truncate'ит target до 0 bytes,
-    потом пишет — в окне между truncate и write файл может остаться
-    пустым/битым, что ломает весь каталог после рестарта.
+    Защита от порчи файла при прерывании (Render restart, kill -9, etc):
+    * Перед записью копируем текущий валидный файл в .bak — это
+      known-good snapshot для auto-recovery в load_beats().
+    * Пишем новые данные в .tmp → os.replace() atomic на target.
     """
+    import shutil
     tmp = BEATS_FILE + ".tmp"
+    bak = BEATS_FILE + ".bak"
     try:
+        # Rotate: текущий валидный файл → .bak (перед его перезаписью).
+        # copy (не rename), чтобы target оставался доступен читателям
+        # пока мы пишем .tmp. Валидируем JSON перед копированием —
+        # чтобы не затереть валидный .bak битым target'ом (может
+        # такое случиться если до этого fix'а файл уже побит).
+        # Best-effort — не блокируем основную запись.
+        if os.path.exists(BEATS_FILE):
+            try:
+                with open(BEATS_FILE, "r", encoding="utf-8") as f:
+                    cur = json.load(f)
+                if isinstance(cur, list):
+                    shutil.copy2(BEATS_FILE, bak)
+            except Exception:
+                pass  # target битый — НЕ трогаем .bak (он может быть валидным)
+
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(BEATS_CACHE, f, ensure_ascii=False, indent=2)
             f.flush()
@@ -50,31 +67,101 @@ def save_beats() -> None:
             pass
 
 
-def load_beats() -> None:
-    """Загружает beats_data.json в BEATS_CACHE + строит BEATS_BY_ID индекс.
+def _try_load_file(path: str) -> bool:
+    """Пробует загрузить path в BEATS_CACHE. Возвращает True при успехе.
 
-    При ошибке парсинга — оставляет пустые CACHE/INDEX (критично: оба
-    должны быть синхронизированы, иначе get_beat_by_id() вернёт stale
-    запись из пустого каталога).
+    Валидирует: файл существует + парсится как JSON + top-level list.
+    При ошибке — НЕ трогает BEATS_CACHE, возвращает False.
     """
-    import traceback
     global BEATS_CACHE
+    if not os.path.exists(path):
+        return False
     try:
-        if os.path.exists(BEATS_FILE):
-            size = os.path.getsize(BEATS_FILE)
-            logger.info("load_beats: reading %s (%d bytes)", BEATS_FILE, size)
-            with open(BEATS_FILE, "r", encoding="utf-8") as f:
-                BEATS_CACHE = json.load(f)
-            _rebuild_index()
-            logger.info("Beats loaded: %d", len(BEATS_CACHE))
-        else:
-            logger.warning("load_beats: file not found at %s", BEATS_FILE)
-            BEATS_CACHE = []
-            _rebuild_index()
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            logger.warning("load_beats: %s is not a list (got %s)", path, type(data).__name__)
+            return False
+        BEATS_CACHE = data
+        _rebuild_index()
+        logger.info("load_beats: loaded %d from %s", len(BEATS_CACHE), path)
+        return True
     except Exception as e:
-        logger.error("Load error: %s\n%s", e, traceback.format_exc())
-        BEATS_CACHE = []
-        _rebuild_index()  # критично: синхронизируем индекс с пустым кэшем
+        logger.warning("load_beats: %s failed to parse: %s", path, e)
+        return False
+
+
+def _git_checkout_beats_file() -> bool:
+    """Last-resort recovery: git checkout HEAD -- beats_data.json.
+
+    Render держит полный git clone — возвращает версию из последнего
+    коммита (пусть устаревшую, но точно валидную). True если команда
+    отработала без ошибок; дальше load_beats пробует прочитать файл.
+    """
+    import subprocess
+    try:
+        # Путь от repo root до файла (bot-assistant/bot-assistant/beats_data.json)
+        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        rel_path = os.path.relpath(BEATS_FILE, repo_root)
+        result = subprocess.run(
+            ["git", "checkout", "HEAD", "--", rel_path],
+            cwd=repo_root,
+            timeout=10,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            logger.warning("git checkout failed (rc=%d): %s", result.returncode, result.stderr[-300:])
+            return False
+        logger.info("git checkout %s: OK", rel_path)
+        return True
+    except Exception as e:
+        logger.warning("git checkout exception: %s", e)
+        return False
+
+
+def load_beats() -> None:
+    """Загружает beats_data.json в BEATS_CACHE с 3 уровнями recovery:
+
+    1. Основной файл BEATS_FILE
+    2. .bak (known-good snapshot от предыдущего save)
+    3. git checkout HEAD (последняя commit'нутая версия)
+
+    Все три битые → оставляем пустой кэш, индекс синхронизирован.
+    Каждый уровень recovery логируется в WARNING — видно в Render logs.
+    """
+    global BEATS_CACHE
+
+    # Попытка 1: основной файл
+    if _try_load_file(BEATS_FILE):
+        return
+
+    # Попытка 2: .bak
+    bak = BEATS_FILE + ".bak"
+    if _try_load_file(bak):
+        logger.warning(
+            "load_beats: RECOVERED from .bak (%d beats) — main file был битый",
+            len(BEATS_CACHE),
+        )
+        # Пересоздаём target из .bak (save_beats сам опять скопирует в .bak)
+        try:
+            save_beats()
+        except Exception as e:
+            logger.warning("load_beats: re-save after .bak recovery failed: %s", e)
+        return
+
+    # Попытка 3: git-checkout последней commit'нутой версии
+    if _git_checkout_beats_file() and _try_load_file(BEATS_FILE):
+        logger.warning(
+            "load_beats: RECOVERED from git HEAD (%d beats) — и main и .bak битые",
+            len(BEATS_CACHE),
+        )
+        return
+
+    # Всё перепробовали — пустой кэш, индекс синхронизирован
+    BEATS_CACHE = []
+    _rebuild_index()
+    logger.error("load_beats: ALL recovery attempts failed, cache empty")
 
 
 def parse_tags_from_text(text: str | None) -> list[str]:

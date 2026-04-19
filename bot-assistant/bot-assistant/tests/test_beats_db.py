@@ -106,3 +106,97 @@ class TestInMemoryOps:
         beats_db._rebuild_index()
         result = beats_db.get_similar_beats(cur)
         assert any(b["id"] == 2 for b in result)
+
+
+class TestPersistenceAndRecovery:
+    """Тесты 3-уровневого recovery в load_beats + atomic save."""
+
+    def setup_method(self, tmp_path=None):
+        import tempfile
+        self._saved_cache = beats_db.BEATS_CACHE.copy()
+        self._saved_index = beats_db.BEATS_BY_ID.copy()
+        self._saved_path = beats_db.BEATS_FILE
+        # Используем временный путь чтоб не трогать реальные данные
+        self._tmp_dir = tempfile.mkdtemp()
+        beats_db.BEATS_FILE = f"{self._tmp_dir}/test_beats.json"
+
+    def teardown_method(self):
+        import shutil
+        beats_db.BEATS_FILE = self._saved_path
+        beats_db.BEATS_CACHE.clear()
+        beats_db.BEATS_CACHE.extend(self._saved_cache)
+        beats_db.BEATS_BY_ID.clear()
+        beats_db.BEATS_BY_ID.update(self._saved_index)
+        shutil.rmtree(self._tmp_dir, ignore_errors=True)
+
+    def test_save_round_trip(self):
+        beats_db.BEATS_CACHE.extend([{"id": 1, "name": "a", "tags": []}])
+        beats_db._rebuild_index()
+        beats_db.save_beats()
+
+        # Симулируем рестарт
+        beats_db.BEATS_CACHE.clear()
+        beats_db.BEATS_BY_ID.clear()
+        beats_db.load_beats()
+        assert len(beats_db.BEATS_CACHE) == 1
+        assert beats_db.get_beat_by_id(1)["name"] == "a"
+
+    def test_save_creates_bak_after_second_save(self):
+        # Первый save: .bak ещё не создаётся (target не существовал до)
+        beats_db.BEATS_CACHE.append({"id": 1, "name": "v1", "tags": []})
+        beats_db.save_beats()
+
+        # Второй save: теперь target существует → .bak должен быть создан
+        beats_db.BEATS_CACHE.append({"id": 2, "name": "v2", "tags": []})
+        beats_db.save_beats()
+
+        import os
+        bak = beats_db.BEATS_FILE + ".bak"
+        assert os.path.exists(bak), f"{bak} not created"
+        import json
+        with open(bak, encoding="utf-8") as f:
+            bak_data = json.load(f)
+        # .bak содержит состояние ДО второго save — только 1 запись
+        assert len(bak_data) == 1
+        assert bak_data[0]["name"] == "v1"
+
+    def test_recovery_from_bak_when_main_corrupted(self):
+        # Сначала создаём валидный каталог + его .bak
+        beats_db.BEATS_CACHE.extend([{"id": 1, "name": "a", "tags": []}])
+        beats_db.save_beats()
+        beats_db.BEATS_CACHE.append({"id": 2, "name": "b", "tags": []})
+        beats_db.save_beats()  # теперь target и .bak оба валидны
+
+        # Портим main-файл
+        with open(beats_db.BEATS_FILE, "w", encoding="utf-8") as f:
+            f.write("{broken json}")
+
+        # load_beats должен восстановиться из .bak
+        beats_db.BEATS_CACHE.clear()
+        beats_db.BEATS_BY_ID.clear()
+        beats_db.load_beats()
+        assert len(beats_db.BEATS_CACHE) >= 1  # из .bak (может быть 1 или 2 в зависимости от timing)
+
+    def test_both_corrupted_empty_cache_synced_index(self):
+        import os
+        # Битый main + битый .bak + git-checkout недоступен (tmp не git)
+        with open(beats_db.BEATS_FILE, "w") as f:
+            f.write("garbage")
+        with open(beats_db.BEATS_FILE + ".bak", "w") as f:
+            f.write("also garbage")
+
+        beats_db.BEATS_CACHE.append({"id": 999, "name": "stale"})
+        beats_db.BEATS_BY_ID[999] = {"id": 999}
+        beats_db.load_beats()
+
+        assert beats_db.BEATS_CACHE == []
+        assert beats_db.get_beat_by_id(999) is None, "stale index not cleared"
+
+    def test_try_load_rejects_non_list(self):
+        import json
+        with open(beats_db.BEATS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"not": "a list"}, f)
+        assert beats_db._try_load_file(beats_db.BEATS_FILE) is False
+
+    def test_try_load_returns_false_for_missing(self):
+        assert beats_db._try_load_file("/nonexistent/path") is False
