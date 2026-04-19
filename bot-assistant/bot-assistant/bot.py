@@ -184,6 +184,14 @@ ARTIST_TAGS = [
 # ── Сохранение / загрузка ─────────────────────────────────────
 
 def save_users():
+    """Атомарная запись users_data.json: tmp + os.replace.
+
+    Тот же паттерн что у save_beats — защита от corruption при Render
+    restart в середине записи. Без этого юзер терял `users_received_pack`
+    и получал sample_pack при каждом /start, плюс все подписчики
+    пропадали из all_users (и `/admin` показывал 0 польз.).
+    """
+    tmp = USERS_FILE + ".tmp"
     try:
         data = {
             "all_users": {str(k): v for k, v in all_users.items()},
@@ -191,10 +199,21 @@ def save_users():
             "subscribed_users": list(subscribed_users),
             "user_favorites": {str(k): v for k, v in user_favorites.items()},
         }
-        with open(USERS_FILE, "w", encoding="utf-8") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+        os.replace(tmp, USERS_FILE)
     except Exception as e:
-        logger.error("Save users error: " + str(e))
+        logger.error("Save users error: %s", e)
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
 
 def load_users():
     global all_users, users_received_pack, subscribed_users, user_favorites
@@ -726,6 +745,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
+    # Defensive reload — если cache пустой, но файл на диске есть
+    # (аналогично show_main_menu). Покрывает case когда /admin сработал
+    # до load_beats в post_init, или после cold start без прогрева.
+    if not beats_db.BEATS_CACHE and os.path.exists(beats_db.BEATS_FILE):
+        logger.warning("cmd_admin: cache пуст, перечитываю beats_data.json")
+        beats_db.load_beats()
+    if not all_users and os.path.exists(USERS_FILE):
+        logger.warning("cmd_admin: all_users пуст, перечитываю users_data.json")
+        load_users()
     await update.message.reply_text("🎛 Панель управления:", reply_markup=kb_admin())
 
 

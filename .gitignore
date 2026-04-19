@@ -32,6 +32,17 @@ bot-assistant/bot-assistant/assets/loops/
 bot-assistant/bot-assistant/yt_cookies.txt
 bot-assistant/bot-assistant/scheduled_uploads.json
 
+# Runtime state: users + pending previews — прод-данные бота,
+# хранятся на Render disk, в git не публикуем (плюс приватные данные
+# пользователей). Persistence между Render redeploy'ями — отдельная
+# задача (Supabase).
+bot-assistant/bot-assistant/users_data.json
+bot-assistant/bot-assistant/users_data.json.tmp
+bot-assistant/bot-assistant/users_data.json.bak
+bot-assistant/bot-assistant/pending_posts.json
+bot-assistant/bot-assistant/pending_products.json
+bot-assistant/bot-assistant/heartbeat.txt
+
 # OS
 .DS_Store
 Thumbs.db
