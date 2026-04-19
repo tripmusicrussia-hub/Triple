@@ -44,11 +44,43 @@ batch_stats = {"added": 0, "skipped": 0}
 batch_report_task = None  # текущий таймер отчёта
 beat_plays = {}
 beat_plays_users = {}
-giveaway = {"active": False, "prize_file": None, "prize_name": "", "end_time": None, "participants": {}}
 
-# Превью автопостов в канал: token → payload (rubric, kind, text, beat)
-# Живёт в RAM; если бот перезапустится до подтверждения — превью теряется (ок, сгенерится снова по таймеру)
+# Превью автопостов в канал: token → payload (rubric, kind, text, beat).
+# Персистится на диск (Render free tier часто перезапускается — без persist
+# после рестарта юзер жал "Опубликовать" и получал "Превью устарело" вместо
+# публикации; это был скрытый баг). Файл ниже обновляется при append/pop.
 pending_posts: dict[str, dict] = {}
+PENDING_POSTS_PATH = os.path.join(BASE_DIR, "pending_posts.json")
+
+
+def _persist_pending_posts() -> None:
+    """Сбрасывает pending_posts на диск. Payload уже JSON-serializable
+    (kind/rubric/text/topic/issues/weekday — примитивы, beat — dict).
+    """
+    try:
+        import json as _json
+        with open(PENDING_POSTS_PATH, "w", encoding="utf-8") as f:
+            _json.dump(pending_posts, f, ensure_ascii=False, indent=2)
+    except Exception:
+        logger.exception("persist pending_posts failed (non-fatal)")
+
+
+def _restore_pending_posts() -> int:
+    """Восстанавливает pending_posts с диска в post_init."""
+    if not os.path.exists(PENDING_POSTS_PATH):
+        return 0
+    try:
+        import json as _json
+        with open(PENDING_POSTS_PATH, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+        if isinstance(data, dict):
+            pending_posts.update(data)
+            return len(data)
+    except Exception:
+        logger.exception("restore pending_posts failed")
+    return 0
+
+
 # CHANNEL_POST_HOUR теперь в config.py (env-configurable с дефолтом 16 МСК)
 
 # Общий helper для user-facing ошибок. Полный exception должен быть уже
@@ -423,17 +455,6 @@ def kb_channel_beat_buy(beat_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("✍️ WAV / Unlimited / Exclusive", url="https://t.me/iiiplfiii")],
     ])
 
-def kb_giveaway():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎁 Участвовать!", callback_data="join_giveaway")],
-        [InlineKeyboardButton("👥 Сколько участников?", callback_data="giveaway_stats")],
-    ])
-
-def kb_repost():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📢 Перейти в канал для репоста", url=CHANNEL_LINK)],
-        [InlineKeyboardButton("✅ Я сделал репост!", callback_data="confirm_repost")],
-    ])
 
 def kb_admin():
     beats = len([b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == "beat"])
@@ -460,7 +481,6 @@ def kb_admin():
         [InlineKeyboardButton("🗑 Удалить бит из каталога", callback_data="admin_clearbeats")],
         [InlineKeyboardButton("📡 Автопост в канал", callback_data="admin_channelpost")],
         [InlineKeyboardButton("🎬 YouTube", callback_data="admin_yt_menu")],
-        [InlineKeyboardButton("🎁 Розыгрыш: " + ("🟢 Активен" if giveaway["active"] else "🔴 Нет"), callback_data="admin_giveaway")],
     ])
 
 
@@ -487,7 +507,6 @@ def kb_admin_queue():
 def kb_admin_yt():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Статистика канала", callback_data="admin_yt_stats")],
-        [InlineKeyboardButton("🔧 Batch-fix 10 type beats", callback_data="admin_yt_fix_confirm")],
         [InlineKeyboardButton("🔍 Diag OAuth env", callback_data="admin_yt_diag")],
         [InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")],
     ])
@@ -518,15 +537,6 @@ def kb_admin_idea_day():
         [InlineKeyboardButton("Вс Итог + вопрос", callback_data="admin_idea_6")],
         [InlineKeyboardButton("◀️ Назад", callback_data="admin_channelpost")],
     ])
-
-def kb_admin_giveaway():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎁 Запустить (/giveaway)", callback_data="admin_giveaway_hint")],
-        [InlineKeyboardButton("🏁 Завершить", callback_data="admin_giveaway_end")],
-        [InlineKeyboardButton("📊 Статистика", callback_data="admin_giveaway_stats")],
-        [InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")],
-    ])
-
 
 # ── Утилиты ───────────────────────────────────────────────────
 
@@ -709,8 +719,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
     await show_main_menu(bot, user_id)
-    if giveaway["active"]:
-        await bot.send_message(user_id, "🎁 Идёт розыгрыш! Приз: " + giveaway["prize_name"], reply_markup=kb_giveaway())
 
 
 # ── /admin ────────────────────────────────────────────────────
@@ -1029,29 +1037,6 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
-# ── /giveaway ─────────────────────────────────────────────────
-
-async def cmd_giveaway(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    if giveaway["active"]:
-        await update.message.reply_text("Розыгрыш уже идёт!")
-        return
-    if len(context.args) < 2:
-        await update.message.reply_text("Формат: /giveaway 24 Название")
-        return
-    try:
-        hours = int(context.args[0])
-        prize_name = " ".join(context.args[1:])
-    except ValueError:
-        await update.message.reply_text("Ошибка! Формат: /giveaway 24 Название")
-        return
-    end_time = datetime.now() + timedelta(hours=hours)
-    giveaway.update({"active": True, "prize_name": prize_name, "end_time": end_time, "participants": {}, "prize_file": None})
-    await update.message.reply_text("Розыгрыш создан!\nПриз: " + prize_name + "\nКонец: " + end_time.strftime("%d.%m.%Y в %H:%M") + "\n\nОтправь мне файл с призом.")
-    asyncio.create_task(auto_end_giveaway(context.bot, hours * 3600))
-
-
 # ── Поиск ─────────────────────────────────────────────────────
 
 async def do_search(bot, chat_id, query, user_id):
@@ -1084,6 +1069,7 @@ async def send_preview(bot, admin_id: int, payload: dict) -> None:
     """Показывает preview админу в ЛС с кнопками."""
     token = uuid.uuid4().hex[:12]
     pending_posts[token] = payload
+    _persist_pending_posts()
     wd = datetime.now().weekday()
     header = f"📅 {WEEKDAY_RU[wd]} — {payload['rubric']} [{payload['kind']}]"
     issues = payload.get("issues") or []
@@ -1161,37 +1147,6 @@ async def publish_to_channel(bot, payload: dict) -> bool:
     except Exception as e:
         logger.error("publish_to_channel error: %s", e)
         return False
-
-
-# ── Розыгрыш ──────────────────────────────────────────────────
-
-async def auto_end_giveaway(bot, delay):
-    await asyncio.sleep(delay)
-    if giveaway["active"]:
-        await finish_giveaway(bot)
-
-async def finish_giveaway(bot):
-    if not giveaway["active"]:
-        return
-    giveaway["active"] = False
-    valid = {uid: p for uid, p in giveaway["participants"].items() if p["reposted"]}
-    if not valid:
-        await bot.send_message(ADMIN_ID, "Розыгрыш завершён, участников не было.")
-        return
-    winner_id, winner_data = random.choice(list(valid.items()))
-    try:
-        await bot.send_message(winner_id, "🏆 ПОЗДРАВЛЯЕМ! Ты выиграл \"" + giveaway["prize_name"] + "\"!\nДержи — заслужил! 🔥")
-        if giveaway["prize_file"]:
-            await bot.send_document(winner_id, document=giveaway["prize_file"])
-    except Exception:
-        pass
-    for uid in giveaway["participants"]:
-        if uid != winner_id:
-            try:
-                await bot.send_message(uid, "Розыгрыш завершён!\nПобедитель: " + winner_data["name"] + " 🎉\n\nНе расстраивайся — следующий будет твоим! Следи за каналом 👀")
-            except Exception:
-                pass
-    await bot.send_message(ADMIN_ID, "Победитель: " + winner_data["name"] + " (" + winner_data.get("username", "-") + ")\nID: " + str(winner_id))
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1505,42 +1460,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _cleanup_upload(token)
         return
 
-    if data == "admin_yt_fix_confirm":
-        if user_id != ADMIN_ID:
-            return
-        import yt_fixes
-        count = len(yt_fixes.FIXES)
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"🔥 Да, обновить все {count}", callback_data="admin_yt_fix_go")],
-            [InlineKeyboardButton("◀️ Отмена", callback_data="admin_yt_menu")],
-        ])
-        await query.message.reply_text(
-            f"🔧 Обновить title/description/tags для {count} видео?\n"
-            "Вернуть обратно нельзя — YT перезапишет snippet.",
-            reply_markup=kb,
-        )
-        return
-
-    if data == "admin_yt_fix_go":
-        if user_id != ADMIN_ID:
-            return
-        import yt_api
-        import yt_fixes
-        await query.message.reply_text("⏳ Запускаю batch-fix...")
-        ok, fail = [], []
-        for vid, spec in yt_fixes.FIXES.items():
-            try:
-                yt_api.update_video(vid, spec["title"], spec["description"], spec["tags"])
-                ok.append(vid)
-            except Exception as e:
-                logger.exception("yt_fix failed for %s", vid)
-                fail.append(f"{vid}: {e}")
-        msg = f"✅ Обновлено: {len(ok)}/{len(yt_fixes.FIXES)}"
-        if fail:
-            msg += "\n\n❌ Ошибки:\n" + "\n".join(fail[:10])
-        await query.message.reply_text(msg)
-        return
-
     if data.startswith("admin_postnow_"):
         if user_id != ADMIN_ID:
             return
@@ -1588,6 +1507,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if action == "pub":
             ok = await publish_to_channel(bot, payload)
             pending_posts.pop(token, None)
+            _persist_pending_posts()
             try:
                 await query.message.edit_reply_markup(reply_markup=None)
             except Exception:
@@ -1600,6 +1520,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if action == "regen":
             pending_posts.pop(token, None)
+            _persist_pending_posts()
             try:
                 await query.message.edit_reply_markup(reply_markup=None)
             except Exception:
@@ -1610,6 +1531,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if action == "cancel":
             pending_posts.pop(token, None)
+            _persist_pending_posts()
             try:
                 await query.message.edit_reply_markup(reply_markup=None)
             except Exception:
@@ -2267,44 +2189,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         return
 
-    if data == "join_giveaway":
-        if not giveaway["active"]:
-            await query.answer("Розыгрыш завершён!", show_alert=True)
-            return
-        if not await is_subscribed(bot, user_id):
-            await query.answer("Сначала подпишись!", show_alert=True)
-            return
-        if user_id in giveaway["participants"]:
-            if giveaway["participants"][user_id]["reposted"]:
-                await query.answer("Ты уже участвуешь!", show_alert=True)
-            else:
-                await query.message.edit_text("✅ Шаг 1 выполнен!\n\nОсталось сделать репост поста в канале — и ты в игре! 🎯", reply_markup=kb_repost())
-            return
-        name = query.from_user.full_name
-        username = "@" + query.from_user.username if query.from_user.username else "no username"
-        giveaway["participants"][user_id] = {"name": name, "username": username, "reposted": False}
-        await query.message.edit_text("✅ Шаг 1 выполнен!\n\nОсталось сделать репост поста в канале — и ты в игре! 🎯", reply_markup=kb_repost())
-        return
-
-    if data == "confirm_repost":
-        if user_id not in giveaway["participants"]:
-            await query.answer("Сначала нажми Участвовать!", show_alert=True)
-            return
-        giveaway["participants"][user_id]["reposted"] = True
-        end_str = giveaway["end_time"].strftime("%d.%m.%Y в %H:%M") if giveaway.get("end_time") else "-"
-        await query.message.edit_text(
-            "🎉 Ты участвуешь!\n\nПриз: " + giveaway["prize_name"] +
-            "\nИтоги: " + end_str +
-            "\nУчастников: " + str(len(giveaway["participants"])) + "\n\nУдачи! 🍀"
-        )
-        return
-
-    if data == "giveaway_stats":
-        total = len(giveaway["participants"])
-        reposted = sum(1 for p in giveaway["participants"].values() if p["reposted"])
-        await query.answer("Всего: " + str(total) + "\nС репостом: " + str(reposted), show_alert=True)
-        return
-
     if data == "admin_panel":
         if user_id != ADMIN_ID: return
         await query.message.reply_text("🎛 Панель управления:", reply_markup=kb_admin())
@@ -2567,38 +2451,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ В панель", callback_data="admin_panel")]]))
         return
 
-    if data == "admin_giveaway":
-        if user_id != ADMIN_ID: return
-        await query.message.reply_text("🎁 Розыгрыш:", reply_markup=kb_admin_giveaway())
-        return
-
-    if data == "admin_giveaway_hint":
-        if user_id != ADMIN_ID: return
-        await query.message.reply_text("Напиши: /giveaway 24 Название приза")
-        return
-
-    if data == "admin_giveaway_end":
-        if user_id != ADMIN_ID: return
-        if not giveaway["active"]:
-            await query.message.reply_text("Розыгрыш не активен.")
-            return
-        await finish_giveaway(bot)
-        await query.message.reply_text("✅ Розыгрыш завершён!")
-        return
-
-    if data == "admin_giveaway_stats":
-        if user_id != ADMIN_ID: return
-        total = len(giveaway["participants"])
-        reposted = sum(1 for p in giveaway["participants"].values() if p["reposted"])
-        end = giveaway["end_time"].strftime("%d.%m.%Y %H:%M") if giveaway.get("end_time") else "-"
-        await query.message.reply_text(
-            "Розыгрыш: " + ("🟢 Активен" if giveaway["active"] else "🔴 Нет") +
-            "\nПриз: " + giveaway.get("prize_name", "-") +
-            "\nКонец: " + end +
-            "\nУчастников: " + str(total) + " / репост: " + str(reposted),
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="admin_giveaway")]]))
-        return
-
 # ── Обработка текстовых сообщений ────────────────────────────
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2643,9 +2495,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if message.document and not text:
             fid = message.document.file_id
             await message.reply_text("FILE_ID:\n\n" + fid + "\n\nВставь в config.py:\nSAMPLE_PACK_FILE_ID = " + chr(34) + fid + chr(34))
-            if giveaway["active"] and giveaway["prize_file"] is None:
-                giveaway["prize_file"] = fid
-                await message.reply_text("Файл сохранён как приз!")
         return
 
     channel_username = CHANNEL_LINK.split("/")[-1].lstrip("@")
@@ -3474,6 +3323,15 @@ async def post_init(application):
             logger.info("pending_products: restored %d items on startup", restored)
     except Exception:
         logger.exception("pending_products restore failed (non-fatal)")
+    # Восстанавливаем pending_posts — превью автопостов, на которые админ
+    # ещё не нажал "Опубликовать". Без restore после redeploy клик на кнопку
+    # приводил к "Превью устарело" вместо публикации.
+    try:
+        restored = _restore_pending_posts()
+        if restored:
+            logger.info("pending_posts: restored %d items on startup", restored)
+    except Exception:
+        logger.exception("pending_posts restore failed (non-fatal)")
     asyncio.create_task(daily_channel_scheduler(application.bot, ADMIN_ID))
     asyncio.create_task(scheduled_publish_loop(application.bot))
     asyncio.create_task(heartbeat_scheduler())
@@ -3733,7 +3591,6 @@ async def run_bot():
     app.add_handler(CommandHandler("postnow", cmd_postnow))
     app.add_handler(CommandHandler("idea", cmd_idea))
     app.add_handler(CommandHandler("search", cmd_search))
-    app.add_handler(CommandHandler("giveaway", cmd_giveaway))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("queue", cmd_queue))
     app.add_handler(CommandHandler("cancel_sched", cmd_cancel_sched))
