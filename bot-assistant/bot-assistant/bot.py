@@ -260,9 +260,11 @@ def kb_main_menu():
          InlineKeyboardButton("🌃 Memphis", callback_data="qf_memphis"),
          InlineKeyboardButton("🏙 Detroit", callback_data="qf_detroit"),
          InlineKeyboardButton("🇷🇺 RU", callback_data="qf_ru")],
-        [InlineKeyboardButton("⚡ 140+", callback_data="qf_bpm140"),
-         InlineKeyboardButton("⚡ 160+", callback_data="qf_bpm160"),
-         InlineKeyboardButton("🎲 Случайный", callback_data="random_beat")],
+        [InlineKeyboardButton("⚡ 130+", callback_data="qf_bpm130"),
+         InlineKeyboardButton("⚡ 140+", callback_data="qf_bpm140"),
+         InlineKeyboardButton("⚡ 150+", callback_data="qf_bpm150"),
+         InlineKeyboardButton("⚡ 160+", callback_data="qf_bpm160")],
+        [InlineKeyboardButton("🎲 Случайный", callback_data="random_beat")],
         [InlineKeyboardButton("❤️ Избранное", callback_data="my_favorites"),
          InlineKeyboardButton("🔍 Поиск", callback_data="search_prompt")],
     ])
@@ -295,8 +297,12 @@ def _filter_beats(filter_name: str) -> list[dict]:
         scene_set = SCENE_TAGS[filter_name]
         return [b for b in audio_only
                 if any(t.lower() in scene_set for t in b.get("tags", []))]
+    if filter_name == "bpm130":
+        return [b for b in audio_only if (b.get("bpm") or 0) >= 130]
     if filter_name == "bpm140":
         return [b for b in audio_only if (b.get("bpm") or 0) >= 140]
+    if filter_name == "bpm150":
+        return [b for b in audio_only if (b.get("bpm") or 0) >= 150]
     if filter_name == "bpm160":
         return [b for b in audio_only if (b.get("bpm") or 0) >= 160]
     return []
@@ -338,7 +344,9 @@ async def do_quick_filter(bot, chat_id: int, user_id: int, filter_name: str, pag
         "memphis": "🌃 Memphis",
         "detroit": "🏙 Detroit",
         "ru": "🇷🇺 RU сцена",
+        "bpm130": "⚡ 130+ BPM",
         "bpm140": "⚡ 140+ BPM",
+        "bpm150": "⚡ 150+ BPM",
         "bpm160": "⚡ 160+ BPM",
     }.get(filter_name, filter_name)
     if not results:
