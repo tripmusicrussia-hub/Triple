@@ -40,6 +40,7 @@ bot-assistant/bot-assistant/users_data.json
 bot-assistant/bot-assistant/users_data.json.tmp
 bot-assistant/bot-assistant/users_data.json.bak
 bot-assistant/bot-assistant/pending_products.json
+bot-assistant/bot-assistant/admin_prefs.json
 bot-assistant/bot-assistant/heartbeat.txt
 
 # OS

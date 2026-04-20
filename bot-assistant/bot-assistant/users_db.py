@@ -105,7 +105,19 @@ def upsert_user(tg_id: int, full_name: str, username: str | None, source: str | 
             payload["joined_at"] = datetime.now(_MSK).isoformat()
             if source:
                 payload["source"] = source
-            client.table(_TABLE).insert(payload).execute()
+            try:
+                client.table(_TABLE).insert(payload).execute()
+            except Exception as e:
+                # Если миграция `ALTER TABLE bot_users ADD COLUMN source text` ещё
+                # не прогнана — INSERT упадёт. Retry без source, чтобы юзер
+                # всё равно зарегистрировался (source — best-effort attribution,
+                # не критичен для функции /start).
+                if source and "source" in str(e).lower():
+                    logger.warning("users_db: source column missing, retrying INSERT без source: %s", e)
+                    payload.pop("source", None)
+                    client.table(_TABLE).insert(payload).execute()
+                else:
+                    raise
             return True
         # Существующий — обновляем только имя/username. source НЕ перезаписываем.
         client.table(_TABLE).update({

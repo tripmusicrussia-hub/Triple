@@ -611,14 +611,30 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot = context.bot
     write_heartbeat()
 
-    # Referral tracking: /start ref_<src> → first-touch source для funnel аналитики.
-    # Whitelist защищает от мусора в данных. Записывается только при INSERT
-    # (первый /start юзера) — последующие /start source не перезаписывают.
+    # Deep-link payload parsing. Поддерживаемые форматы:
+    #   ref_<src>                     → только source (лендинг / био)
+    #   buy_<id>                      → только покупка бита
+    #   prod_<id>                     → только покупка продукта
+    #   ref_<src>_buy_<id>            → combo source+бит (YT description)
+    #   ref_<src>_prod_<id>           → combo source+продукт
+    # Source (из ref_) — first-touch, записывается один раз при INSERT.
+    # Target (buy_/prod_) — триггерит carding screen ниже после upsert.
     ref_source = None
-    if context.args and context.args[0].startswith("ref_"):
-        raw = context.args[0][4:].lower().strip()
+    effective_arg = context.args[0] if context.args else ""
+    if effective_arg.startswith("ref_"):
+        rest = effective_arg[4:]  # после "ref_"
+        if "_buy_" in rest:
+            src_part, tail = rest.split("_buy_", 1)
+            effective_arg = f"buy_{tail}"
+        elif "_prod_" in rest:
+            src_part, tail = rest.split("_prod_", 1)
+            effective_arg = f"prod_{tail}"
+        else:
+            src_part = rest
+            effective_arg = ""  # standalone ref_, нет target
+        raw_src = src_part.lower().strip()
         _REF_WHITELIST = {"yt", "insta", "tg", "landing", "ads", "collab"}
-        ref_source = raw if raw in _REF_WHITELIST else "other"
+        ref_source = raw_src if raw_src in _REF_WHITELIST else "other"
 
     # is_new определяется через Supabase (source of truth между Render
     # redeploy'ями). Fallback — in-memory all_users (свежий процесс).
@@ -645,9 +661,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
     # Deep-link из канала на карточку продукта: /start prod_<product_id>
-    if context.args and context.args[0].startswith("prod_"):
+    # (или /start ref_<src>_prod_<product_id> — effective_arg уже нормализован выше)
+    if effective_arg.startswith("prod_"):
         try:
-            pid = int(context.args[0][5:])
+            pid = int(effective_arg[5:])
             p = beats_db.get_beat_by_id(pid)
             if p and p.get("content_type") in licensing.PRODUCT_TYPE_LABELS:
                 label = licensing.PRODUCT_TYPE_LABELS[p["content_type"]]
@@ -678,12 +695,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         except Exception as e:
-            logger.warning("deep-link prod_ failed for %r: %s", context.args[0], e)
+            logger.warning("deep-link prod_ failed for %r: %s", effective_arg, e)
 
     # Deep-link из YT-описания: /start buy_<beat_id> → сразу показать покупку этого бита
-    if context.args and context.args[0].startswith("buy_"):
+    # (или /start ref_yt_buy_<id> — combo source+target, effective_arg уже нормализован)
+    if effective_arg.startswith("buy_"):
         try:
-            beat_id = int(context.args[0][4:])
+            beat_id = int(effective_arg[4:])
             beat = beats_db.get_beat_by_id(beat_id)
             if beat:
                 caption = (
@@ -706,7 +724,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         except Exception as e:
-            logger.warning("deep-link buy_ failed for %r: %s", context.args[0], e)
+            logger.warning("deep-link buy_ failed for %r: %s", effective_arg, e)
             # fall through to normal start flow
 
     subscribed = await is_subscribed(bot, user_id)
@@ -2079,6 +2097,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             beat_id = int(data[len("buy_rub_"):])
         except ValueError:
+            await query.answer()  # гасим loading-spinner, иначе висит ~60с
             return
         beat = beats_db.get_beat_by_id(beat_id)
         if not beat:
@@ -3485,7 +3504,7 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
             r2 = await client.get(
                 f"{sb_url}/rest/v1/sales",
                 params={
-                    "select": "beat_name,stars_amount,currency,license_type",
+                    "select": "beat_name,stars_amount,fiat_amount_minor,currency,license_type",
                     "ts": f"gte.{since}",
                     "status": "eq.completed",
                 },

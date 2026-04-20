@@ -172,6 +172,6 @@ SKILL.md содержит раздел «Эталоны из канала» — 
 - **Не публикуй**: родитель сам копирует нужное из output'а и постит.
 - **Не рекомендуй cadence** («постить 3 раза в неделю» и т.п.) — это
   не твоя роль, есть content_reminder_scheduler в bot.py который это решает.
-- **Не пиши Russian 100%**: часть ауд
-итории — англоязычные rappers ищущие type-beats. YT title и description
-обычно English, TG captions Russian. Ориентируйся по контексту запроса.
+- **Не пиши Russian 100%**: часть аудитории — англоязычные rappers
+  ищущие type-beats. YT title и description обычно English, TG captions
+  Russian. Ориентируйся по контексту запроса.
