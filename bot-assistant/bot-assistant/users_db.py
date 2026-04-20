@@ -77,12 +77,16 @@ def _get_supabase():
 
 # ─── Writes ──────────────────────────────────────────────────────────────────
 
-def upsert_user(tg_id: int, full_name: str, username: str | None) -> bool:
+def upsert_user(tg_id: int, full_name: str, username: str | None, source: str | None = None) -> bool:
     """Upsert юзера. Возвращает True если раньше не было (is_new).
 
     На Supabase: SELECT → если нет, INSERT (is_new=True). Если есть —
     UPDATE username/full_name (но не joined_at и не received_sample_pack).
-    Без Supabase: только in-memory (вызывающий сам решит persistence).
+
+    source — откуда пришёл юзер (`yt`, `insta`, `tg`, `landing`, `ads`,
+    `direct`). Записывается только при первом `/start` (на insert).
+    Последующие `/start` НЕ перезаписывают source — первый touch
+    остаётся authoritative для аналитики воронки.
     """
     client = _get_supabase()
     if client is None:
@@ -99,9 +103,11 @@ def upsert_user(tg_id: int, full_name: str, username: str | None) -> bool:
         }
         if not existing:
             payload["joined_at"] = datetime.now(_MSK).isoformat()
+            if source:
+                payload["source"] = source
             client.table(_TABLE).insert(payload).execute()
             return True
-        # Существующий — обновляем только имя/username
+        # Существующий — обновляем только имя/username. source НЕ перезаписываем.
         client.table(_TABLE).update({
             "full_name": full_name,
             "username": username or "",

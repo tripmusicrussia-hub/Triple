@@ -591,10 +591,19 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot = context.bot
     write_heartbeat()
 
+    # Referral tracking: /start ref_<src> → first-touch source для funnel аналитики.
+    # Whitelist защищает от мусора в данных. Записывается только при INSERT
+    # (первый /start юзера) — последующие /start source не перезаписывают.
+    ref_source = None
+    if context.args and context.args[0].startswith("ref_"):
+        raw = context.args[0][4:].lower().strip()
+        _REF_WHITELIST = {"yt", "insta", "tg", "landing", "ads", "collab"}
+        ref_source = raw if raw in _REF_WHITELIST else "other"
+
     # is_new определяется через Supabase (source of truth между Render
     # redeploy'ями). Fallback — in-memory all_users (свежий процесс).
     supabase_is_new = await asyncio.to_thread(
-        users_db.upsert_user, user_id, user.full_name, user.username
+        users_db.upsert_user, user_id, user.full_name, user.username, ref_source
     )
     is_new = user_id not in all_users and supabase_is_new is not False
     if user_id not in all_users:
@@ -607,7 +616,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_new:
         try:
             uname = "@" + user.username if user.username else user.full_name
-            await bot.send_message(ADMIN_ID, "🔔 Новый: " + uname + " | Всего: " + str(len(all_users)))
+            src_tag = f" · src={ref_source}" if ref_source else ""
+            await bot.send_message(
+                ADMIN_ID,
+                "🔔 Новый: " + uname + src_tag + " | Всего: " + str(len(all_users))
+            )
         except Exception:
             pass
 
