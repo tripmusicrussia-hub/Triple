@@ -3188,6 +3188,127 @@ async def poll_usdt_invoice(bot, invoice_id: int, user_id: int, item_id: int,
         pending_usdt_invoices.pop(invoice_id, None)
 
 
+# ── Content reminders ─────────────────────────────────────────
+
+ADMIN_PREFS_PATH = os.path.join(BASE_DIR, "admin_prefs.json")
+
+CONTENT_REMINDER_TEMPLATES = {
+    0: (  # Monday
+        "🎵 Понедельник — Process Reveal Shorts",
+        "Есть свежий бит? 30 сек Shorts:\n"
+        "• 0-3с: hands/FL screen, hard 808 hit\n"
+        "• 3-20с: speed-up процесс (drums → bass → melody)\n"
+        "• 20-27с: финал бита полных 5 сек\n"
+        "• 27-30с: CTA «lease в боте 1500⭐»\n\n"
+        "Снял? Загрузи бит в бот — я выдам caption+title+description."
+    ),
+    2: (  # Wednesday
+        "🛠 Среда — Gear Talk / Technique",
+        "Одна техника, 30 сек, voice-over + screen. Варианты:\n"
+        "• «Почему у меня 808 низкий — я не boost, я cut низ у мелодии»\n"
+        "• «3 sample pack'а которые всегда юзаю в memphis»\n"
+        "• «Detroit hi-hat pattern — показываю за 20 сек»\n\n"
+        "Такой контент конвертится в покупателей твоего drumkit (когда запустим)."
+    ),
+    4: (  # Friday
+        "🎤 Пятница — UGC reaction / Story beat",
+        "Если кто-то из рэперов закинул трек на твой бит → сними 15 сек реакции.\n"
+        "Если нет — Story beat: расскажи откуда пришёл твой любимый бит недели (15 сек, искренне, без скрипта).\n\n"
+        "Пятничный контент = самый engagement-heavy, алгоритм любит «проявление»."
+    ),
+}
+
+
+def _load_admin_prefs() -> dict:
+    if not os.path.exists(ADMIN_PREFS_PATH):
+        return {"content_reminders": True, "last_reminder_date": None}
+    try:
+        with open(ADMIN_PREFS_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"content_reminders": True, "last_reminder_date": None}
+
+
+def _save_admin_prefs(prefs: dict) -> None:
+    try:
+        with open(ADMIN_PREFS_PATH, "w", encoding="utf-8") as f:
+            json.dump(prefs, f, ensure_ascii=False, indent=2)
+    except Exception:
+        logger.exception("save admin_prefs failed (non-fatal)")
+
+
+async def content_reminder_scheduler(bot):
+    """Шлёт ADMIN_ID напоминания о контенте Пн/Ср/Пт в 20:00 МСК.
+
+    Dedupe через last_reminder_date — одно напоминание в сутки даже если
+    bot рестартнулся. По умолчанию включено; /content off выключает.
+    """
+    while True:
+        try:
+            prefs = _load_admin_prefs()
+            if prefs.get("content_reminders", True):
+                now_msk = datetime.now(ZoneInfo("Europe/Moscow"))
+                today_str = now_msk.date().isoformat()
+                if (
+                    now_msk.weekday() in CONTENT_REMINDER_TEMPLATES
+                    and now_msk.hour == 20
+                    and prefs.get("last_reminder_date") != today_str
+                ):
+                    title, body = CONTENT_REMINDER_TEMPLATES[now_msk.weekday()]
+                    try:
+                        await bot.send_message(
+                            ADMIN_ID,
+                            f"<b>{title}</b>\n\n{body}\n\n"
+                            "<i>Отключить: /content off · статус: /content status</i>",
+                            parse_mode="HTML",
+                        )
+                        prefs["last_reminder_date"] = today_str
+                        _save_admin_prefs(prefs)
+                        logger.info("content_reminder: sent for weekday=%d", now_msk.weekday())
+                    except Exception:
+                        logger.exception("content_reminder: send failed")
+        except Exception:
+            logger.exception("content_reminder_scheduler iteration failed")
+        await asyncio.sleep(15 * 60)  # проверяем каждые 15 минут
+
+
+async def cmd_content_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Вкл/выкл напоминания о контенте. Только админ."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    prefs = _load_admin_prefs()
+    arg = (context.args[0].lower() if context.args else "").strip()
+    if arg == "on":
+        prefs["content_reminders"] = True
+        _save_admin_prefs(prefs)
+        await update.message.reply_text(
+            "✅ Напоминания включены.\n\n"
+            "Пн — Process Reveal\n"
+            "Ср — Gear Talk\n"
+            "Пт — UGC / Story beat\n\n"
+            "Все в 20:00 МСК."
+        )
+    elif arg == "off":
+        prefs["content_reminders"] = False
+        _save_admin_prefs(prefs)
+        await update.message.reply_text("🔕 Напоминания выключены. Включить обратно: /content on")
+    elif arg == "status":
+        state = "ON ✅" if prefs.get("content_reminders", True) else "OFF 🔕"
+        last = prefs.get("last_reminder_date") or "—"
+        await update.message.reply_text(
+            f"Напоминания: {state}\n"
+            f"Последний пинг: {last}\n\n"
+            "График: Пн (Process Reveal) · Ср (Gear Talk) · Пт (UGC/Story) — 20:00 МСК"
+        )
+    else:
+        await update.message.reply_text(
+            "Usage:\n"
+            "/content on — включить\n"
+            "/content off — выключить\n"
+            "/content status — проверить"
+        )
+
+
 # ── Запуск ────────────────────────────────────────────────────
 
 async def heartbeat_scheduler():
@@ -3229,6 +3350,7 @@ async def post_init(application):
         logger.exception("pending_products restore failed (non-fatal)")
     asyncio.create_task(scheduled_publish_loop(application.bot))
     asyncio.create_task(heartbeat_scheduler())
+    asyncio.create_task(content_reminder_scheduler(application.bot))
     asyncio.create_task(asyncio.to_thread(_warmup_ffmpeg))
     write_heartbeat()
 
@@ -3487,6 +3609,7 @@ async def run_bot():
     app.add_handler(CommandHandler("queue", cmd_queue))
     app.add_handler(CommandHandler("cancel_sched", cmd_cancel_sched))
     app.add_handler(CommandHandler("fix_hashtags", cmd_fix_hashtags))
+    app.add_handler(CommandHandler("content", cmd_content_schedule))
     app.add_handler(CommandHandler("pin_hub", cmd_pin_hub))
     app.add_handler(CommandHandler("upload_product", cmd_upload_product))
     app.add_handler(CommandHandler("cancel_product", cmd_cancel_product))
