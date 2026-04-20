@@ -3309,6 +3309,94 @@ async def cmd_content_schedule(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
 
+async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сводка дня для админа: новые юзеры (с разбивкой по source), продажи,
+    залитые биты. Выборка из Supabase за ts >= сегодня 00:00 МСК."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    import httpx
+    from collections import Counter
+
+    sb_url = os.getenv("SUPABASE_URL", "").strip()
+    sb_key = os.getenv("SUPABASE_KEY", "").strip()
+    if not sb_url or not sb_key:
+        await update.message.reply_text("❌ Supabase env не задан")
+        return
+    headers = {"apikey": sb_key, "Authorization": f"Bearer {sb_key}"}
+
+    msk = ZoneInfo("Europe/Moscow")
+    today = datetime.now(msk).date()
+    since = datetime.combine(today, datetime.min.time()).replace(tzinfo=msk).isoformat()
+
+    users, sales_rows, events = [], [], []
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r1 = await client.get(
+                f"{sb_url}/rest/v1/bot_users",
+                params={"select": "tg_id,source,joined_at", "joined_at": f"gte.{since}"},
+                headers=headers,
+            )
+            if r1.status_code == 200:
+                users = r1.json()
+            r2 = await client.get(
+                f"{sb_url}/rest/v1/sales",
+                params={
+                    "select": "beat_name,stars_amount,currency,license_type",
+                    "ts": f"gte.{since}",
+                    "status": "eq.completed",
+                },
+                headers=headers,
+            )
+            if r2.status_code == 200:
+                sales_rows = r2.json()
+            r3 = await client.get(
+                f"{sb_url}/rest/v1/post_events",
+                params={
+                    "select": "beat_name,bpm,kind",
+                    "kind": "in.(upload,scheduled_upload)",
+                    "ts": f"gte.{since}",
+                },
+                headers=headers,
+            )
+            if r3.status_code == 200:
+                events = r3.json()
+    except Exception as e:
+        logger.exception("cmd_today: Supabase fetch failed")
+        await update.message.reply_text(f"❌ Ошибка fetch: {e}")
+        return
+
+    # Breakdown
+    source_c = Counter((u.get("source") or "direct") for u in users)
+    stars_total = sum(s.get("stars_amount", 0) or 0 for s in sales_rows if s.get("currency") == "XTR")
+    usdt_rows = [s for s in sales_rows if s.get("currency") not in ("XTR", None)]
+    # Рисуем сумму: Stars/75 ≈ USD (1500⭐ ≈ $20), USDT/USD 1:1
+    usd_est = stars_total / 75.0 + sum(s.get("stars_amount") or 20 for s in usdt_rows)
+
+    lines = [f"📊 Сегодня · {today.strftime('%d %b %Y')} (МСК):", ""]
+    lines.append(f"👥 Новых юзеров: <b>{len(users)}</b>")
+    if users:
+        src_parts = [f"{k}={v}" for k, v in source_c.most_common()]
+        lines.append(f"   {' · '.join(src_parts)}")
+    lines.append("")
+    lines.append(f"💰 Продажи: <b>{len(sales_rows)}</b>" + (f" (~${usd_est:.0f})" if sales_rows else ""))
+    for s in sales_rows[:5]:
+        nm = (s.get("beat_name") or "?")[:35]
+        cur = s.get("currency") or "?"
+        amt = s.get("stars_amount", 0) or 0
+        price_s = f"{amt}⭐" if cur == "XTR" else f"{amt} {cur}"
+        lt = s.get("license_type") or "?"
+        lines.append(f"   • {nm} · {price_s} · {lt}")
+    lines.append("")
+    lines.append(f"🎵 Битов залили: <b>{len(events)}</b>")
+    for e in events[:5]:
+        nm = (e.get("beat_name") or "?")[:35]
+        bpm = e.get("bpm", "?")
+        lines.append(f"   • {nm} · {bpm} BPM")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
 # ── Запуск ────────────────────────────────────────────────────
 
 async def heartbeat_scheduler():
@@ -3610,6 +3698,7 @@ async def run_bot():
     app.add_handler(CommandHandler("cancel_sched", cmd_cancel_sched))
     app.add_handler(CommandHandler("fix_hashtags", cmd_fix_hashtags))
     app.add_handler(CommandHandler("content", cmd_content_schedule))
+    app.add_handler(CommandHandler("today", cmd_today))
     app.add_handler(CommandHandler("pin_hub", cmd_pin_hub))
     app.add_handler(CommandHandler("upload_product", cmd_upload_product))
     app.add_handler(CommandHandler("cancel_product", cmd_cancel_product))
