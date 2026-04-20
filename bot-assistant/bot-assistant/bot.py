@@ -633,7 +633,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             src_part = rest
             effective_arg = ""  # standalone ref_, нет target
         raw_src = src_part.lower().strip()
-        _REF_WHITELIST = {"yt", "insta", "tg", "landing", "ads", "collab"}
+        _REF_WHITELIST = {"yt", "insta", "tg", "tiktok", "soundcloud", "landing", "ads", "collab"}
         ref_source = raw_src if raw_src in _REF_WHITELIST else "other"
 
     # is_new определяется через Supabase (source of truth между Render

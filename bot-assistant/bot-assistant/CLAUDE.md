@@ -95,7 +95,8 @@ Telegram-бот для направления IIIPLFIII (hard trap Memphis/Detro
 **`bot_users`** — аудитория:
 - `tg_id bigint pk`, `username text`, `full_name text`, `joined_at timestamptz`,
   `updated_at timestamptz`, `received_sample_pack bool`, `is_subscribed bool`,
-  `favorites jsonb`, `source text` (yt/insta/tg/landing/ads/collab/other)
+  `favorites jsonb`, `source text`
+  (yt/insta/tg/tiktok/soundcloud/landing/ads/collab/other)
 
 **`sales`** — продажи:
 - `id bigserial`, `ts timestamptz`, `buyer_tg_id bigint`, `buyer_username text`,
