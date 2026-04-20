@@ -53,3 +53,8 @@ def _parse_slots(raw: str) -> list[tuple[int, int, int]]:
 PUBLISH_OPTIMAL_SLOTS = _parse_slots(
     os.getenv("PUBLISH_OPTIMAL_SLOTS", "4:21:30,0:21:0")
 ) or [(4, 21, 30), (0, 21, 0)]
+
+# YooKassa provider_token для Telegram sendInvoice (RUB оплата MIR/СБП/карты).
+# Получается в BotFather → /mybots → Payments → YooKassa → Connect.
+# Если пустой — RUB-кнопка автоматически скрывается в preview битов.
+YOOKASSA_PROVIDER_TOKEN = os.getenv("YOOKASSA_PROVIDER_TOKEN", "").strip()

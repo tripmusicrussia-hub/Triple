@@ -12,6 +12,7 @@ _MSK = ZoneInfo("Europe/Moscow")
 
 PRICE_MP3_STARS = 1500  # buyer ~$20 (standard mid-tier type-beat pricing). Creator net ~$15 после Telegram/Apple/Google fees
 PRICE_MP3_USDT = 20.0   # 20 USDT — рыночный стандарт MP3 lease 2026. Creator net ~$19.8 после CryptoBot 1%
+PRICE_MP3_RUB = 1700    # ≈ $20 при курсе 85₽/$. Paritet с USDT/Stars. Через YooKassa (MIR/СБП/карты), комиссия 3.5% → net ≈ 1640₽
 
 # Drum kit / sample pack / loop pack — цены в сравнении с рынком DIY-продюсеров.
 PRICE_KIT_STARS = 1500

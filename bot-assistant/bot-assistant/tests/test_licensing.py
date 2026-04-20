@@ -9,6 +9,9 @@ class TestPrices:
     def test_mp3_usdt_price(self):
         assert licensing.PRICE_MP3_USDT == 20.0
 
+    def test_mp3_rub_price(self):
+        assert licensing.PRICE_MP3_RUB == 1700
+
     def test_kit_stars_price(self):
         assert licensing.PRICE_KIT_STARS == 1500
 

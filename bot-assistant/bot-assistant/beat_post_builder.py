@@ -496,7 +496,7 @@ def _bot_footer(beat_id: int | None = None) -> str:
     if beat_id:
         return (
             f"🎧 Весь каталог → {catalog}\n"
-            f"💰 MP3 Lease 1500⭐ / 20 USDT → {_buy_link(beat_id)}"
+            f"💰 MP3 Lease 1500⭐ / 20 USDT / 1700₽ → {_buy_link(beat_id)}"
         )
     return f"🎧 Весь каталог + lease → {catalog}"
 
@@ -781,7 +781,7 @@ def build_pinned_hub() -> str:
         f"🎧 Все биты + landing → {LANDING_URL}\n"
         f"📸 Instagram → https://instagram.com/{IG_HANDLE.lstrip('@')}\n"
         f"💎 WAV · Trackouts · Unlimited · Exclusive — DM {TG_HANDLE}\n\n"
-        f"💰 MP3 Lease: 1500⭐ / 20 USDT (untagged MP3 + TXT license, instant delivery)"
+        f"💰 MP3 Lease: 1500⭐ / 20 USDT / 1700₽ (untagged MP3 + TXT license, instant delivery)"
     )
 
 

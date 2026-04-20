@@ -19,6 +19,7 @@ from telegram.error import TelegramError
 from config import (
     BOT_TOKEN, CHANNEL_ID, CHANNEL_LINK, SAMPLE_PACK_PATH, SAMPLE_PACK_FILE_ID,
     WELCOME_TEXT, CATALOG_INTRO, ADMIN_ID, CHANNEL_POST_HOUR,
+    YOOKASSA_PROVIDER_TOKEN,
 )
 import beats_db
 import beat_post_builder
@@ -435,6 +436,14 @@ def kb_after_beat(beat_id, content_type="beat"):
             InlineKeyboardButton(f"⭐ {licensing.PRICE_MP3_STARS}", callback_data="buy_mp3_" + str(beat_id)),
             InlineKeyboardButton(f"💵 {licensing.PRICE_MP3_USDT:g} USDT", callback_data="buy_usdt_" + str(beat_id)),
         ])
+        # RUB-кнопка только если YooKassa-токен настроен в env. Иначе скрыта.
+        if YOOKASSA_PROVIDER_TOKEN:
+            rows.append([
+                InlineKeyboardButton(
+                    f"💳 {licensing.PRICE_MP3_RUB}₽ (MIR/СБП)",
+                    callback_data="buy_rub_" + str(beat_id),
+                ),
+            ])
         rows.append([
             InlineKeyboardButton("💎 Exclusive ($500+)", callback_data="excl_" + str(beat_id)),
         ])
@@ -445,12 +454,20 @@ def kb_after_beat(beat_id, content_type="beat"):
 
 
 def kb_channel_beat_buy(beat_id: int) -> InlineKeyboardMarkup:
-    """Клавиатура под публикацией бита в канале: Stars + USDT + Exclusive inquiry."""
-    return InlineKeyboardMarkup([
+    """Клавиатура под публикацией бита в канале: Stars + USDT (+ RUB если задан) + Exclusive."""
+    rows = [
         [InlineKeyboardButton(f"⭐ MP3 · {licensing.PRICE_MP3_STARS}", callback_data="buy_mp3_" + str(beat_id)),
          InlineKeyboardButton(f"💵 MP3 · {licensing.PRICE_MP3_USDT:g} USDT", callback_data="buy_usdt_" + str(beat_id))],
-        [InlineKeyboardButton("💎 WAV / Unlimited / Exclusive", callback_data="excl_" + str(beat_id))],
-    ])
+    ]
+    if YOOKASSA_PROVIDER_TOKEN:
+        rows.append([
+            InlineKeyboardButton(
+                f"💳 MP3 · {licensing.PRICE_MP3_RUB}₽ (MIR/СБП)",
+                callback_data="buy_rub_" + str(beat_id),
+            ),
+        ])
+    rows.append([InlineKeyboardButton("💎 WAV / Unlimited / Exclusive", callback_data="excl_" + str(beat_id))])
+    return InlineKeyboardMarkup(rows)
 
 
 def kb_admin():
@@ -2050,6 +2067,56 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if data.startswith("buy_rub_"):
+        # RUB-оплата через YooKassa (MIR/Visa/MC/СБП). Native Telegram Payments 2.0.
+        # Webhook подтверждения → handle_successful_payment → _deliver_mp3_lease.
+        if not YOOKASSA_PROVIDER_TOKEN:
+            await query.answer(
+                "RUB-оплата пока не подключена. Используй ⭐ Stars или 💵 USDT.",
+                show_alert=True,
+            )
+            return
+        try:
+            beat_id = int(data[len("buy_rub_"):])
+        except ValueError:
+            return
+        beat = beats_db.get_beat_by_id(beat_id)
+        if not beat:
+            await query.answer("Бит не найден", show_alert=True)
+            return
+        bpm = beat.get("bpm") or "?"
+        key = beat.get("key") or "?"
+        title = f"MP3 Lease — {beat['name']}"[:32]
+        description = (
+            f"MP3 Lease на «{beat['name']}» ({bpm} BPM, {key}). "
+            f"Non-exclusive: до 100k стримов, до 2000 копий, 1 music video. "
+            f"Credit: prod. by TRIPLE FILL. После оплаты — mp3 + txt-лицензия в ЛС."
+        )[:255]
+        try:
+            await bot.send_invoice(
+                chat_id=user_id,
+                title=title,
+                description=description,
+                payload=f"mp3_lease:{beat_id}",
+                provider_token=YOOKASSA_PROVIDER_TOKEN,
+                currency="RUB",
+                # YooKassa требует цену в копейках (minor units of RUB)
+                prices=[LabeledPrice(label="MP3 Lease", amount=licensing.PRICE_MP3_RUB * 100)],
+                need_email=False,  # YooKassa может запросить email сама на чекауте
+            )
+            if query.message.chat_id != user_id:
+                await query.answer("💰 Счёт отправил в ЛС бота", show_alert=False)
+        except TelegramError as e:
+            logger.warning("send_invoice RUB failed for user %s: %s", user_id, e)
+            await query.answer(
+                "Сначала напиши /start боту в ЛС — тогда пришлю счёт.",
+                show_alert=True,
+            )
+        except Exception:
+            logger.exception("send_invoice RUB error")
+            await query.answer(_user_error_msg("оплата"), show_alert=True)
+        return
+
     if data.startswith("buy_mp3_"):
         try:
             beat_id = int(data[len("buy_mp3_"):])
@@ -2997,6 +3064,7 @@ async def _deliver_mp3_lease(bot, user, beat: dict, *, payment_charge_id: str,
             beat_name=beat["name"],
             license_type="mp3_lease",
             stars_amount=int(amount) if currency == "XTR" else 0,
+            fiat_amount_minor=int(amount) if currency != "XTR" else 0,
             currency=currency,
             payment_charge_id=payment_charge_id,
             provider_charge_id=None,
@@ -3075,6 +3143,7 @@ async def _deliver_product(bot, user, product: dict, *, payment_charge_id: str,
             beat_name=product["name"],
             license_type=content_type,
             stars_amount=int(amount) if currency == "XTR" else 0,
+            fiat_amount_minor=int(amount) if currency != "XTR" else 0,
             currency=currency,
             payment_charge_id=payment_charge_id,
             provider_charge_id=None,
@@ -3442,10 +3511,17 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Breakdown
     source_c = Counter((u.get("source") or "direct") for u in users)
-    stars_total = sum(s.get("stars_amount", 0) or 0 for s in sales_rows if s.get("currency") == "XTR")
-    usdt_rows = [s for s in sales_rows if s.get("currency") not in ("XTR", None)]
-    # Рисуем сумму: Stars/75 ≈ USD (1500⭐ ≈ $20), USDT/USD 1:1
-    usd_est = stars_total / 75.0 + sum(s.get("stars_amount") or 20 for s in usdt_rows)
+    # USD-эквивалент по currency: Stars/75 ≈ USD (1500⭐ ≈ $20), RUB/8500 ≈ USD
+    # (копейки → рубли → USD при курсе 85), USDT/USD 1:1
+    usd_est = 0.0
+    for s in sales_rows:
+        cur = s.get("currency") or ""
+        if cur == "XTR":
+            usd_est += (s.get("stars_amount") or 0) / 75.0
+        elif cur == "RUB":
+            usd_est += (s.get("fiat_amount_minor") or 0) / 8500.0
+        else:  # USDT или неизвестная — ориентируемся на $20 default
+            usd_est += 20.0
 
     lines = [f"📊 Сегодня · {today.strftime('%d %b %Y')} (МСК):", ""]
     lines.append(f"👥 Новых юзеров: <b>{len(users)}</b>")
@@ -3457,8 +3533,13 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for s in sales_rows[:5]:
         nm = (s.get("beat_name") or "?")[:35]
         cur = s.get("currency") or "?"
-        amt = s.get("stars_amount", 0) or 0
-        price_s = f"{amt}⭐" if cur == "XTR" else f"{amt} {cur}"
+        if cur == "XTR":
+            price_s = f"{s.get('stars_amount', 0) or 0}⭐"
+        elif cur == "RUB":
+            price_s = f"{(s.get('fiat_amount_minor') or 0) / 100:g}₽"
+        else:
+            amt = s.get("stars_amount") or s.get("fiat_amount_minor", 0) or 0
+            price_s = f"{amt} {cur}"
         lt = s.get("license_type") or "?"
         lines.append(f"   • {nm} · {price_s} · {lt}")
     lines.append("")
