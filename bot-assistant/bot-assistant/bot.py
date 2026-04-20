@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import random
@@ -792,111 +793,123 @@ async def cmd_cancel_sched(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ Не нашёл в очереди: {token}")
 
 
-async def cmd_fix_hashtags(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Backfill `#bpm<bucket> #typebeat` в старых audio-постах канала.
+_KNOWN_SCENES = {"memphis", "detroit", "hardtrap", "phonk", "florida", "drill", "atlanta"}
+_GENERIC_TAGS = _KNOWN_SCENES | {"hard", "trap", "dark", "darktrap", "type", "beat", "typebeat", "free"}
 
-    Проходит по Supabase post_events (kind in upload/scheduled_upload),
-    для каждой строки с tg_message_id и валидным bpm:
-    - если caption уже содержит #bpm\\d+ — пропускаем
-    - иначе append "\\n\\n#bpm<bucket> #typebeat" и edit_message_caption
-    Rate-limit 2 сек, continue on fail. Одноразовая операция после 2026-04-20.
+
+def _fallback_caption_for_backfill(beat: dict) -> str:
+    """Минималистичный caption-template для backfill'а старых постов.
+
+    Используется в /fix_hashtags когда мы не можем достать оригинальный
+    caption через Bot API. Сохраняет имя + BPM/key + deep-link в бот
+    + hashtag-nav. Теряется оригинальный LLM-текст — осознанный трейдофф
+    ради работающего поиска по #bpmXXX.
+    """
+    name = beat.get("name", "Beat")
+    # Минимальная косметика: убираем расширение + подчёркивания, collapse spaces.
+    # Оригинальный текст filename сохраняется максимально — не рискуем отрезать имя.
+    name = re.sub(r"\.mp3$", "", name, flags=re.IGNORECASE)
+    name = name.replace("_", " ")
+    name = re.sub(r"\s+", " ", name).strip(" -.")
+    name = name or "Beat"
+
+    bpm = beat.get("bpm", 0)
+    key = (beat.get("key") or "").strip() or "?"
+    bucket = (bpm // 10) * 10
+
+    # Хэштеги: из tags достаём артиста и сцену, BPM и typebeat всегда
+    tags = [t.lower().strip() for t in (beat.get("tags") or []) if t]
+    scene = next((t for t in tags if t in _KNOWN_SCENES), "")
+    artist = next(
+        (t.replace(" ", "") for t in tags if t not in _GENERIC_TAGS and len(t) > 2),
+        "",
+    )
+    hashtags = []
+    if artist:
+        hashtags.append(f"#{artist}")
+    if scene:
+        hashtags.append(f"#{scene}")
+    hashtags.append(f"#bpm{bucket}")
+    hashtags.append("#typebeat")
+
+    bot_link = f"https://t.me/triplekillpost_bot?start=buy_{beat['id']}"
+    caption = (
+        f"{name}\n"
+        f"⚡ {bpm} BPM · 🎹 {key}\n\n"
+        f"🎧 MP3 Lease → {bot_link}\n"
+        f"💎 WAV · Unlimited · Exclusive — DM @iiiplfiii\n\n"
+        f"{' '.join(hashtags)}"
+    )
+    return caption
+
+
+async def cmd_fix_hashtags(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Backfill хэштегов в старых audio-постах канала.
+
+    Источник — beats_data.json (msg_id + bpm + tags для каждого бита).
+    Для каждого бита с content_type='beat' и валидным bpm переписывает
+    caption шаблоном: name + BPM/key + deep-link + хэштеги. Оригинальный
+    LLM-текст теряется — осознанный трейдофф (Option A юзера 2026-04-21).
+
+    Биты с bpm=0 (старый код не парсил filename правильно) — пропускаются
+    (Option C юзера): их backlog остаётся без тегов, но новые публикации
+    уже получат _hashtag_nav автоматически через build_tg_caption_async.
     """
     if update.effective_user.id != ADMIN_ID:
         return
-    import re as _re
-    import httpx
-    sb_url = os.getenv("SUPABASE_URL", "").strip()
-    sb_key = os.getenv("SUPABASE_KEY", "").strip()
-    if not sb_url or not sb_key:
-        await update.message.reply_text("❌ Supabase env не задан")
-        return
-    headers = {"apikey": sb_key, "Authorization": f"Bearer {sb_key}"}
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.get(
-                f"{sb_url}/rest/v1/post_events",
-                params={
-                    "select": "tg_message_id,bpm,caption,beat_name,kind,ts",
-                    "kind": "in.(upload,scheduled_upload)",
-                    "tg_message_id": "not.is.null",
-                    "order": "ts.desc",
-                    "limit": "500",
-                },
-                headers=headers,
-            )
-            if r.status_code != 200:
-                await update.message.reply_text(
-                    f"❌ Supabase SELECT failed: {r.status_code}\n{r.text[:200]}"
-                )
-                return
-            rows = r.json()
-    except Exception as e:
-        logger.exception("fix_hashtags: SELECT failed")
-        await update.message.reply_text(f"❌ SELECT exception: {e}")
-        return
+
+    beats = [
+        b for b in beats_db.BEATS_CACHE
+        if b.get("content_type") == "beat"
+        and isinstance(b.get("bpm"), int)
+        and b["bpm"] >= 80
+        and b.get("msg_id")
+    ]
 
     await update.message.reply_text(
-        f"🔍 Найдено {len(rows)} аудио-постов в post_events. Начинаю backfill (~{len(rows)*2}с)..."
+        f"🔍 Нашёл {len(beats)} битов с валидным BPM и msg_id.\n"
+        f"Будет переписан caption (оригинальный текст теряется).\n"
+        f"Приблизительное время: ~{len(beats)*2}с\n\n"
+        f"Начинаю..."
     )
-    stats = {"updated": 0, "skipped": 0, "failed": 0, "no_id": 0, "no_bpm": 0}
-    progress_msg = await update.message.reply_text("⏳ 0/" + str(len(rows)))
+    stats = {"updated": 0, "skipped": 0, "failed": 0, "too_long": 0}
+    progress_msg = await update.message.reply_text(f"⏳ 0/{len(beats)}")
 
-    for i, row in enumerate(rows, 1):
-        mid = row.get("tg_message_id")
-        bpm = row.get("bpm")
-        caption = row.get("caption") or ""
-        if not mid:
-            stats["no_id"] += 1
+    for i, beat in enumerate(beats, 1):
+        mid = beat["msg_id"]
+        try:
+            new_caption = _fallback_caption_for_backfill(beat)
+        except Exception as e:
+            logger.warning("fix_hashtags: build caption failed for beat %s: %s", beat.get("id"), e)
+            stats["failed"] += 1
             continue
-        if not isinstance(bpm, int) or bpm < 80 or bpm > 200:
-            stats["no_bpm"] += 1
-            continue
-        if _re.search(r"#bpm\d+", caption):
-            stats["skipped"] += 1
-            continue
-
-        bucket = (bpm // 10) * 10
-        tags_block = f"#bpm{bucket} #typebeat"
-        new_caption = f"{caption}\n\n{tags_block}" if caption else tags_block
-        # Telegram caption limit 1024 chars — если перебор, обрежем мягко
         if len(new_caption) > 1024:
-            keep = 1024 - len(tags_block) - 3
-            new_caption = caption[:keep].rstrip() + f"\n\n{tags_block}"
+            stats["too_long"] += 1
+            continue
 
-        # Сначала пробуем с HTML (на случай форматирования в исходном caption),
-        # при ошибке парсинга — plaintext.
         try:
             await context.bot.edit_message_caption(
                 chat_id=CHANNEL_ID,
                 message_id=mid,
                 caption=new_caption,
-                parse_mode="HTML",
+                parse_mode=None,  # plaintext — безопасно, не сломается на < / >
             )
             stats["updated"] += 1
         except TelegramError as e:
-            if "parse" in str(e).lower() or "entities" in str(e).lower():
-                try:
-                    await context.bot.edit_message_caption(
-                        chat_id=CHANNEL_ID,
-                        message_id=mid,
-                        caption=new_caption,
-                        parse_mode=None,
-                    )
-                    stats["updated"] += 1
-                except Exception as e2:
-                    logger.warning("fix_hashtags: edit %s plaintext-retry failed: %s", mid, e2)
-                    stats["failed"] += 1
+            err_s = str(e).lower()
+            if "message is not modified" in err_s or "exactly the same" in err_s:
+                stats["skipped"] += 1
             else:
-                logger.warning("fix_hashtags: edit %s failed: %s", mid, e)
+                logger.warning("fix_hashtags: edit msg_id=%s failed: %s", mid, e)
                 stats["failed"] += 1
         except Exception as e:
-            logger.warning("fix_hashtags: edit %s exception: %s", mid, e)
+            logger.warning("fix_hashtags: edit msg_id=%s exception: %s", mid, e)
             stats["failed"] += 1
 
-        if i % 10 == 0:
+        if i % 5 == 0:
             try:
                 await progress_msg.edit_text(
-                    f"⏳ {i}/{len(rows)} · ✅ {stats['updated']} · ⏭ {stats['skipped']} · ❌ {stats['failed']}"
+                    f"⏳ {i}/{len(beats)} · ✅ {stats['updated']} · ⏭ {stats['skipped']} · ❌ {stats['failed']}"
                 )
             except Exception:
                 pass
@@ -906,10 +919,10 @@ async def cmd_fix_hashtags(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✅ Готово!\n\n"
         f"Обновлено: {stats['updated']}\n"
-        f"Пропущено (уже с тегом): {stats['skipped']}\n"
-        f"Без tg_message_id: {stats['no_id']}\n"
-        f"Без bpm: {stats['no_bpm']}\n"
-        f"Ошибок edit: {stats['failed']}"
+        f"Пропущено (уже тот же caption): {stats['skipped']}\n"
+        f"Слишком длинный: {stats['too_long']}\n"
+        f"Ошибок edit: {stats['failed']}\n\n"
+        f"Поиск по #bpmXXX в канале теперь заработает для этих битов."
     )
 
 
