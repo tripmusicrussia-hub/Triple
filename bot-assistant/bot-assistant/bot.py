@@ -435,6 +435,9 @@ def kb_after_beat(beat_id, content_type="beat"):
             InlineKeyboardButton(f"⭐ {licensing.PRICE_MP3_STARS}", callback_data="buy_mp3_" + str(beat_id)),
             InlineKeyboardButton(f"💵 {licensing.PRICE_MP3_USDT:g} USDT", callback_data="buy_usdt_" + str(beat_id)),
         ])
+        rows.append([
+            InlineKeyboardButton("💎 Exclusive ($500+)", callback_data="excl_" + str(beat_id)),
+        ])
     rows.append([InlineKeyboardButton("❤️ В избранное", callback_data="fav_" + str(beat_id)),
                  InlineKeyboardButton("🎲 Случайный", callback_data="random_beat")])
     rows.append([InlineKeyboardButton("◀️ Меню", callback_data=back_map.get(content_type, "main_menu"))])
@@ -442,11 +445,11 @@ def kb_after_beat(beat_id, content_type="beat"):
 
 
 def kb_channel_beat_buy(beat_id: int) -> InlineKeyboardMarkup:
-    """Клавиатура под публикацией бита в канале: Stars + USDT + ссылка на ЛС для WAV/Exclusive."""
+    """Клавиатура под публикацией бита в канале: Stars + USDT + Exclusive inquiry."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"⭐ MP3 · {licensing.PRICE_MP3_STARS}", callback_data="buy_mp3_" + str(beat_id)),
          InlineKeyboardButton(f"💵 MP3 · {licensing.PRICE_MP3_USDT:g} USDT", callback_data="buy_usdt_" + str(beat_id))],
-        [InlineKeyboardButton("✍️ WAV / Unlimited / Exclusive", url="https://t.me/iiiplfiii")],
+        [InlineKeyboardButton("💎 WAV / Unlimited / Exclusive", callback_data="excl_" + str(beat_id))],
     ])
 
 
@@ -2012,6 +2015,41 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer(_user_error_msg("оплата"), show_alert=True)
         return
 
+    if data.startswith("excl_"):
+        # Exclusive inquiry: юзер кликнул «💎 Exclusive» → просим описать проект.
+        # Следующее его текстовое сообщение поймает handle_assistant (pending_excl state)
+        # и форварднёт админу с beat summary.
+        try:
+            beat_id = int(data[len("excl_"):])
+        except ValueError:
+            return
+        beat = beats_db.get_beat_by_id(beat_id)
+        if not beat:
+            await query.answer("Бит не найден", show_alert=True)
+            return
+        context.user_data["pending_excl"] = {
+            "beat_id": beat_id,
+            "beat_name": beat.get("name", "?"),
+            "bpm": beat.get("bpm", "?"),
+            "key": beat.get("key", "?"),
+            "post_url": beat.get("post_url", ""),
+            "asked_at": datetime.now(ZoneInfo("Europe/Moscow")).isoformat(),
+        }
+        await query.answer()
+        await bot.send_message(
+            user_id,
+            f"💎 Exclusive rights на «{beat.get('name', '?')}».\n\n"
+            "Опиши проект одним сообщением:\n"
+            "• Артист (или исполнитель)\n"
+            "• Стиль / жанр\n"
+            "• Примерная дата релиза\n"
+            "• Бюджет если есть ориентир\n\n"
+            "После отправки TRIPLE FILL свяжется в ЛС в течение 24 ч.\n"
+            "<i>Отменить: /cancel_excl</i>",
+            parse_mode="HTML",
+        )
+        return
+
     if data.startswith("buy_mp3_"):
         try:
             beat_id = int(data[len("buy_mp3_"):])
@@ -2853,6 +2891,34 @@ async def handle_assistant(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text.strip() or text.startswith("/"):
         return
 
+    # Exclusive inquiry FSM: юзер раньше кликнул «💎 Exclusive» → теперь
+    # его первое текстовое сообщение считается описанием проекта. Форвардим
+    # админу + очищаем state + благодарим юзера.
+    pending_excl = context.user_data.get("pending_excl")
+    if pending_excl:
+        desc = text.strip()[:800]  # защита от слишком длинных сообщений
+        uname = "@" + update.effective_user.username if update.effective_user.username else update.effective_user.full_name
+        context.user_data.pop("pending_excl", None)
+        post_url = pending_excl.get("post_url") or ""
+        post_line = f"\nПост: {post_url}" if post_url else ""
+        admin_msg = (
+            "💎 <b>EXCLUSIVE INQUIRY</b>\n\n"
+            f"От: {uname} (id={user_id})\n"
+            f"Бит: <b>{pending_excl['beat_name']}</b>\n"
+            f"BPM {pending_excl['bpm']} · {pending_excl['key']}"
+            f"{post_line}\n\n"
+            f"Проект:\n<i>{desc}</i>"
+        )
+        try:
+            await context.bot.send_message(ADMIN_ID, admin_msg, parse_mode="HTML")
+        except Exception:
+            logger.exception("excl forward to admin failed")
+        await update.message.reply_text(
+            "✅ Принято. TRIPLE FILL свяжется в ЛС в течение 24 часов.\n\n"
+            "Если что — пиши @iiiplfiii напрямую."
+        )
+        return
+
     # Кнопочный поиск (🔍 Поиск) — для всех, приоритет выше любого агента
     search_key = str(user_id) + "_search"
     if search_key in bulk_add_mode:
@@ -3309,6 +3375,14 @@ async def cmd_content_schedule(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
 
+async def cmd_cancel_excl(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отменяет активный exclusive inquiry (если юзер передумал)."""
+    if context.user_data.pop("pending_excl", None):
+        await update.message.reply_text("✖️ Exclusive inquiry отменён.")
+    else:
+        await update.message.reply_text("Нет активного запроса.")
+
+
 async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Сводка дня для админа: новые юзеры (с разбивкой по source), продажи,
     залитые биты. Выборка из Supabase за ts >= сегодня 00:00 МСК."""
@@ -3699,6 +3773,7 @@ async def run_bot():
     app.add_handler(CommandHandler("fix_hashtags", cmd_fix_hashtags))
     app.add_handler(CommandHandler("content", cmd_content_schedule))
     app.add_handler(CommandHandler("today", cmd_today))
+    app.add_handler(CommandHandler("cancel_excl", cmd_cancel_excl))
     app.add_handler(CommandHandler("pin_hub", cmd_pin_hub))
     app.add_handler(CommandHandler("upload_product", cmd_upload_product))
     app.add_handler(CommandHandler("cancel_product", cmd_cancel_product))
