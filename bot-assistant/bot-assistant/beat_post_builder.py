@@ -779,6 +779,7 @@ def build_pinned_hub() -> str:
         f"{packs_block}"
         f"🔍 Поиск по каталогу + lease → https://t.me/{BOT_USERNAME}\n"
         f"🎧 Все биты + landing → {LANDING_URL}\n"
+        f"📸 Instagram → https://instagram.com/{IG_HANDLE.lstrip('@')}\n"
         f"💎 WAV · Trackouts · Unlimited · Exclusive — DM {TG_HANDLE}\n\n"
         f"💰 MP3 Lease: 500⭐ / 7 USDT (untagged MP3 + TXT license, instant delivery)"
     )

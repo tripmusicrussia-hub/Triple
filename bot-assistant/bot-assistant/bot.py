@@ -792,6 +792,127 @@ async def cmd_cancel_sched(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ Не нашёл в очереди: {token}")
 
 
+async def cmd_fix_hashtags(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Backfill `#bpm<bucket> #typebeat` в старых audio-постах канала.
+
+    Проходит по Supabase post_events (kind in upload/scheduled_upload),
+    для каждой строки с tg_message_id и валидным bpm:
+    - если caption уже содержит #bpm\\d+ — пропускаем
+    - иначе append "\\n\\n#bpm<bucket> #typebeat" и edit_message_caption
+    Rate-limit 2 сек, continue on fail. Одноразовая операция после 2026-04-20.
+    """
+    if update.effective_user.id != ADMIN_ID:
+        return
+    import re as _re
+    import httpx
+    sb_url = os.getenv("SUPABASE_URL", "").strip()
+    sb_key = os.getenv("SUPABASE_KEY", "").strip()
+    if not sb_url or not sb_key:
+        await update.message.reply_text("❌ Supabase env не задан")
+        return
+    headers = {"apikey": sb_key, "Authorization": f"Bearer {sb_key}"}
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(
+                f"{sb_url}/rest/v1/post_events",
+                params={
+                    "select": "tg_message_id,bpm,caption,beat_name,kind,ts",
+                    "kind": "in.(upload,scheduled_upload)",
+                    "tg_message_id": "not.is.null",
+                    "order": "ts.desc",
+                    "limit": "500",
+                },
+                headers=headers,
+            )
+            if r.status_code != 200:
+                await update.message.reply_text(
+                    f"❌ Supabase SELECT failed: {r.status_code}\n{r.text[:200]}"
+                )
+                return
+            rows = r.json()
+    except Exception as e:
+        logger.exception("fix_hashtags: SELECT failed")
+        await update.message.reply_text(f"❌ SELECT exception: {e}")
+        return
+
+    await update.message.reply_text(
+        f"🔍 Найдено {len(rows)} аудио-постов в post_events. Начинаю backfill (~{len(rows)*2}с)..."
+    )
+    stats = {"updated": 0, "skipped": 0, "failed": 0, "no_id": 0, "no_bpm": 0}
+    progress_msg = await update.message.reply_text("⏳ 0/" + str(len(rows)))
+
+    for i, row in enumerate(rows, 1):
+        mid = row.get("tg_message_id")
+        bpm = row.get("bpm")
+        caption = row.get("caption") or ""
+        if not mid:
+            stats["no_id"] += 1
+            continue
+        if not isinstance(bpm, int) or bpm < 80 or bpm > 200:
+            stats["no_bpm"] += 1
+            continue
+        if _re.search(r"#bpm\d+", caption):
+            stats["skipped"] += 1
+            continue
+
+        bucket = (bpm // 10) * 10
+        tags_block = f"#bpm{bucket} #typebeat"
+        new_caption = f"{caption}\n\n{tags_block}" if caption else tags_block
+        # Telegram caption limit 1024 chars — если перебор, обрежем мягко
+        if len(new_caption) > 1024:
+            keep = 1024 - len(tags_block) - 3
+            new_caption = caption[:keep].rstrip() + f"\n\n{tags_block}"
+
+        # Сначала пробуем с HTML (на случай форматирования в исходном caption),
+        # при ошибке парсинга — plaintext.
+        try:
+            await context.bot.edit_message_caption(
+                chat_id=CHANNEL_ID,
+                message_id=mid,
+                caption=new_caption,
+                parse_mode="HTML",
+            )
+            stats["updated"] += 1
+        except TelegramError as e:
+            if "parse" in str(e).lower() or "entities" in str(e).lower():
+                try:
+                    await context.bot.edit_message_caption(
+                        chat_id=CHANNEL_ID,
+                        message_id=mid,
+                        caption=new_caption,
+                        parse_mode=None,
+                    )
+                    stats["updated"] += 1
+                except Exception as e2:
+                    logger.warning("fix_hashtags: edit %s plaintext-retry failed: %s", mid, e2)
+                    stats["failed"] += 1
+            else:
+                logger.warning("fix_hashtags: edit %s failed: %s", mid, e)
+                stats["failed"] += 1
+        except Exception as e:
+            logger.warning("fix_hashtags: edit %s exception: %s", mid, e)
+            stats["failed"] += 1
+
+        if i % 10 == 0:
+            try:
+                await progress_msg.edit_text(
+                    f"⏳ {i}/{len(rows)} · ✅ {stats['updated']} · ⏭ {stats['skipped']} · ❌ {stats['failed']}"
+                )
+            except Exception:
+                pass
+
+        await asyncio.sleep(2)  # мягкий rate-limit на edit_message_caption
+
+    await update.message.reply_text(
+        f"✅ Готово!\n\n"
+        f"Обновлено: {stats['updated']}\n"
+        f"Пропущено (уже с тегом): {stats['skipped']}\n"
+        f"Без tg_message_id: {stats['no_id']}\n"
+        f"Без bpm: {stats['no_bpm']}\n"
+        f"Ошибок edit: {stats['failed']}"
+    )
+
+
 async def cmd_cancel_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Прерывает любой шаг FSM upload_product."""
     if update.effective_user.id != ADMIN_ID:
@@ -3339,6 +3460,7 @@ async def run_bot():
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("queue", cmd_queue))
     app.add_handler(CommandHandler("cancel_sched", cmd_cancel_sched))
+    app.add_handler(CommandHandler("fix_hashtags", cmd_fix_hashtags))
     app.add_handler(CommandHandler("pin_hub", cmd_pin_hub))
     app.add_handler(CommandHandler("upload_product", cmd_upload_product))
     app.add_handler(CommandHandler("cancel_product", cmd_cancel_product))
