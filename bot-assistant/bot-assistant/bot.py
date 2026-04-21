@@ -3598,11 +3598,22 @@ async def post_init(application):
         beats_db.load_beats()
     load_users()
     logger.info("Bot started: " + str(len(beats_db.BEATS_CACHE)) + " beats, " + str(len(all_users)) + " users")
-    # Восстанавливаем очередь плановых публикаций с диска
+    # Восстанавливаем очередь плановых публикаций.
+    # КРИТИЧНО: load_queue() это СИНХРОННЫЙ call → SDK Supabase + storage
+    # downloads. Без wait_for'а может заблокировать весь post_init
+    # (Render network quirks) → scheduled_publish_loop никогда не стартует.
+    # Timeout 30с + to_thread + graceful fallback: даже если load_queue
+    # помрёт, scheduler запустится и safety-net reload в его цикле
+    # заполнит _QUEUE на следующей минуте.
     try:
         import publish_scheduler
-        n = publish_scheduler.load_queue()
+        n = await asyncio.wait_for(
+            asyncio.to_thread(publish_scheduler.load_queue),
+            timeout=30.0,
+        )
         logger.info("publish_scheduler: restored %d queued items on startup", n)
+    except asyncio.TimeoutError:
+        logger.warning("publish_scheduler: load_queue timed out (30s) — scheduler will self-heal")
     except Exception:
         logger.exception("publish_scheduler restore failed (non-fatal)")
     # Восстанавливаем pending_products — недосохранённые продукты на preview-шаге.
@@ -3620,11 +3631,42 @@ async def post_init(application):
 
 
 async def scheduled_publish_loop(bot):
-    """Каждые 60с проверяет очередь publish_scheduler и публикует due item'ы."""
+    """Каждые 60с проверяет очередь publish_scheduler и публикует due item'ы.
+
+    Self-healing: если `_QUEUE` пустой — пробуем reload из Supabase.
+    Закрывает случай когда post_init.load_queue упал / timeout'нулся
+    или бот рестартился — scheduler сам восстановит очередь через минуту.
+
+    Tick-log каждые 5 минут показывает что loop жив и что у него в
+    памяти — без этого log'а мы слепы к состоянию scheduler'а.
+    """
     import publish_scheduler
+    iteration = 0
     while True:
+        iteration += 1
         try:
-            for item in publish_scheduler.due_items():
+            # Self-heal: пустой _QUEUE → reload из Supabase
+            if not publish_scheduler._QUEUE:
+                try:
+                    n = await asyncio.wait_for(
+                        asyncio.to_thread(publish_scheduler.load_queue),
+                        timeout=30.0,
+                    )
+                    if n > 0:
+                        logger.info("scheduled_publish_loop: reloaded %d items (was empty)", n)
+                except asyncio.TimeoutError:
+                    logger.warning("scheduled_publish_loop: reload timed out, skipping iteration")
+                except Exception:
+                    logger.exception("scheduled_publish_loop: auto-reload failed")
+
+            due = publish_scheduler.due_items()
+            qsize = publish_scheduler.queue_size()
+            # Tick-log каждые 5 минут: видимость в logs не спамя
+            if iteration == 1 or iteration % 5 == 0:
+                logger.info("scheduled_publish_loop: tick #%d, _QUEUE=%d due=%d",
+                            iteration, qsize, len(due))
+
+            for item in due:
                 try:
                     await _execute_scheduled_publish(bot, item)
                     publish_scheduler.mark_published(item["token"])
