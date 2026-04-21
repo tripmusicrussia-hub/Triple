@@ -436,14 +436,15 @@ def kb_after_beat(beat_id, content_type="beat"):
             InlineKeyboardButton(f"⭐ {licensing.PRICE_MP3_STARS}", callback_data="buy_mp3_" + str(beat_id)),
             InlineKeyboardButton(f"💵 {licensing.PRICE_MP3_USDT:g} USDT", callback_data="buy_usdt_" + str(beat_id)),
         ])
-        # RUB-кнопка только если YooKassa-токен настроен в env. Иначе скрыта.
-        if YOOKASSA_PROVIDER_TOKEN:
-            rows.append([
-                InlineKeyboardButton(
-                    f"💳 {licensing.PRICE_MP3_RUB}₽ (MIR/СБП)",
-                    callback_data="buy_rub_" + str(beat_id),
-                ),
-            ])
+        # RUB-кнопка всегда видима (для KYC YooKassa нужно показать цены в ₽).
+        # Если token не задан — handler graceful: alert «активируется после
+        # подтверждения YooKassa». Юзер видит цену, флоу понятен.
+        rows.append([
+            InlineKeyboardButton(
+                f"💳 {licensing.PRICE_MP3_RUB}₽ (MIR/СБП)",
+                callback_data="buy_rub_" + str(beat_id),
+            ),
+        ])
         rows.append([
             InlineKeyboardButton("💎 Exclusive ($500+)", callback_data="excl_" + str(beat_id)),
         ])
@@ -454,19 +455,20 @@ def kb_after_beat(beat_id, content_type="beat"):
 
 
 def kb_channel_beat_buy(beat_id: int) -> InlineKeyboardMarkup:
-    """Клавиатура под публикацией бита в канале: Stars + USDT (+ RUB если задан) + Exclusive."""
+    """Клавиатура под публикацией бита в канале: Stars + USDT + RUB + Exclusive.
+
+    RUB-кнопка всегда видима (нужно для KYC YooKassa). Если token не задан —
+    handler показывает alert «активируется после подтверждения».
+    """
     rows = [
         [InlineKeyboardButton(f"⭐ MP3 · {licensing.PRICE_MP3_STARS}", callback_data="buy_mp3_" + str(beat_id)),
          InlineKeyboardButton(f"💵 MP3 · {licensing.PRICE_MP3_USDT:g} USDT", callback_data="buy_usdt_" + str(beat_id))],
+        [InlineKeyboardButton(
+            f"💳 MP3 · {licensing.PRICE_MP3_RUB}₽ (MIR/СБП)",
+            callback_data="buy_rub_" + str(beat_id),
+        )],
+        [InlineKeyboardButton("💎 WAV / Unlimited / Exclusive", callback_data="excl_" + str(beat_id))],
     ]
-    if YOOKASSA_PROVIDER_TOKEN:
-        rows.append([
-            InlineKeyboardButton(
-                f"💳 MP3 · {licensing.PRICE_MP3_RUB}₽ (MIR/СБП)",
-                callback_data="buy_rub_" + str(beat_id),
-            ),
-        ])
-    rows.append([InlineKeyboardButton("💎 WAV / Unlimited / Exclusive", callback_data="excl_" + str(beat_id))])
     return InlineKeyboardMarkup(rows)
 
 
