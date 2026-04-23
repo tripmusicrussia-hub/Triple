@@ -13,7 +13,7 @@ MSK_TZ = ZoneInfo("Europe/Moscow")
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputFile, LabeledPrice
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
-    CallbackQueryHandler, PreCheckoutQueryHandler, filters, ContextTypes
+    CallbackQueryHandler, PreCheckoutQueryHandler, ChatMemberHandler, filters, ContextTypes
 )
 from telegram.error import TelegramError
 from config import (
@@ -1392,7 +1392,27 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await query.message.reply_text(
                         f"📱 YT Short опубликован: {short_url}"
                     )
-                    # Cleanup — short file нужен только для upload'а
+                    # ── TikTok semi-auto: шлём админу mp4 + caption ──
+                    # Full API upload в TikTok требует 1-4 нед approval.
+                    # Пока админ постит сам: открыть в TG на телефоне,
+                    # сохранить mp4, кинуть в TikTok app. 30 сек.
+                    try:
+                        tiktok_caption = beat_post_builder.build_tiktok_caption(meta)
+                        with open(short_path, "rb") as vf:
+                            await bot.send_video(
+                                ADMIN_ID,
+                                video=InputFile(vf, filename=short_path.name),
+                                caption=(
+                                    f"📱 <b>Готовый TikTok для {meta.name}</b>\n\n"
+                                    f"<b>Caption (скопируй):</b>\n<code>{tiktok_caption}</code>\n\n"
+                                    f"<i>Открой на телефоне → сохрани видео → загрузи в TikTok app</i>"
+                                ),
+                                parse_mode="HTML",
+                            )
+                        logger.info("TikTok mp4 sent to admin for %s", meta.name)
+                    except Exception:
+                        logger.exception("TikTok send to admin failed (non-fatal)")
+                    # Cleanup — short file нужен был только для upload'а
                     try:
                         short_path.unlink(missing_ok=True)
                     except Exception:
@@ -3525,6 +3545,60 @@ async def handle_successful_payment(update: Update, context: ContextTypes.DEFAUL
         logger.exception("handle_successful_payment failed")
 
 
+# ── Welcome funnel: детект new channel subscribers ────────────
+
+WELCOME_TEXT_NEW_SUB = (
+    "👋 Привет! Добро пожаловать в <b>@iiiplfiii</b>.\n\n"
+    "Канал про hard trap beats в стиле Memphis/Detroit.\n"
+    "Type beats под Kenny Muney, Key Glock, Future, Obladaet и др.\n\n"
+    "🎁 Бесплатный sample pack ждёт тебя — напиши /start в @triplekillpost_bot\n"
+    "🎧 Каталог 167 битов — там же в боте\n"
+    "💰 MP3 Lease от 1500⭐ / 20 USDT / 1700₽\n"
+    "🎛 Сведение треков — 5000₽\n\n"
+    "Вопросы — пиши @iiiplfiii"
+)
+
+
+async def handle_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Детект новых подписчиков канала @iiiplfiii → welcome DM (если юзер
+    когда-то делал /start с ботом) или silent (TG запрещает первым писать).
+
+    Требует бот = админ канала с правом видеть members.
+
+    Transition: left/kicked → member = новая подписка.
+    Только для CHANNEL_ID, игнорируем другие чаты где бот.
+    """
+    cmu = update.chat_member
+    if not cmu:
+        return
+    chat = cmu.chat
+    # Фильтр: только наш канал
+    if str(chat.id) != str(CHANNEL_ID) and chat.username != CHANNEL_ID.lstrip("@"):
+        return
+    old = cmu.old_chat_member.status if cmu.old_chat_member else None
+    new = cmu.new_chat_member.status if cmu.new_chat_member else None
+    # Новая подписка: раньше left/kicked → теперь member
+    if old in ("left", "kicked", "restricted") and new == "member":
+        new_user = cmu.new_chat_member.user
+        if new_user.is_bot:
+            return
+        try:
+            await context.bot.send_message(
+                new_user.id,
+                WELCOME_TEXT_NEW_SUB,
+                parse_mode="HTML",
+            )
+            logger.info("welcome: DM sent to new subscriber %s (id=%d)",
+                        new_user.username or new_user.full_name, new_user.id)
+        except TelegramError as e:
+            # Forbidden — юзер не /start'ал с ботом. Telegram не даёт
+            # первым писать. Fallback — ничего не делаем, не спамим канал.
+            logger.info("welcome: cannot DM %s (not started bot): %s",
+                        new_user.id, e)
+        except Exception:
+            logger.exception("welcome: unexpected error for user %d", new_user.id)
+
+
 # ── CryptoBot (USDT) payments ─────────────────────────────────
 
 # Активные USDT-инвойсы: invoice_id → (user_id, beat_id, created_at)
@@ -3731,6 +3805,83 @@ async def cmd_cancel_excl(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✖️ Exclusive inquiry отменён.")
     else:
         await update.message.reply_text("Нет активного запроса.")
+
+
+async def cmd_feature(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/feature <track_url> <beat_id>
+
+    Social proof: админ постит в канал «🎤 На бите X рэпер записал трек Y →
+    [link]». Это +trust для новых подписчиков (видно что бит реально
+    работает у артистов).
+
+    Опционально +3-й аргумент: ссылка на артиста/название для отображения.
+    """
+    if update.effective_user.id != ADMIN_ID:
+        return
+    args = context.args or []
+    if len(args) < 2:
+        await update.message.reply_text(
+            "Usage: /feature <track_url> <beat_id> [<artist_name>]\n\n"
+            "Пример: /feature https://soundcloud.com/user/track 9948215\n"
+            "Или: /feature https://youtu.be/xxx 9948215 @rapper_name"
+        )
+        return
+    track_url = args[0].strip()
+    try:
+        beat_id = int(args[1])
+    except ValueError:
+        await update.message.reply_text(f"⚠️ beat_id должен быть числом, получил: {args[1]}")
+        return
+    artist_display = " ".join(args[2:]).strip() if len(args) > 2 else ""
+
+    beat = beats_db.get_beat_by_id(beat_id)
+    if not beat:
+        await update.message.reply_text(
+            f"⚠️ Бит id={beat_id} не найден в каталоге. Проверь id через /stats."
+        )
+        return
+
+    beat_name = beat.get("name", "?")
+    bpm = beat.get("bpm", "?")
+    key = beat.get("key", "?")
+    artist_line = f" — {artist_display}" if artist_display else ""
+
+    post_text = (
+        f"🎤 <b>На бите «{beat_name}» записан трек{artist_line}</b>\n\n"
+        f"⚡ {bpm} BPM · 🎹 {key}\n\n"
+        f"🎧 Слушать: {track_url}\n\n"
+        f"<i>Хочешь такой же? Этот бит ещё доступен:</i>"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"💰 Купить «{beat_name}» — {licensing.PRICE_MP3_STARS}⭐ / {licensing.PRICE_MP3_RUB}₽",
+            url=f"https://t.me/{beat_post_builder.BOT_USERNAME}?start=buy_{beat_id}"
+        )],
+    ])
+    try:
+        sent = await context.bot.send_message(
+            CHANNEL_ID, post_text, parse_mode="HTML", reply_markup=kb,
+            disable_web_page_preview=False,
+        )
+        # Лог события
+        try:
+            import post_analytics
+            post_analytics.log_event(
+                kind="feature", beat_id=beat_id, beat_name=beat_name,
+                bpm=beat.get("bpm"), key=beat.get("key", ""),
+                artist=artist_display,
+                track_url=track_url,
+                tg_message_id=sent.message_id,
+                caption=post_text[:500],
+            )
+        except Exception:
+            logger.exception("feature: post_analytics log failed (non-fatal)")
+        await update.message.reply_text(
+            f"✅ Feature опубликован в канал: https://t.me/{CHANNEL_ID.lstrip('@')}/{sent.message_id}"
+        )
+    except Exception as e:
+        logger.exception("feature: channel post failed")
+        await update.message.reply_text(f"❌ Не смог запостить в канал: {e}")
 
 
 async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4004,6 +4155,66 @@ async def _execute_scheduled_publish(bot, item: dict):
                 beats_db.save_beats()
             except Exception:
                 logger.exception("scheduled: beats_db append failed (non-fatal)")
+
+            # ── YT Shorts: 9:16 upload для discovery feed ─────────
+            # Регрессия из manual flow (bot.py:1362-1399) — в scheduler
+            # этого не было. Бит получал только long YT video и терял
+            # половину YT-трафика. Теперь auto.
+            short_path_for_tiktok = None  # сохраним для TikTok send ниже
+            try:
+                import shorts_builder
+                from beat_upload import BeatMeta as _BM
+                mp3_path = _P(item["mp3_path"])
+                short_path = video_path.with_name(f"short_{video_path.name}")
+                await loop.run_in_executor(
+                    None, lambda: shorts_builder.build_short(
+                        thumb_path, mp3_path, short_path,
+                    ),
+                )
+                meta_obj_short = _BM(**meta_d)
+                short_title = beat_post_builder.build_shorts_title(meta_obj_short)
+                short_desc = beat_post_builder.build_shorts_description(
+                    meta_obj_short, beat_id=reserved_beat_id,
+                    full_video_url=f"https://youtu.be/{vid}",
+                )
+                short_tags = beat_post_builder.build_shorts_tags(meta_obj_short)
+                short_vid = await loop.run_in_executor(
+                    None, lambda: yt_api.upload_video(
+                        short_path, short_title, short_desc, short_tags, thumb_path,
+                    ),
+                )
+                logger.info("scheduled: YT Short uploaded: https://youtu.be/%s", short_vid)
+                short_path_for_tiktok = short_path  # не удаляем пока — TikTok пошлёт
+            except Exception:
+                logger.exception("scheduled: YT Shorts upload failed (non-fatal)")
+
+            # ── TikTok: semi-auto (бот шлёт mp4 админу в ЛС) ──────
+            # Полный API upload требует TikTok Content Posting API approval
+            # (1-4 недели). Пока — админ постит руками из TG на телефоне.
+            if short_path_for_tiktok and short_path_for_tiktok.exists():
+                try:
+                    from beat_upload import BeatMeta as _BM2
+                    meta_obj_tt = _BM2(**meta_d)
+                    tiktok_caption = beat_post_builder.build_tiktok_caption(meta_obj_tt)
+                    with open(short_path_for_tiktok, "rb") as vf:
+                        await bot.send_video(
+                            ADMIN_ID,
+                            video=InputFile(vf, filename=short_path_for_tiktok.name),
+                            caption=(
+                                f"📱 <b>Готовый TikTok для {meta_obj_tt.name}</b>\n\n"
+                                f"<b>Caption (скопируй):</b>\n<code>{tiktok_caption}</code>\n\n"
+                                f"<i>Открой на телефоне → сохрани видео → загрузи в TikTok app</i>"
+                            ),
+                            parse_mode="HTML",
+                        )
+                    logger.info("scheduled: TikTok mp4 sent to admin for %s", meta_obj_tt.name)
+                except Exception:
+                    logger.exception("scheduled: TikTok send to admin failed (non-fatal)")
+                # Cleanup short mp4
+                try:
+                    short_path_for_tiktok.unlink(missing_ok=True)
+                except Exception:
+                    pass
         except Exception:
             logger.exception("scheduled: YT upload failed")
             yt_ok = False
@@ -4181,11 +4392,15 @@ async def run_bot():
     app.add_handler(CommandHandler("pin_hub", cmd_pin_hub))
     app.add_handler(CommandHandler("upload_product", cmd_upload_product))
     app.add_handler(CommandHandler("cancel_product", cmd_cancel_product))
+    app.add_handler(CommandHandler("feature", cmd_feature))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(PreCheckoutQueryHandler(handle_precheckout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, handle_successful_payment))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    # ChatMemberHandler.CHAT_MEMBER — получаем updates о members в чатах
+    # где бот admin. Наш канал @iiiplfiii — основной use-case.
+    app.add_handler(ChatMemberHandler(handle_chat_member_update, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_assistant))
     app.add_handler(MessageHandler(filters.ALL, handle_message))
     logger.info("Starting bot...")
@@ -4198,7 +4413,13 @@ async def run_bot():
     # publications не работали никогда.
     await post_init(app)
     await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
+    # allowed_updates включает "chat_member" — без этого ChatMemberHandler
+    # не получает события о новых подписчиках канала. По умолчанию TG
+    # не шлёт chat_member updates (security/traffic).
+    await app.updater.start_polling(
+        drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES,
+    )
     await asyncio.Event().wait()
 
 

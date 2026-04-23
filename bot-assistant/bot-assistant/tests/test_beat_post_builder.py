@@ -2,6 +2,7 @@
 from beat_upload import parse_filename
 from beat_post_builder import (
     build_yt_title, build_shorts_title, build_shorts_tags,
+    build_tiktok_caption,
     _hashtag_nav, _fmt_ts,
 )
 
@@ -61,6 +62,39 @@ class TestShortsTags:
     def test_unique(self):
         tags = build_shorts_tags(_beat())
         assert len(set(tags)) == len(tags)
+
+
+class TestTiktokCaption:
+    def test_contains_fyp_tag(self):
+        # #fyp обязателен для TikTok discovery
+        caption = build_tiktok_caption(_beat())
+        assert "#fyp" in caption
+
+    def test_contains_foryou_tag(self):
+        caption = build_tiktok_caption(_beat())
+        assert "#foryou" in caption
+
+    def test_contains_beat_name(self):
+        caption = build_tiktok_caption(_beat())
+        assert "HEAT" in caption
+
+    def test_contains_artist_slug(self):
+        caption = build_tiktok_caption(_beat())
+        assert "#kennymuneytypebeat" in caption
+
+    def test_contains_bpm_bucket(self):
+        caption = build_tiktok_caption(_beat())
+        assert "#bpm160" in caption
+
+    def test_within_length_limit(self):
+        # Не более 500 chars — TikTok показывает ~150 в первом экране
+        caption = build_tiktok_caption(_beat())
+        assert len(caption) <= 500
+
+    def test_hashtags_unique(self):
+        caption = build_tiktok_caption(_beat())
+        tags = [w for w in caption.split() if w.startswith("#")]
+        assert len(set(tags)) == len(tags), f"дубликаты в {tags}"
 
 
 class TestHashtagNav:

@@ -426,6 +426,50 @@ def build_shorts_description(
     return "\n".join(parts)
 
 
+def build_tiktok_caption(beat: BeatMeta) -> str:
+    """Caption для TikTok-поста. Semi-auto flow: бот шлёт mp4 + этот
+    caption админу в ЛС, админ постит в TikTok app руками.
+
+    Дизайн:
+    - Первая строка — hook с огоньком (showing up в первом экране)
+    - Вторая — tech-line (BPM + key) для producer-аудитории
+    - 8-10 hashtags: discovery (#fyp #foryou) + niche (#typebeat) +
+      artist + scene + mood. Порядок важен — TikTok ранжирует первые.
+    - Длина ≤500 chars (TikTok max 2200, но в первом экране ~150)
+    - URL не включаем — в TikTok caption ссылки не кликабельны,
+      смысла тратить символы нет. Все конверсии через bio-link.
+    """
+    prof = _get_profile(beat.artist_raw)
+    primary_slug = beat.artist_display.split(" x ")[0].lower().replace(" ", "")
+    scene_slug = prof["scene"].lower().replace(" ", "")
+    mood_slug = prof.get("mood", "").split(" ")[0].lower().replace(",", "")
+
+    hook = f"🔥 {beat.name} — {beat.artist_display} type beat"
+    tech = f"{beat.bpm} BPM · {beat.key}"
+
+    # Порядок hashtags: discovery → niche → artist → scene → mood
+    # Discovery hashtags обязательны для TikTok FYP
+    hashtags = [
+        "#fyp", "#foryou",
+        "#typebeat", "#beatmaker", "#hardtrap",
+        f"#{primary_slug}typebeat",
+        f"#{scene_slug}",
+        f"#bpm{(beat.bpm // 10) * 10}",
+    ]
+    if mood_slug and mood_slug not in ("", primary_slug, scene_slug):
+        hashtags.append(f"#{mood_slug}")
+    hashtags.append("#musicproducer")
+
+    # Dedupe сохраняя порядок
+    seen, tag_out = set(), []
+    for t in hashtags:
+        if t not in seen:
+            seen.add(t)
+            tag_out.append(t)
+
+    return f"{hook}\n{tech}\n\n{' '.join(tag_out)}"
+
+
 def build_shorts_tags(beat: BeatMeta) -> list[str]:
     """Тэги для YT Short — компактнее обычного набора. Обязательно 'shorts'."""
     prof = _get_profile(beat.artist_raw)
