@@ -272,6 +272,8 @@ def kb_main_menu():
         [InlineKeyboardButton(f"🎤 Треки ({tracks})", callback_data="menu_track"),
          InlineKeyboardButton(f"🔀 Ремиксы ({remixes})", callback_data="menu_remix")],
         [InlineKeyboardButton("📦 Kits & Packs", callback_data="menu_products")],
+        [InlineKeyboardButton(f"🎛 Сведение треков ({licensing.PRICE_MIX_RUB}₽)", callback_data="menu_mixing")],
+        [InlineKeyboardButton("ℹ️ Услуги и цены", callback_data="menu_services")],
         # Quick-filter chips — быстрый доступ к популярным сценам / mood
         [InlineKeyboardButton("🔥 Hard", callback_data="qf_hard"),
          InlineKeyboardButton("🌃 Memphis", callback_data="qf_memphis"),
@@ -2087,6 +2089,176 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if data == "menu_services":
+        # Подробное описание всех товаров/услуг. Нужно для YooKassa KYC и для
+        # юзеров чтобы понимать разницу между MP3/WAV/Exclusive/Kits/Mixing.
+        text = (
+            "<b>ℹ️ Услуги и цены TRIPLE FILL</b>\n\n"
+
+            "🎧 <b>MP3 Lease — 1500⭐ / 20 USDT / 1700₽</b>\n"
+            "Лицензия на использование бита в своих треках. После оплаты мгновенно "
+            "приходит MP3 (untagged, без водяного знака) + TXT-файл лицензии.\n"
+            "• До 100 000 стримов, до 2 000 копий\n"
+            "• 1 music video (без монетизации на YT)\n"
+            "• Указать credit: <i>prod. by TRIPLE FILL</i>\n"
+            "• Non-exclusive (бит может быть куплен и другими)\n\n"
+
+            "💎 <b>WAV / Unlimited / Exclusive — от $150 до $1500</b>\n"
+            "WAV + стемы, снятие лимитов по стримам/копиям, или полная эксклюзивность "
+            "(бит снимается с продажи). Обсуждается в ЛС @iiiplfiii.\n\n"
+
+            "📦 <b>Drum Kits / Sample Packs / Loop Packs — 1000⭐-1500⭐</b>\n"
+            "Готовые наборы ударных, сэмплов, лупов для продюсеров. После оплаты — "
+            "zip-файл мгновенно в ЛС. Смотри каталог «📦 Kits &amp; Packs» в меню.\n\n"
+
+            f"🎛 <b>Сведение треков (mixing + mastering) — "
+            f"{licensing.PRICE_MIX_STARS}⭐ / {licensing.PRICE_MIX_USDT:g} USDT / {licensing.PRICE_MIX_RUB}₽</b>\n"
+            "Готовый master-файл твоего трека за 3-5 рабочих дней.\n"
+            "• Что ты присылаешь: стемы WAV (вокал, биты, инструменты отдельно)\n"
+            "• Что получаешь: mix-mastered WAV (24-bit, -14 LUFS для стримов)\n"
+            "• Оплата сначала в боте → потом стемы в DM @iiiplfiii\n"
+            "Заказать: кнопка «🎛 Сведение треков» в главном меню.\n\n"
+
+            "<b>Как купить</b>\n"
+            "⭐ Stars — через Telegram native payment (международно)\n"
+            "💵 USDT — через CryptoBot (TRON/TON)\n"
+            "💳 1700₽ / 5000₽ — карта МИР / Visa / СБП через YooKassa\n\n"
+
+            "Вопросы — пиши @iiiplfiii"
+        )
+        await _nav_reply(
+            query, text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"🎛 Заказать сведение ({licensing.PRICE_MIX_RUB}₽)", callback_data="menu_mixing")],
+                [InlineKeyboardButton("🎹 К битам", callback_data="menu_beat"),
+                 InlineKeyboardButton("📦 Kits & Packs", callback_data="menu_products")],
+                [InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")],
+            ]),
+        )
+        return
+
+    if data == "menu_mixing":
+        # Mixing service: отдельный товар (не бит). Покупка через Stars/USDT/RUB,
+        # после оплаты — клиент высылает стемы в DM @iiiplfiii.
+        text = (
+            "<b>🎛 Сведение треков (mix + master)</b>\n\n"
+            f"<b>Цена: {licensing.PRICE_MIX_STARS}⭐ / {licensing.PRICE_MIX_USDT:g} USDT / "
+            f"{licensing.PRICE_MIX_RUB}₽</b> за 1 трек «под ключ»\n\n"
+
+            "<b>Что входит:</b>\n"
+            "• Сведение (балансы, панорама, компрессия, EQ, эффекты)\n"
+            "• Мастеринг (loudness −14 LUFS для стримов, пиковая −1 dBTP)\n"
+            "• 1 ревизия правок если что-то нужно подправить\n\n"
+
+            "<b>Срок:</b> 3-5 рабочих дней с момента получения стемов.\n\n"
+
+            "<b>Что от тебя:</b>\n"
+            "1. Оплатить заказ (кнопки ниже)\n"
+            "2. Прислать в DM @iiiplfiii:\n"
+            "   — стемы в формате WAV (24-bit, 44.1 kHz)\n"
+            "   — референс-трек (на что ориентируемся)\n"
+            "   — краткое ТЗ: жанр, акценты, пожелания\n\n"
+
+            "<b>Что получаешь:</b> готовый master WAV + ревизия в цене.\n\n"
+            "<i>Вопросы до оплаты — пиши @iiiplfiii</i>"
+        )
+        rows = [
+            [InlineKeyboardButton(f"⭐ {licensing.PRICE_MIX_STARS}", callback_data="buy_mix_stars"),
+             InlineKeyboardButton(f"💵 {licensing.PRICE_MIX_USDT:g} USDT", callback_data="buy_mix_usdt")],
+            [InlineKeyboardButton(f"💳 {licensing.PRICE_MIX_RUB}₽ (MIR/СБП)", callback_data="buy_mix_rub")],
+            [InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")],
+        ]
+        await _nav_reply(query, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    if data == "buy_mix_stars":
+        # Mixing payment через Telegram Stars
+        try:
+            await bot.send_invoice(
+                chat_id=user_id,
+                title="🎛 Сведение трека"[:32],
+                description=(
+                    f"Mix + master твоего трека за 3-5 рабочих дней. "
+                    f"После оплаты пришли стемы WAV в DM @iiiplfiii. "
+                    f"Готовый master WAV + 1 ревизия в цене."
+                )[:255],
+                payload="mixing_service:stars",
+                provider_token="",
+                currency="XTR",
+                prices=[LabeledPrice(label="Mixing & Mastering", amount=licensing.PRICE_MIX_STARS)],
+            )
+            await query.answer()
+        except TelegramError as e:
+            logger.warning("send_invoice mixing stars failed for %s: %s", user_id, e)
+            await query.answer("Сначала напиши /start в ЛС", show_alert=True)
+        except Exception:
+            logger.exception("send_invoice mixing stars error")
+            await query.answer(_user_error_msg("оплата"), show_alert=True)
+        return
+
+    if data == "buy_mix_usdt":
+        # Mixing payment через CryptoBot USDT
+        try:
+            invoice = await cryptobot.create_invoice(
+                amount=licensing.PRICE_MIX_USDT,
+                description=f"Mixing & Mastering — TRIPLE FILL",
+                payload=f"mixing_service:{user_id}",
+            )
+            if invoice:
+                invoice_id = invoice["invoice_id"]
+                pay_url = invoice["pay_url"]
+                pending_usdt_invoices[invoice_id] = {
+                    "user_id": user_id, "beat_id": 0, "kind": "mixing",
+                    "created_at": datetime.now(),
+                }
+                await bot.send_message(
+                    user_id,
+                    f"💵 Оплата {licensing.PRICE_MIX_USDT:g} USDT через CryptoBot\n\n"
+                    f"<a href='{pay_url}'>Перейти к оплате</a>\n\n"
+                    "После оплаты автоматически придёт подтверждение.",
+                    parse_mode="HTML", disable_web_page_preview=False,
+                )
+                await query.answer()
+                asyncio.create_task(poll_usdt_invoice(bot, invoice_id, user_id, 0, kind="mixing"))
+            else:
+                await query.answer("CryptoBot недоступен, попробуй Stars или RUB", show_alert=True)
+        except Exception:
+            logger.exception("mixing USDT invoice error")
+            await query.answer(_user_error_msg("оплата"), show_alert=True)
+        return
+
+    if data == "buy_mix_rub":
+        # Mixing payment через YooKassa (RUB)
+        if not YOOKASSA_PROVIDER_TOKEN:
+            await query.answer(
+                "RUB-оплата активируется после подтверждения YooKassa. "
+                "Пока используй ⭐ Stars или 💵 USDT.",
+                show_alert=True,
+            )
+            return
+        try:
+            await bot.send_invoice(
+                chat_id=user_id,
+                title="🎛 Сведение трека"[:32],
+                description=(
+                    f"Mix + master за 3-5 рабочих дней. После оплаты пришли стемы WAV "
+                    f"в DM @iiiplfiii. Готовый master WAV + 1 ревизия в цене."
+                )[:255],
+                payload="mixing_service:rub",
+                provider_token=YOOKASSA_PROVIDER_TOKEN,
+                currency="RUB",
+                prices=[LabeledPrice(label="Mixing & Mastering", amount=licensing.PRICE_MIX_RUB * 100)],
+                need_email=False,
+            )
+            await query.answer()
+        except TelegramError as e:
+            logger.warning("send_invoice mixing rub failed for %s: %s", user_id, e)
+            await query.answer("Сначала напиши /start в ЛС", show_alert=True)
+        except Exception:
+            logger.exception("send_invoice mixing rub error")
+            await query.answer(_user_error_msg("оплата"), show_alert=True)
+        return
+
     if data.startswith("buy_rub_"):
         # RUB-оплата через YooKassa (MIR/Visa/MC/СБП). Native Telegram Payments 2.0.
         # Webhook подтверждения → handle_successful_payment → _deliver_mp3_lease.
@@ -3187,6 +3359,68 @@ async def _deliver_product(bot, user, product: dict, *, payment_charge_id: str,
         pass
 
 
+async def _deliver_mixing_service(bot, user, *, payment_charge_id: str,
+                                    amount: int | float, currency: str) -> None:
+    """После оплаты mixing: клиенту отправляем инструкцию что прислать,
+    админу — заявку с deadline'ом. Физический файл не отдаём — услуга.
+    Оплата логируется в sales как license_type='mixing_service'.
+    """
+    buyer_name = (user.full_name or user.username or str(user.id)).strip()
+    handle = "@" + user.username if user.username else user.full_name
+    try:
+        await bot.send_message(
+            user.id,
+            "✅ <b>Оплата получена, заказ на сведение оформлен!</b>\n\n"
+            "<b>Что делать дальше:</b>\n"
+            "1. Напиши в ЛС @iiiplfiii «пришёл на сведение» — я свяжусь с тобой\n"
+            "2. Пришли:\n"
+            "   • Стемы WAV (24-bit, 44.1 kHz) — вокал, биты, инструменты отдельными файлами\n"
+            "   • Референс-трек (ссылку на Spotify / YT / как звучать)\n"
+            "   • Краткое ТЗ: жанр, желаемая громкость, акценты\n"
+            "3. Через 3-5 рабочих дней → готовый master WAV\n"
+            "4. Если нужны правки — 1 ревизия в цене\n\n"
+            f"<i>Номер заказа: {payment_charge_id[:16]}...</i>",
+            parse_mode="HTML",
+        )
+    except Exception:
+        logger.exception("mixing: client instructions send failed")
+
+    try:
+        amount_disp = f"{amount}⭐" if currency == "XTR" else (
+            f"{amount/100:g}₽" if currency == "RUB" else f"{amount} {currency}"
+        )
+        await bot.send_message(
+            ADMIN_ID,
+            "🎛 <b>НОВЫЙ ЗАКАЗ: Сведение треков</b>\n\n"
+            f"Клиент: {handle} (id={user.id})\n"
+            f"Сумма: {amount_disp}\n"
+            f"Charge: <code>{payment_charge_id}</code>\n\n"
+            "⏱ Дедлайн: 3-5 рабочих дней с момента получения стемов.\n"
+            "📬 Жди сообщения клиента с стемами в ЛС.",
+            parse_mode="HTML",
+        )
+    except Exception:
+        logger.exception("mixing: admin notification failed")
+
+    try:
+        sales.log_sale(
+            buyer_tg_id=user.id,
+            buyer_username=user.username,
+            buyer_name=buyer_name,
+            beat_id=0,
+            beat_name="Mixing Service",
+            license_type="mixing_service",
+            stars_amount=int(amount) if currency == "XTR" else 0,
+            fiat_amount_minor=int(amount) if currency != "XTR" else 0,
+            currency=currency,
+            payment_charge_id=payment_charge_id,
+            provider_charge_id=None,
+            status="completed",
+        )
+    except Exception:
+        logger.exception("mixing: sales.log_sale failed")
+
+
 # ── Telegram Stars payments ───────────────────────────────────
 
 async def handle_precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3196,6 +3430,7 @@ async def handle_precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE)
     Payload форматы:
         mp3_lease:<beat_id>          — MP3 Lease на бит
         product:<product_id>         — drum kit / sample pack / loop pack
+        mixing_service:<variant>     — сведение треков (stars/usdt/rub)
     """
     pcq = update.pre_checkout_query
     payload = pcq.invoice_payload or ""
@@ -3211,6 +3446,10 @@ async def handle_precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if not prod or prod.get("content_type") not in licensing.PRODUCT_TYPE_LABELS:
                 await pcq.answer(ok=False, error_message="Продукт больше недоступен")
                 return
+        elif payload.startswith("mixing_service:"):
+            # Mixing service — ничего дополнительно валидировать не нужно,
+            # услуга всегда доступна. Stars/USDT/RUB — все варианты ok.
+            pass
         else:
             await pcq.answer(ok=False, error_message="Неизвестный тип покупки")
             return
@@ -3269,6 +3508,18 @@ async def handle_successful_payment(update: Update, context: ContextTypes.DEFAUL
             )
             return
 
+        if payload.startswith("mixing_service:"):
+            # Mixing service — не файл, а услуга. Юзер платит → бот шлёт
+            # инструкцию как отправить стемы. Админ получает уведомление
+            # с deadline reminder через 3-5 рабочих дней.
+            await _deliver_mixing_service(
+                bot, user,
+                payment_charge_id=sp.telegram_payment_charge_id,
+                amount=sp.total_amount,
+                currency=sp.currency or "XTR",
+            )
+            return
+
         logger.warning("successful_payment: unknown payload %s", payload)
     except Exception:
         logger.exception("handle_successful_payment failed")
@@ -3303,17 +3554,7 @@ async def poll_usdt_invoice(bot, invoice_id: int, user_id: int, item_id: int,
                 continue
             status = inv.get("status")
             if status == "paid":
-                item = beats_db.get_beat_by_id(item_id)
-                label = "продукт" if kind == "product" else "бит"
-                if not item:
-                    try:
-                        await bot.send_message(
-                            user_id,
-                            f"⚠️ {label.capitalize()} пропал из каталога. Напишу автору: @iiiplfiii",
-                        )
-                    except Exception:
-                        pass
-                    return
+                # Для mixing не нужен item_id (это услуга, не файл)
                 try:
                     user = await bot.get_chat(user_id)
                 except Exception:
@@ -3326,6 +3567,25 @@ async def poll_usdt_invoice(bot, invoice_id: int, user_id: int, item_id: int,
                 charge = f"cryptobot:{invoice_id}:{inv.get('hash', '')}"
                 amount = float(inv.get("amount") or 0)
                 currency = inv.get("asset") or "USDT"
+
+                if kind == "mixing":
+                    await _deliver_mixing_service(
+                        bot, user,
+                        payment_charge_id=charge, amount=amount, currency=currency,
+                    )
+                    return
+
+                item = beats_db.get_beat_by_id(item_id)
+                label = "продукт" if kind == "product" else "бит"
+                if not item:
+                    try:
+                        await bot.send_message(
+                            user_id,
+                            f"⚠️ {label.capitalize()} пропал из каталога. Напишу автору: @iiiplfiii",
+                        )
+                    except Exception:
+                        pass
+                    return
                 if kind == "product":
                     await _deliver_product(
                         bot, user, item,

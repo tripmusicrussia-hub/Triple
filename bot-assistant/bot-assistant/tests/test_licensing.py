@@ -12,6 +12,15 @@ class TestPrices:
     def test_mp3_rub_price(self):
         assert licensing.PRICE_MP3_RUB == 1700
 
+    def test_mix_stars_price(self):
+        assert licensing.PRICE_MIX_STARS == 4500
+
+    def test_mix_usdt_price(self):
+        assert licensing.PRICE_MIX_USDT == 60.0
+
+    def test_mix_rub_price(self):
+        assert licensing.PRICE_MIX_RUB == 5000
+
     def test_kit_stars_price(self):
         assert licensing.PRICE_KIT_STARS == 1500
 
