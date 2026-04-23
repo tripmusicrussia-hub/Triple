@@ -3930,6 +3930,13 @@ async def run_bot():
     app.add_handler(MessageHandler(filters.ALL, handle_message))
     logger.info("Starting bot...")
     await app.initialize()
+    # КРИТИЧНО: post_init hook НЕ вызывается автоматически когда мы
+    # используем manual app.initialize()+start()+updater.start_polling()
+    # вместо app.run_polling(). Без этого вызова scheduled_publish_loop,
+    # heartbeat_scheduler, content_reminder_scheduler, load_queue —
+    # никогда не запускались. Это был корневой баг почему scheduled
+    # publications не работали никогда.
+    await post_init(app)
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
     await asyncio.Event().wait()
