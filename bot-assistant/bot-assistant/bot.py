@@ -1394,7 +1394,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if action == "regen":
-            import beat_post_builder
+            # beat_post_builder уже импортирован на module level (строка 26).
+            # Локальный `import beat_post_builder` здесь (был исторически)
+            # делал Python'у считать `beat_post_builder` локальной переменной
+            # на весь scope handle_callback → UnboundLocalError при
+            # обращении к нему в других ветках до этой точки (например в
+            # buy_rub_ / buy_mix_rub где f"{beat_post_builder.BOT_USERNAME}").
             meta = payload["meta"]
             try:
                 new_caption, new_style = await beat_post_builder.build_tg_caption_async(
