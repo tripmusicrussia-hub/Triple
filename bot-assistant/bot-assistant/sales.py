@@ -65,7 +65,17 @@ def _get_supabase():
 
 
 def log_sale(**fields: Any) -> None:
-    """Фиксирует продажу в Supabase + локальный jsonl. Не кидает."""
+    """Фиксирует продажу в Supabase + локальный jsonl. Не кидает.
+
+    Idempotent по `payment_charge_id`: upsert on_conflict — defense-in-depth
+    на случай если delivered-set idempotency guard в bot.py обойдётся
+    (например человеческий retry /manual_redeliver <id>). Для YooKassa
+    charge_id = "yookassa:<uuid>", для Stars = telegram_payment_charge_id,
+    для USDT = "cryptobot:<invoice_id>" — все глобально уникальные.
+
+    Требование: в Supabase на `sales.payment_charge_id` должен стоять
+    UNIQUE constraint (см. DDL выше). Иначе upsert вырождается в insert.
+    """
     record = {"ts": datetime.now(_MSK).isoformat(), **fields}
 
     try:
@@ -77,9 +87,17 @@ def log_sale(**fields: Any) -> None:
     client = _get_supabase()
     if client is not None:
         try:
-            client.table(_TABLE).insert(record).execute()
+            if record.get("payment_charge_id"):
+                # upsert — при повторе (retry webhook'а или ручной
+                # redeliver) не создадим дубликат.
+                client.table(_TABLE).upsert(
+                    record, on_conflict="payment_charge_id"
+                ).execute()
+            else:
+                # Без charge_id (legacy пути) — обычный insert.
+                client.table(_TABLE).insert(record).execute()
         except Exception as e:
-            logger.warning("sales Supabase insert failed: %s", e)
+            logger.warning("sales Supabase write failed: %s", e)
 
 
 def read_sales() -> Iterator[dict]:

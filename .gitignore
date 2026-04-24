@@ -42,6 +42,21 @@ bot-assistant/bot-assistant/users_data.json.bak
 bot-assistant/bot-assistant/pending_products.json
 bot-assistant/bot-assistant/admin_prefs.json
 bot-assistant/bot-assistant/heartbeat.txt
+# YooKassa pending payments — содержит payment_id + user_id + username.
+# PII + реквизиты платежей. НИКОГДА не в git.
+bot-assistant/bot-assistant/pending_yk_payments.json
+bot-assistant/bot-assistant/pending_yk_payments.json.tmp
+# YooKassa delivered-set — idempotency guard, список доставленных payment_id'ов
+bot-assistant/bot-assistant/delivered_yk_payments.json
+bot-assistant/bot-assistant/delivered_yk_payments.json.tmp
+# Sales лог — PII (buyer username, beat purchases, amounts)
+bot-assistant/bot-assistant/sales.jsonl
+# YT dump содержит captions и metadata с внутренними ссылками
+bot-assistant/bot-assistant/yt_videos_dump.json
+# Post events log — каналы публикаций, potentially private
+bot-assistant/bot-assistant/post_events.jsonl
+# Social proof log — ссылки артистов (могут быть приватными)
+bot-assistant/bot-assistant/social_proof.jsonl
 
 # OS
 .DS_Store

@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 import re
 import threading
@@ -115,19 +116,59 @@ PENDING_PRODUCTS_PATH = os.path.join(BASE_DIR, "pending_products.json")
 pending_yk_payments: dict[str, dict] = {}
 PENDING_YK_PAYMENTS_PATH = os.path.join(BASE_DIR, "pending_yk_payments.json")
 
+# Idempotency guard: payment_id'ы которые мы уже доставили. Защита от replay'а
+# (webhook retry от YooKassa, двойной приход, злоумышленник дёрнул старый UUID).
+# Persistent — переживает redeploy. Without this, любое знание успешного UUID'а
+# позволяет бесконечно триггерить delivery через webhook.
+delivered_yk_payments: set[str] = set()
+DELIVERED_YK_PAYMENTS_PATH = os.path.join(BASE_DIR, "delivered_yk_payments.json")
 
-def _save_yk_pending(payment_id: str, data: dict) -> None:
-    """Добавить pending YooKassa payment + persist. Вызывается после create_payment."""
-    pending_yk_payments[payment_id] = data
-    try:
-        with open(PENDING_YK_PAYMENTS_PATH, "w", encoding="utf-8") as f:
-            json.dump(pending_yk_payments, f, ensure_ascii=False, indent=2)
-    except Exception:
-        logger.exception("yk: persist pending_yk_payments failed (non-fatal)")
+# In-flight guard: payment_id'ы для которых delivery сейчас идёт. Защищает от
+# race между webhook (один поток) и fallback polling (другой corutine), когда
+# оба прошли delivered-check одновременно и до mark'а в delivered. In-memory
+# only — на crash автоматически сбросится, можно будет retry'нуть.
+in_flight_yk: set[str] = set()
+
+# Lock на все mutation'ы pending / delivered / in_flight. Lazy-init потому что
+# asyncio.Lock() требует running loop (в старых Python). Создаётся в post_init.
+_yk_lock: asyncio.Lock | None = None
+
+
+def _get_yk_lock() -> asyncio.Lock:
+    """Lazy-init lock. Вызывается только из coroutine'ов → running loop есть."""
+    global _yk_lock
+    if _yk_lock is None:
+        _yk_lock = asyncio.Lock()
+    return _yk_lock
+
+
+def _atomic_write_json(path: str, data) -> None:
+    """Atomic JSON write: tmp + os.replace. Защита от partial write при
+    crash/redeploy во время dump'а — иначе получим битый файл и restore
+    вернёт 0 записей после рестарта (потеря pending payments).
+
+    os.replace() атомарен на POSIX и Windows (на Windows с 3.3+).
+    """
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+async def _save_yk_pending(payment_id: str, data: dict) -> None:
+    """Добавить pending YooKassa payment + persist. Вызывается из async
+    handler'а после create_payment."""
+    async with _get_yk_lock():
+        pending_yk_payments[payment_id] = data
+        try:
+            _atomic_write_json(PENDING_YK_PAYMENTS_PATH, pending_yk_payments)
+        except Exception:
+            logger.exception("yk: persist pending_yk_payments failed (non-fatal)")
 
 
 def _restore_yk_pending() -> int:
-    """Вызывается в post_init — восстанавливаем pending payments с диска."""
+    """Вызывается в post_init (sync, concurrency невозможна — loop ещё
+    не принимает events). Восстанавливаем pending payments с диска."""
     if not os.path.exists(PENDING_YK_PAYMENTS_PATH):
         return 0
     try:
@@ -140,14 +181,50 @@ def _restore_yk_pending() -> int:
         return 0
 
 
-def _drop_yk_pending(payment_id: str) -> None:
-    """Удалить после успешной доставки (или при ошибке)."""
-    pending_yk_payments.pop(payment_id, None)
+def _restore_yk_delivered() -> int:
+    """Восстанавливаем delivered-set с диска. БЕЗ этого после redeploy'а
+    idempotency guard пустой → первый повторный webhook переиграет delivery."""
+    if not os.path.exists(DELIVERED_YK_PAYMENTS_PATH):
+        return 0
     try:
-        with open(PENDING_YK_PAYMENTS_PATH, "w", encoding="utf-8") as f:
-            json.dump(pending_yk_payments, f, ensure_ascii=False, indent=2)
+        with open(DELIVERED_YK_PAYMENTS_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            delivered_yk_payments.update(data)
+        return len(delivered_yk_payments)
     except Exception:
-        logger.exception("yk: persist after drop failed (non-fatal)")
+        logger.exception("yk: restore delivered_yk_payments failed")
+        return 0
+
+
+async def _drop_yk_pending(payment_id: str) -> None:
+    """Удалить после успешной доставки / отмены."""
+    async with _get_yk_lock():
+        pending_yk_payments.pop(payment_id, None)
+        try:
+            _atomic_write_json(PENDING_YK_PAYMENTS_PATH, pending_yk_payments)
+        except Exception:
+            logger.exception("yk: persist after drop failed (non-fatal)")
+
+
+async def _mark_yk_delivered(payment_id: str) -> None:
+    """Пометить payment как доставленный + persist. Idempotency guard на replay.
+
+    Важно: сохраняем список отсортированным (стабильный diff, легче читать
+    руками если понадобится дебажить). Без upper bound — delivered-set
+    растёт вечно, но 1 payment = ~40 байт, 100k платежей = 4MB JSON,
+    восстанавливается за миллисекунды. Cleanup можно добавить позже
+    (например дропать >90 дней) если станет проблемой.
+    """
+    async with _get_yk_lock():
+        delivered_yk_payments.add(payment_id)
+        try:
+            _atomic_write_json(
+                DELIVERED_YK_PAYMENTS_PATH,
+                sorted(delivered_yk_payments),
+            )
+        except Exception:
+            logger.exception("yk: persist delivered failed (non-fatal)")
 
 
 def _persist_pending_products() -> None:
@@ -716,11 +793,17 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 size_mb = (p.get("file_size") or 0) / (1024 * 1024) if p.get("file_size") else 0
                 stars = p.get("price_stars", "?")
                 usdt = p.get("price_usdt", "?")
+                # Escape всё что идёт в HTML caption. `name`/`description` могут
+                # прийти из parse_beat_from_text (channel post text) — не trusted.
+                # Если оставить без escape — юзер с правами постить в канал может
+                # сломать parse_mode="HTML" и DoS'нуть /start prod_<id>.
+                name_safe = html.escape(str(p.get("name") or ""))
+                desc_safe = html.escape(str(p.get("description") or "")) if p.get("description") else "<i>(без описания)</i>"
                 info = (
-                    f"📦 <b>{label}</b>\n"
-                    f"🎯 <b>{p['name']}</b>\n"
+                    f"📦 <b>{html.escape(label)}</b>\n"
+                    f"🎯 <b>{name_safe}</b>\n"
                     f"📎 {size_mb:.1f} MB\n\n"
-                    f"{p.get('description') or '<i>(без описания)</i>'}\n\n"
+                    f"{desc_safe}\n\n"
                     f"💎 WAV / Trackouts / Exclusive — DM @iiiplfiii"
                 )
                 usdt_label = f"💵 {usdt:g} USDT" if isinstance(usdt, (int, float)) else "💵 USDT"
@@ -749,9 +832,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             beat_id = int(effective_arg[4:])
             beat = beats_db.get_beat_by_id(beat_id)
             if beat:
+                # name/bpm/key могут прийти через parse_beat_from_text из
+                # произвольного channel post text → escape перед HTML render'ом.
+                name_safe = html.escape(str(beat.get("name") or "?"))
+                bpm_safe = html.escape(str(beat.get("bpm") or "?"))
+                key_safe = html.escape(str(beat.get("key") or "?"))
                 caption = (
-                    f"🎧 <b>{beat.get('name','?')}</b>\n"
-                    f"⚡ BPM {beat.get('bpm','?')}  🎹 {beat.get('key','?')}\n\n"
+                    f"🎧 <b>{name_safe}</b>\n"
+                    f"⚡ BPM {bpm_safe}  🎹 {key_safe}\n\n"
                     "Выбери вариант покупки — или напиши @iiiplfiii для WAV/Unlimited/Exclusive:"
                 )
                 await bot.send_message(
@@ -2310,7 +2398,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 },
                 return_url=f"https://t.me/{beat_post_builder.BOT_USERNAME}",
             )
-            _save_yk_pending(payment["id"], {
+            await _save_yk_pending(payment["id"], {
                 "type": "mixing_service",
                 "user_id": user_id,
                 "username": update.effective_user.username or "",
@@ -2369,7 +2457,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 },
                 return_url=f"https://t.me/{beat_post_builder.BOT_USERNAME}?start=buy_{beat_id}",
             )
-            _save_yk_pending(payment["id"], {
+            await _save_yk_pending(payment["id"], {
                 "type": "mp3_lease",
                 "user_id": user_id,
                 "username": update.effective_user.username or "",
@@ -3245,16 +3333,27 @@ async def handle_assistant(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # админу + очищаем state + благодарим юзера.
     pending_excl = context.user_data.get("pending_excl")
     if pending_excl:
-        desc = text.strip()[:800]  # защита от слишком длинных сообщений
-        uname = "@" + update.effective_user.username if update.effective_user.username else update.effective_user.full_name
+        # ВСЁ что приходит от юзера / из профиля — escape. Иначе юзер может
+        # прислать `</i><a href="phish">...</a><i>` и подменить вид сообщения
+        # админу (phishing-link маскирующаяся под соцсеть артиста).
+        desc = html.escape(text.strip()[:800])
+        raw_uname = ("@" + update.effective_user.username
+                     if update.effective_user.username
+                     else (update.effective_user.full_name or ""))
+        uname = html.escape(raw_uname)
         context.user_data.pop("pending_excl", None)
-        post_url = pending_excl.get("post_url") or ""
+        # post_url — идёт в ЛС админа как plain text (не в href), но при
+        # parse_mode=HTML нужно escape. `<` / `>` в URL сломают parsing.
+        post_url = html.escape(pending_excl.get("post_url") or "")
         post_line = f"\nПост: {post_url}" if post_url else ""
+        beat_name_safe = html.escape(str(pending_excl.get("beat_name") or ""))
+        bpm_safe = html.escape(str(pending_excl.get("bpm") or ""))
+        key_safe = html.escape(str(pending_excl.get("key") or ""))
         admin_msg = (
             "💎 <b>EXCLUSIVE INQUIRY</b>\n\n"
             f"От: {uname} (id={user_id})\n"
-            f"Бит: <b>{pending_excl['beat_name']}</b>\n"
-            f"BPM {pending_excl['bpm']} · {pending_excl['key']}"
+            f"Бит: <b>{beat_name_safe}</b>\n"
+            f"BPM {bpm_safe} · {key_safe}"
             f"{post_line}\n\n"
             f"Проект:\n<i>{desc}</i>"
         )
@@ -3513,127 +3612,154 @@ async def _deliver_mixing_service(bot, user, *, payment_charge_id: str,
 # ── YooKassa webhook delivery ─────────────────────────────────
 
 async def _deliver_yk_payment(bot, payment_id: str) -> bool:
-    """Доставляет товар по YooKassa payment_id. Вызывается из webhook'а.
+    """Доставляет товар по YooKassa payment_id. Вызывается из webhook'а
+    и из fallback polling'а.
 
-    1. Double-check через GET /v3/payments/{id} что реально succeeded
-       (защита от фальшивых webhook'ов)
-    2. Ищем запись в pending_yk_payments по payment_id
-    3. Dispatching на _deliver_mp3_lease / _deliver_mixing_service /
-       _deliver_product в зависимости от type
-    4. Удаляем из pending
+    Idempotency (критично):
+    1. Check `delivered_yk_payments` set (persistent) — already delivered → skip.
+    2. Check `in_flight_yk` set (in-memory) — concurrent delivery → skip.
+    3. Claim: add to in_flight_yk под lock'ом.
+    4. Double-check через GET /v3/payments/{id} что status=succeeded — защита
+       от fake webhook'ов (кто-то прислал UUID непроплаченного платежа).
+    5. Deliver → mark delivered → drop pending.
+    6. Finally: remove from in_flight (даже если exception). Позволяет retry
+       при транзиентной ошибке; replay не сработает, ибо delivered-set уже стоит.
 
-    Returns True если доставили, False если ошибка / уже доставлено.
+    Returns True если доставили, False если ошибка / уже доставлено / fake.
     """
     import yookassa_api
-    # Double-check что payment реально succeeded у YooKassa
-    try:
-        yk_info = await yookassa_api.get_payment(payment_id)
-    except Exception:
-        logger.exception("yk_webhook: get_payment %s failed", payment_id)
-        return False
-    if yk_info.get("status") != "succeeded":
-        logger.warning("yk_webhook: payment %s status=%s, not succeeded, skip",
-                       payment_id, yk_info.get("status"))
-        return False
 
-    # Найти локальную запись
-    pending = pending_yk_payments.get(payment_id)
-    if not pending:
-        # Возможно webhook пришёл до persistence (race) — берём metadata из YooKassa
-        md = yk_info.get("metadata") or {}
-        if not md.get("user_id"):
-            logger.warning("yk_webhook: payment %s not in pending + no metadata, skip",
-                           payment_id)
+    # ── Idempotency claim ───────────────────────────────────────
+    async with _get_yk_lock():
+        if payment_id in delivered_yk_payments:
+            logger.info("yk: payment %s already delivered, skip replay", payment_id)
             return False
-        pending = {
-            "type": md.get("type", "unknown"),
-            "user_id": int(md["user_id"]),
-            "username": md.get("username", ""),
-            "beat_id": int(md["beat_id"]) if md.get("beat_id") else None,
-        }
-
-    ptype = pending.get("type")
-    user_id = pending.get("user_id")
-
-    # Fake user object для существующих _deliver_* функций
-    try:
-        user_chat = await bot.get_chat(user_id)
-        class _User:
-            pass
-        user = _User()
-        user.id = user_id
-        user.full_name = user_chat.full_name
-        user.username = user_chat.username
-    except Exception:
-        class _U2:
-            pass
-        user = _U2()
-        user.id = user_id
-        user.full_name = pending.get("username") or str(user_id)
-        user.username = pending.get("username")
-
-    amount_value = yk_info.get("amount", {}).get("value", "0")
-    try:
-        amount_rub = float(amount_value)
-    except ValueError:
-        amount_rub = 0.0
-    amount_kopecks = int(amount_rub * 100)
-    charge_id = f"yookassa:{payment_id}"
-
-    try:
-        if ptype == "mp3_lease":
-            beat_id = pending.get("beat_id")
-            beat = beats_db.get_beat_by_id(beat_id) if beat_id else None
-            if not beat:
-                await bot.send_message(
-                    user_id,
-                    f"⚠️ Бит пропал из каталога. Пиши @iiiplfiii — разберёмся.",
-                )
-                await bot.send_message(
-                    ADMIN_ID,
-                    f"🚨 YooKassa оплата прошла, но бит id={beat_id} не найден!\n"
-                    f"payment={payment_id}, user={user_id}, amount={amount_rub}₽",
-                )
-                return False
-            await _deliver_mp3_lease(
-                bot, user, beat,
-                payment_charge_id=charge_id,
-                amount=amount_kopecks,
-                currency="RUB",
-            )
-        elif ptype == "mixing_service":
-            await _deliver_mixing_service(
-                bot, user,
-                payment_charge_id=charge_id,
-                amount=amount_kopecks,
-                currency="RUB",
-            )
-        elif ptype == "product":
-            pid = pending.get("beat_id")
-            product = beats_db.get_beat_by_id(pid) if pid else None
-            if not product or product.get("content_type") not in licensing.PRODUCT_TYPE_LABELS:
-                await bot.send_message(
-                    user_id,
-                    "⚠️ Продукт пропал. Пиши @iiiplfiii — разберёмся.",
-                )
-                return False
-            await _deliver_product(
-                bot, user, product,
-                payment_charge_id=charge_id,
-                amount=amount_kopecks,
-                currency="RUB",
-            )
-        else:
-            logger.warning("yk_webhook: unknown type=%s payment=%s", ptype, payment_id)
+        if payment_id in in_flight_yk:
+            logger.info("yk: payment %s delivery in-flight, skip duplicate", payment_id)
             return False
-    except Exception:
-        logger.exception("yk_webhook: delivery failed for %s", payment_id)
-        return False
+        in_flight_yk.add(payment_id)
 
-    _drop_yk_pending(payment_id)
-    logger.info("yk_webhook: delivered %s (type=%s, user=%d, amount=%s₽)",
-                payment_id, ptype, user_id, amount_rub)
-    return True
+    try:
+        # ── Double-check статус у YooKassa (защита от fake webhook'ов) ──
+        try:
+            yk_info = await yookassa_api.get_payment(payment_id)
+        except Exception:
+            logger.exception("yk: get_payment %s failed", payment_id)
+            return False
+        if yk_info.get("status") != "succeeded":
+            logger.warning("yk: payment %s status=%s, not succeeded, skip",
+                           payment_id, yk_info.get("status"))
+            return False
+
+        # ── Найти локальную запись ──
+        pending = pending_yk_payments.get(payment_id)
+        if not pending:
+            # Webhook пришёл до persistence (race) или после redeploy'а.
+            # Берём metadata из YooKassa — её мы же и ставим при create_payment,
+            # а менять её без наших creds нельзя.
+            md = yk_info.get("metadata") or {}
+            if not md.get("user_id"):
+                logger.warning("yk: payment %s not in pending + no metadata, skip",
+                               payment_id)
+                return False
+            pending = {
+                "type": md.get("type", "unknown"),
+                "user_id": int(md["user_id"]),
+                "username": md.get("username", ""),
+                "beat_id": int(md["beat_id"]) if md.get("beat_id") else None,
+            }
+
+        ptype = pending.get("type")
+        user_id = pending.get("user_id")
+
+        # Fake user object для существующих _deliver_* функций
+        try:
+            user_chat = await bot.get_chat(user_id)
+            class _User:
+                pass
+            user = _User()
+            user.id = user_id
+            user.full_name = user_chat.full_name
+            user.username = user_chat.username
+        except Exception:
+            class _U2:
+                pass
+            user = _U2()
+            user.id = user_id
+            user.full_name = pending.get("username") or str(user_id)
+            user.username = pending.get("username")
+
+        amount_value = yk_info.get("amount", {}).get("value", "0")
+        try:
+            amount_rub = float(amount_value)
+        except ValueError:
+            amount_rub = 0.0
+        amount_kopecks = int(amount_rub * 100)
+        charge_id = f"yookassa:{payment_id}"
+
+        try:
+            if ptype == "mp3_lease":
+                beat_id = pending.get("beat_id")
+                beat = beats_db.get_beat_by_id(beat_id) if beat_id else None
+                if not beat:
+                    await bot.send_message(
+                        user_id,
+                        f"⚠️ Бит пропал из каталога. Пиши @iiiplfiii — разберёмся.",
+                    )
+                    await bot.send_message(
+                        ADMIN_ID,
+                        f"🚨 YooKassa оплата прошла, но бит id={beat_id} не найден!\n"
+                        f"payment={payment_id}, user={user_id}, amount={amount_rub}₽",
+                    )
+                    return False
+                await _deliver_mp3_lease(
+                    bot, user, beat,
+                    payment_charge_id=charge_id,
+                    amount=amount_kopecks,
+                    currency="RUB",
+                )
+            elif ptype == "mixing_service":
+                await _deliver_mixing_service(
+                    bot, user,
+                    payment_charge_id=charge_id,
+                    amount=amount_kopecks,
+                    currency="RUB",
+                )
+            elif ptype == "product":
+                pid = pending.get("beat_id")
+                product = beats_db.get_beat_by_id(pid) if pid else None
+                if not product or product.get("content_type") not in licensing.PRODUCT_TYPE_LABELS:
+                    await bot.send_message(
+                        user_id,
+                        "⚠️ Продукт пропал. Пиши @iiiplfiii — разберёмся.",
+                    )
+                    return False
+                await _deliver_product(
+                    bot, user, product,
+                    payment_charge_id=charge_id,
+                    amount=amount_kopecks,
+                    currency="RUB",
+                )
+            else:
+                logger.warning("yk: unknown type=%s payment=%s", ptype, payment_id)
+                return False
+        except Exception:
+            # Транзиентная ошибка (сеть, TG API, Supabase). Не помечаем
+            # delivered — fallback polling через 5 мин повторит попытку.
+            logger.exception("yk: delivery failed for %s", payment_id)
+            return False
+
+        # Успешно доставили → mark delivered (idempotency guard от replay) +
+        # drop pending. Порядок важен: mark делаем ПЕРЕД drop'ом, иначе между
+        # ними может прилететь ещё один webhook и пройдёт проверку.
+        await _mark_yk_delivered(payment_id)
+        await _drop_yk_pending(payment_id)
+        logger.info("yk: delivered %s (type=%s, user=%d, amount=%s₽)",
+                    payment_id, ptype, user_id, amount_rub)
+        return True
+    finally:
+        async with _get_yk_lock():
+            in_flight_yk.discard(payment_id)
 
 
 async def yk_fallback_polling(bot):
@@ -3669,12 +3795,12 @@ async def yk_fallback_polling(bot):
                         await _deliver_yk_payment(bot, pid)
                     elif info.get("status") == "canceled":
                         logger.info("yk_fallback: payment %s canceled, dropping", pid)
-                        _drop_yk_pending(pid)
+                        await _drop_yk_pending(pid)
                 except Exception:
                     logger.warning("yk_fallback: get_payment %s failed", pid)
             for pid in stale_to_drop:
                 logger.warning("yk_fallback: stale pending %s >48h, dropping", pid)
-                _drop_yk_pending(pid)
+                await _drop_yk_pending(pid)
         except Exception:
             logger.exception("yk_fallback polling iteration failed")
 
@@ -4065,6 +4191,13 @@ async def cmd_feature(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     track_url = args[0].strip()
+    # URL validation: только http/https. Иначе в канал можно запостить
+    # `javascript:...` / `tg://...` которое ведёт себя непредсказуемо.
+    if not (track_url.startswith("http://") or track_url.startswith("https://")):
+        await update.message.reply_text(
+            f"⚠️ track_url должен начинаться с http:// или https://, получил: {track_url[:50]}"
+        )
+        return
     try:
         beat_id = int(args[1])
     except ValueError:
@@ -4082,12 +4215,21 @@ async def cmd_feature(update: Update, context: ContextTypes.DEFAULT_TYPE):
     beat_name = beat.get("name", "?")
     bpm = beat.get("bpm", "?")
     key = beat.get("key", "?")
-    artist_line = f" — {artist_display}" if artist_display else ""
+    # Escape всё что идёт в HTML post: beat_name/artist/track_url могут
+    # содержать `<` / `&` (старые биты с парсинга из channel text, URL
+    # с query-параметрами). Без escape parse_mode=HTML либо сломается,
+    # либо (хуже) позволит inject'ить fake tag в publicly-visible post.
+    beat_name_safe = html.escape(str(beat_name))
+    bpm_safe = html.escape(str(bpm))
+    key_safe = html.escape(str(key))
+    artist_safe = html.escape(artist_display)
+    track_url_safe = html.escape(track_url)
+    artist_line = f" — {artist_safe}" if artist_display else ""
 
     post_text = (
-        f"🎤 <b>На бите «{beat_name}» записан трек{artist_line}</b>\n\n"
-        f"⚡ {bpm} BPM · 🎹 {key}\n\n"
-        f"🎧 Слушать: {track_url}\n\n"
+        f"🎤 <b>На бите «{beat_name_safe}» записан трек{artist_line}</b>\n\n"
+        f"⚡ {bpm_safe} BPM · 🎹 {key_safe}\n\n"
+        f"🎧 Слушать: {track_url_safe}\n\n"
         f"<i>Хочешь такой же? Этот бит ещё доступен:</i>"
     )
     kb = InlineKeyboardMarkup([
@@ -4281,6 +4423,15 @@ async def post_init(application):
             logger.info("yk: restored %d pending payments on startup", n_yk)
     except Exception:
         logger.exception("yk: restore pending_yk_payments failed (non-fatal)")
+    # Восстанавливаем delivered-set — ОСНОВНОЙ idempotency guard.
+    # Без этого после redeploy webhook retry заставит нас доставить товар
+    # второй раз (sales duplicate + user получит mp3 дважды). Critical.
+    try:
+        n_delivered = _restore_yk_delivered()
+        if n_delivered:
+            logger.info("yk: restored %d delivered payment_ids on startup", n_delivered)
+    except Exception:
+        logger.exception("yk: restore delivered_yk_payments failed (non-fatal)")
     # Передаём loop + bot в HTTPServer thread — webhook'у нужно schedule'ить
     # _deliver_yk_payment обратно на main loop через run_coroutine_threadsafe.
     global _WEBHOOK_BOT, _WEBHOOK_LOOP
@@ -4630,41 +4781,79 @@ class HealthHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         """YooKassa webhook receiver. Body: {"event": "payment.succeeded",
-        "object": {"id": "<uuid>", ...}}. См. yookassa_api.py — YooKassa не
-        подписывает тело криптографически, единственная защита — IP-whitelist.
+        "object": {"id": "<uuid>", ...}}.
 
-        Дополнительный guard: в `_deliver_yk_payment` делаем GET /payments/{id}
-        (double-check перед доставкой) — даже если кто-то прикинулся webhook'ом
-        с правильного IP, он не сможет обмануть API.
+        ── Security model ──────────────────────────────────────────
+        YooKassa НЕ подписывает webhook body криптографически.
+        Используем 3 слоя:
 
-        ACK на 200 сразу (YooKassa retry'ит при не-200 в течение 3х суток,
-        нам не нужно её нагружать) → delivery асинхронно в main loop.
+        1. **Secret path-token** (основная защита). URL имеет вид
+           `/yk_webhook/<TOKEN>` где TOKEN — 32+ байт random hex в env
+           YOOKASSA_WEBHOOK_TOKEN. Только YooKassa dashboard знает этот URL.
+           Без верного токена → 404 (не 401/403 чтобы не лить информацию).
+
+           IP-whitelist мы НЕ используем как hard gate: `X-Forwarded-For`
+           на Render trivially подделывается клиентом (Render append'ит
+           real client IP, но leftmost остаётся под контролем атакующего).
+
+        2. **Double-check через YooKassa API**: `_deliver_yk_payment`
+           делает GET /v3/payments/{id} с нашими creds → подтверждает
+           status=succeeded прежде чем доставить. Fake webhook с
+           несуществующим UUID не пройдёт.
+
+        3. **Idempotency guard** (`delivered_yk_payments` set): даже
+           если webhook повторяется или кто-то знает валидный UUID
+           старого платежа — delivery сработает ровно 1 раз.
+
+        ACK на 200 сразу (YooKassa retry'ит при не-200 в течение 3х суток) →
+        delivery async в main loop через run_coroutine_threadsafe.
         """
-        if self.path != "/yk_webhook":
+        # Проверяем path: /yk_webhook/<TOKEN>. TOKEN берём из env —
+        # не кэшируем в module var, чтобы можно было ротировать через
+        # Render redeploy без code change.
+        expected_token = (os.getenv("YOOKASSA_WEBHOOK_TOKEN") or "").strip()
+        if not expected_token:
+            # Fail-closed: если админ забыл задать env — webhook выключен.
+            # Это безопаснее чем open endpoint. Fallback polling заберёт
+            # оплаты с ~5 мин задержкой.
+            logger.error("yk_webhook: YOOKASSA_WEBHOOK_TOKEN not set, rejecting")
+            self.send_response(503)
+            self.end_headers()
+            return
+
+        expected_path = f"/yk_webhook/{expected_token}"
+        # Constant-time compare — защита от timing side-channel.
+        # hmac.compare_digest ожидает bytes/str одинаковой длины
+        # (иначе утечёт info о длине). Делаем только после проверки
+        # префикса, чтобы не сравнивать произвольные пути.
+        import hmac
+        if not self.path.startswith("/yk_webhook/"):
+            self.send_response(404)
+            self.end_headers()
+            return
+        if not hmac.compare_digest(self.path, expected_path):
+            # Intentionally 404 (не 401/403) — не подтверждаем существование endpoint'а.
+            logger.warning("yk_webhook: bad path token from %s", self.client_address[0])
             self.send_response(404)
             self.end_headers()
             return
 
-        # X-Forwarded-For приходит через Render proxy — формат "client, proxy, proxy".
-        # Берём самый левый (оригинальный client IP).
-        fwd = self.headers.get("X-Forwarded-For", "") or self.client_address[0]
-        client_ip = fwd.split(",")[0].strip()
-
-        try:
-            import yookassa_api
-            if not yookassa_api.ip_in_webhook_whitelist(client_ip):
-                logger.warning("yk_webhook: IP %s NOT in whitelist, reject", client_ip)
-                self.send_response(403)
-                self.end_headers()
-                return
-        except Exception:
-            logger.exception("yk_webhook: IP whitelist check failed")
-            self.send_response(500)
-            self.end_headers()
-            return
+        # IP-whitelist: оставляем как **soft signal** для логов.
+        # НЕ отклоняем запросы — path-token уже гарантирует authenticity.
+        # XFF парсим rightmost (ближайший к нам proxy), но на Render
+        # XFF может быть спуфнут клиентом → не верим ему как source of truth.
+        fwd = self.headers.get("X-Forwarded-For", "") or ""
+        xff_parts = [p.strip() for p in fwd.split(",") if p.strip()]
+        client_ip_logged = xff_parts[-1] if xff_parts else self.client_address[0]
 
         try:
             length = int(self.headers.get("Content-Length", "0"))
+            # Защита от огромных body'ев (DoS через память).
+            if length > 64 * 1024:
+                logger.warning("yk_webhook: body too large %d, reject", length)
+                self.send_response(413)
+                self.end_headers()
+                return
             raw = self.rfile.read(length) if length > 0 else b""
             payload = json.loads(raw.decode("utf-8")) if raw else {}
         except Exception:
@@ -4685,16 +4874,18 @@ class HealthHandler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
-        logger.info("yk_webhook: event=%s payment=%s ip=%s", event, payment_id, client_ip)
+        # Логгируем payment_id (не секрет сам по себе — уже требуется token
+        # чтобы webhook пройти, так что знание UUID без токена бесполезно).
+        logger.info("yk_webhook: event=%s payment=%s ip=%s", event, payment_id, client_ip_logged)
 
         if not payment_id:
             return
 
+        if _WEBHOOK_BOT is None or _WEBHOOK_LOOP is None:
+            logger.error("yk_webhook: bot/loop not initialized — skip %s", payment_id)
+            return
+
         if event == "payment.succeeded":
-            if _WEBHOOK_BOT is None or _WEBHOOK_LOOP is None:
-                logger.error("yk_webhook: bot/loop not initialized — delivery skipped for %s",
-                             payment_id)
-                return
             try:
                 asyncio.run_coroutine_threadsafe(
                     _deliver_yk_payment(_WEBHOOK_BOT, payment_id),
@@ -4704,10 +4895,14 @@ class HealthHandler(BaseHTTPRequestHandler):
                 logger.exception("yk_webhook: schedule delivery failed for %s", payment_id)
         elif event == "payment.canceled":
             try:
-                _drop_yk_pending(payment_id)
-                logger.info("yk_webhook: payment %s canceled, dropped from pending", payment_id)
+                # _drop_yk_pending теперь async → schedule на main loop.
+                asyncio.run_coroutine_threadsafe(
+                    _drop_yk_pending(payment_id),
+                    _WEBHOOK_LOOP,
+                )
+                logger.info("yk_webhook: payment %s canceled, drop scheduled", payment_id)
             except Exception:
-                logger.exception("yk_webhook: drop canceled %s failed", payment_id)
+                logger.exception("yk_webhook: schedule drop canceled %s failed", payment_id)
 
     def log_message(self, format, *args):
         pass
