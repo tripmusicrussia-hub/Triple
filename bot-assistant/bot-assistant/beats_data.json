@@ -469,9 +469,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADU2nTCd5ep0QkU_EUUFdCMqHEOxSDAAIHRAACUc-xS3_0fDC2OH91OwQ",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADB0QAAlHPsUs",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 8593121,
@@ -512,9 +512,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADV2nTCeDju8NKFro6g7S6p0qCuJ_dAAIbRgACUc-xS2Kbrrms7D1TOwQ",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADG0YAAlHPsUs",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 1373210,
@@ -570,9 +570,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADXWnTCeND67JQTn8AAVQZzYA-7ZHcpAACLD4AAhxK4Evo3ShY8_2YITsE",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADLD4AAhxK4Es",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 1713568,
@@ -1293,9 +1293,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADlmnTCgABVPR-iwjXDAsPmBIGg2uR_wAC9E0AAjpeCEo0xgljUIpsfDsE",
-    "content_type": "beat",
+    "content_type": "remix",
     "file_unique_id": "AgAD9E0AAjpeCEo",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 9271404,
@@ -1381,9 +1381,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADnGnTCgPXl0NUdUfPrgWTU7hCHTD4AAIHTwACvr9RSrGnuVS_wf92OwQ",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADB08AAr6_UUo",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 7183346,
@@ -1441,9 +1441,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADoWnTCgb7-xQrGAABOLg2ectIWizVQQACV1IAAtNiqEoj5eQGvCNv6zsE",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADV1IAAtNiqEo",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 3076564,
@@ -1456,9 +1456,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADomnTCgbydWwqHhKI4ny2nG6AaGRbAAIuTgAC1z-wSkJwYvMzHQ3tOwQ",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADLk4AAtc_sEo",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 8660231,
@@ -1587,9 +1587,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADq2nTCgvqdWC16rqadydptpGpBvL6AAKhUQAClU0ZS3IdjqieAtenOwQ",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADoVEAApVNGUs",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 6232879,
@@ -1602,9 +1602,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADrWnTCgwi0Gn4b7_8Yx5MfqZoldlZAAIXSwAC5IU4SxcAAX4E9s6B-zsE",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADF0sAAuSFOEs",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 7382198,
@@ -1657,9 +1657,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADsWnTCg48ncnW8ikoW4vXrGASbjq4AAIHWgACMPJpS7pARVtxGdiCOwQ",
-    "content_type": "beat",
+    "content_type": "remix",
     "file_unique_id": "AgADB1oAAjDyaUs",
-    "classification_confidence": 0.95
+    "classification_confidence": 1.0
   },
   {
     "id": 794575,
@@ -1670,9 +1670,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADsmnTCg--f_G7BrseAAFeCASHSBuHYAACCFoAAjDyaUs4AuM3nhcyDDsE",
-    "content_type": "beat",
+    "content_type": "remix",
     "file_unique_id": "AgADCFoAAjDyaUs",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 3327399,
@@ -1839,9 +1839,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADw2nTChexJL_vKvMFgUEPBGrneq5zAAK8cAACY9oRSMFPl0U8hWVzOwQ",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADvHAAAmPaEUg",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 5954698,
@@ -1854,9 +1854,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADxGnTChdYMQuEMv6GhiPtHhDfv9o8AALSTAACilggSPs-RbhjEZ24OwQ",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgAD0kwAAopYIEg",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 926970,
@@ -1869,9 +1869,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADxWnTChgmMm9kqNSgv1u8IA2m_jkPAAJTVwACZ2lYSE7JyJgrao9dOwQ",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADU1cAAmdpWEg",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 4500229,
@@ -1884,9 +1884,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADxmnTChjGDtczDSXa2ihCpyFp4_bkAAIiaQACDdKASLidq4s00-PbOwQ",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADImkAAg3SgEg",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 1522437,
@@ -1900,9 +1900,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADx2nTChkFmrjSTV_0tIPIw9OBn_0dAAKgVQACfCWISAk9M230C1DJOwQ",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADoFUAAnwliEg",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 7676485,
@@ -1916,9 +1916,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADyGnTChlEFTr5h4I04Ohoyw8thWlzAAK2UwACfCWQSAuY86nu7tSKOwQ",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADtlMAAnwlkEg",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 6625088,
@@ -1932,9 +1932,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADyWnTChqDr2ElplZUEnpDhqqPdgqVAAKMVQACfCWQSPT3khG1A_HYOwQ",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADjFUAAnwlkEg",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 8777514,
@@ -1948,9 +1948,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADymnTChuBXZi5gQtcAwO3STBONFVgAALOUQACfNfBSHW2fayQZ2KPOwQ",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADzlEAAnzXwUg",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 382714,
@@ -1964,9 +1964,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADy2nTChtJ0j6B1zXOMTf6jVELjSZ9AAKkSAACfNfJSLDTFMuncCxYOwQ",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADpEgAAnzXyUg",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 3234592,
@@ -1979,9 +1979,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADzGnTChyK7dyntlRE0mXF1MwvbE4CAAK1XgACVRvYSI-qRWwnzwVFOwQ",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADtV4AAlUb2Eg",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 1530900,
@@ -1992,9 +1992,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADzWnTChyZaCeVXibqtbtaY_JsIkywAAJFUwACG43pSDCjbeY2Ew2qOwQ",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADRVMAAhuN6Ug",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 6226172,
@@ -2051,9 +2051,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAAD0mnTCh5cRTXjIMr6--pCpscFaDazAAIhVAACsyJBSReC3lSoZT-4OwQ",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADIVQAArMiQUk",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 5248064,
@@ -2111,9 +2111,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAAD2GnTCiEMuwXakQhOm5z-bn03dJdpAAI4WgACqI-RSb_DmPsgN53MOwQ",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADOFoAAqiPkUk",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 2803780,
@@ -2432,9 +2432,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAAD9WnTCi6GsIeE9kWSBxOPKczZsfHlAAJeXAACUcHhSsgfeNEaeKdwOwQ",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADXlwAAlHB4Uo",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 3881713,
@@ -3671,9 +3671,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAACAVJp0wpc6dT3zRNZxdo2nRGUGekYXgACgogAAkLUaEvT1plA6AwBfjsE",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADgogAAkLUaEs",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 9496013,
@@ -3684,9 +3684,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAACAVNp0wpdoma_flu79-hhXMxfNFzHxAACrYgAAkLUaEv2hXWtTxj0ZjsE",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADrYgAAkLUaEs",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 8385734,
@@ -3710,9 +3710,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAACAVVp0wpeViKFn7_2Mwswno01J9B1owACvIgAAkLUaEu_Ld3JSGptSTsE",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADvIgAAkLUaEs",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 4199620,
@@ -3941,9 +3941,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAACAWlp0wpo60pO0sOURdExmR6m3-K89AACWZAAApBA2EoOLnx5INbRHzsE",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADWZAAApBA2Eo",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 1880468,
@@ -3954,9 +3954,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAACAWpp0wppAAHpO1eUohnT2Z6aymnHFG4AAtaUAAITmehKIzNXQDjg7WA7BA",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgAD1pQAAhOZ6Eo",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 2693077,
@@ -3967,9 +3967,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAACAWtp0wppf7QloQ-arKPK_X3wdJEQ5QACTpAAAqki-Up6X1BYNO4xYjsE",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADTpAAAqki-Uo",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 6601809,
@@ -4119,9 +4119,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAACAXdp0wpvhFH6OFJ_wEJ8i3Fp0Cfr7AACo4kAAq13CUi9PS59clhAaTsE",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADo4kAAq13CUg",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 2918691,
@@ -4391,9 +4391,9 @@
     "bpm": 0,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAACAZJp0wzA4UKUgBB6u36zitAbZFR5QgACBJgAAnIn6EkwBkUxNghhujsE",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADBJgAAnIn6Ek",
-    "classification_confidence": 0.7
+    "classification_confidence": 1.0
   },
   {
     "id": 7879533,
