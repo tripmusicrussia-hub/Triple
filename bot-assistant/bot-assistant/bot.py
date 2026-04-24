@@ -798,9 +798,16 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "joined": datetime.now().strftime("%d.%m.%Y %H:%M"),
         }
         asyncio.create_task(asyncio.to_thread(save_users))
-    # Раньше шлём ADMIN'у real-time «🔔 Новый: @user | Всего: N» при каждом
-    # новом юзере — шумит в ЛС админа (особенно когда тестируешь бота).
-    # Те же данные доступны через `/today` (агрегат за день + по source'ам).
+    if is_new:
+        try:
+            uname = "@" + user.username if user.username else user.full_name
+            src_tag = f" · src={ref_source}" if ref_source else ""
+            await bot.send_message(
+                ADMIN_ID,
+                "🔔 Новый: " + uname + src_tag + " | Всего: " + str(len(all_users))
+            )
+        except Exception:
+            pass
 
     # Deep-link из канала на карточку продукта: /start prod_<product_id>
     # (или /start ref_<src>_prod_<product_id> — effective_arg уже нормализован выше)
@@ -900,8 +907,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             users_received_pack.add(user_id)
             await asyncio.to_thread(users_db.mark_sample_pack_received, user_id)
             asyncio.create_task(asyncio.to_thread(save_users))
-        # Убрали notification админу «🎁 <user> получил пак!» — шум в ЛС.
-        # Статистика «сколько паков выдано» есть в /today.
+        try:
+            uname = "@" + user.username if user.username else user.full_name
+            await bot.send_message(ADMIN_ID, "🎁 " + uname + " получил пак! Всего: " + str(len(users_received_pack)))
+        except Exception:
+            pass
 
     await show_main_menu(bot, user_id)
 
