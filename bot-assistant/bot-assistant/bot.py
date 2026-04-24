@@ -129,6 +129,12 @@ DELIVERED_YK_PAYMENTS_PATH = os.path.join(BASE_DIR, "delivered_yk_payments.json"
 # only — на crash автоматически сбросится, можно будет retry'нуть.
 in_flight_yk: set[str] = set()
 
+# Guard от множественных кликов на RUB-кнопку. Если юзер 3 раза быстро
+# тапнул «💳 Оплатить» — без этой защиты создастся 3 pending payment в YK
+# и 3 раза отправится «Сведение треков — 5000₽» в ЛС. Ключ — user_id,
+# очищается после создания payment'а или ошибки.
+_yk_creating_payment: set[int] = set()
+
 # Lock на все mutation'ы pending / delivered / in_flight. Lazy-init потому что
 # asyncio.Lock() требует running loop (в старых Python). Создаётся в post_init.
 _yk_lock: asyncio.Lock | None = None
@@ -792,16 +798,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "joined": datetime.now().strftime("%d.%m.%Y %H:%M"),
         }
         asyncio.create_task(asyncio.to_thread(save_users))
-    if is_new:
-        try:
-            uname = "@" + user.username if user.username else user.full_name
-            src_tag = f" · src={ref_source}" if ref_source else ""
-            await bot.send_message(
-                ADMIN_ID,
-                "🔔 Новый: " + uname + src_tag + " | Всего: " + str(len(all_users))
-            )
-        except Exception:
-            pass
+    # Раньше шлём ADMIN'у real-time «🔔 Новый: @user | Всего: N» при каждом
+    # новом юзере — шумит в ЛС админа (особенно когда тестируешь бота).
+    # Те же данные доступны через `/today` (агрегат за день + по source'ам).
 
     # Deep-link из канала на карточку продукта: /start prod_<product_id>
     # (или /start ref_<src>_prod_<product_id> — effective_arg уже нормализован выше)
@@ -901,11 +900,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             users_received_pack.add(user_id)
             await asyncio.to_thread(users_db.mark_sample_pack_received, user_id)
             asyncio.create_task(asyncio.to_thread(save_users))
-        try:
-            uname = "@" + user.username if user.username else user.full_name
-            await bot.send_message(ADMIN_ID, "🎁 " + uname + " получил пак! Всего: " + str(len(users_received_pack)))
-        except Exception:
-            pass
+        # Убрали notification админу «🎁 <user> получил пак!» — шум в ЛС.
+        # Статистика «сколько паков выдано» есть в /today.
 
     await show_main_menu(bot, user_id)
 
@@ -2418,6 +2414,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 show_alert=True,
             )
             return
+        # Guard от multi-click — без него 3 тапа за секунду = 3 pending в YK +
+        # 3 message в ЛС. Юзер-репорт: «сведение треков — 5000₽» дважды подряд.
+        if user_id in _yk_creating_payment:
+            await query.answer("⏳ Уже создаю платёж, подожди...", show_alert=False)
+            return
+        _yk_creating_payment.add(user_id)
         try:
             payment = await yookassa_api.create_payment(
                 amount_rub=licensing.PRICE_MIX_RUB,
@@ -2453,6 +2455,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             logger.exception("YK create_payment (mixing) failed")
             await query.answer(_user_error_msg("оплата"), show_alert=True)
+        finally:
+            _yk_creating_payment.discard(user_id)
         return
 
     if data.startswith("buy_rub_"):
@@ -2469,6 +2473,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             await query.answer()
             return
+        # Multi-click guard (см. buy_mix_rub выше).
+        if user_id in _yk_creating_payment:
+            await query.answer("⏳ Уже создаю платёж, подожди...", show_alert=False)
+            return
+        _yk_creating_payment.add(user_id)
         beat = beats_db.get_beat_by_id(beat_id)
         if not beat:
             await query.answer("Бит не найден", show_alert=True)
@@ -2516,6 +2525,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             logger.exception("YK create_payment (mp3_lease) failed")
             await query.answer(_user_error_msg("оплата"), show_alert=True)
+        finally:
+            _yk_creating_payment.discard(user_id)
         return
 
     if data.startswith("buy_mp3_"):
