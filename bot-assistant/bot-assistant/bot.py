@@ -3158,8 +3158,21 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     state = context.user_data.get("product_upload") or {}
     if state.get("step") != "await_zip":
-        # Не в режиме загрузки — игнорим document тихо (админ мог прислать
-        # PDF/скрин/что-то ещё по другому поводу).
+        # Не в режиме /upload_product FSM — админу могут понадобиться file_id
+        # (например для SAMPLE_PACK_FILE_ID в Render env). Возвращаем его.
+        # Это заменяет ветку в handle_message:2937-2940 которая не вызывалась
+        # потому что handle_document ловил document раньше и тихо return'ил.
+        doc = update.message.document
+        if doc:
+            fid = doc.file_id
+            size_mb = (doc.file_size or 0) / (1024 * 1024)
+            await update.message.reply_text(
+                f"📎 <b>{doc.file_name or '(без имени)'}</b> · {size_mb:.1f} MB\n\n"
+                f"<b>FILE_ID:</b>\n<code>{fid}</code>\n\n"
+                f"Для sample pack: Render env → "
+                f"<code>SAMPLE_PACK_FILE_ID={fid}</code>",
+                parse_mode="HTML",
+            )
         return
 
     doc = update.message.document
