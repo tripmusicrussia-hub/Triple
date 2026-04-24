@@ -108,6 +108,47 @@ pending_uploads: dict[str, dict] = {}
 pending_products: dict[str, dict] = {}
 PENDING_PRODUCTS_PATH = os.path.join(BASE_DIR, "pending_products.json")
 
+# YooKassa payments ждущие webhook-подтверждения. Ключ — payment_id
+# (UUID от YooKassa). Значение — dict с user_id / beat_id / type / amount.
+# При webhook ищем запись здесь → доставляем товар. Persist для переживания
+# redeploy'ев, fallback polling на stale записи.
+pending_yk_payments: dict[str, dict] = {}
+PENDING_YK_PAYMENTS_PATH = os.path.join(BASE_DIR, "pending_yk_payments.json")
+
+
+def _save_yk_pending(payment_id: str, data: dict) -> None:
+    """Добавить pending YooKassa payment + persist. Вызывается после create_payment."""
+    pending_yk_payments[payment_id] = data
+    try:
+        with open(PENDING_YK_PAYMENTS_PATH, "w", encoding="utf-8") as f:
+            json.dump(pending_yk_payments, f, ensure_ascii=False, indent=2)
+    except Exception:
+        logger.exception("yk: persist pending_yk_payments failed (non-fatal)")
+
+
+def _restore_yk_pending() -> int:
+    """Вызывается в post_init — восстанавливаем pending payments с диска."""
+    if not os.path.exists(PENDING_YK_PAYMENTS_PATH):
+        return 0
+    try:
+        with open(PENDING_YK_PAYMENTS_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        pending_yk_payments.update(data)
+        return len(data)
+    except Exception:
+        logger.exception("yk: restore pending_yk_payments failed")
+        return 0
+
+
+def _drop_yk_pending(payment_id: str) -> None:
+    """Удалить после успешной доставки (или при ошибке)."""
+    pending_yk_payments.pop(payment_id, None)
+    try:
+        with open(PENDING_YK_PAYMENTS_PATH, "w", encoding="utf-8") as f:
+            json.dump(pending_yk_payments, f, ensure_ascii=False, indent=2)
+    except Exception:
+        logger.exception("yk: persist after drop failed (non-fatal)")
+
 
 def _persist_pending_products() -> None:
     """Сбрасывает pending_products на диск. Вызывается после append/pop.
@@ -2248,41 +2289,57 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "buy_mix_rub":
-        # Mixing payment через YooKassa (RUB)
-        if not YOOKASSA_PROVIDER_TOKEN:
+        # Mixing payment через YooKassa REST API (все методы: карты MIR/Visa/MC,
+        # СБП, T-Pay, SberPay, ЮMoney). Клиент переходит на YooKassa страницу,
+        # оплачивает, webhook доставляет услугу.
+        import yookassa_api
+        if not yookassa_api.is_configured():
             await query.answer(
-                "RUB-оплата активируется после подтверждения YooKassa. "
-                "Пока используй ⭐ Stars или 💵 USDT.",
+                "RUB-оплата пока не подключена. Используй ⭐ Stars или 💵 USDT.",
                 show_alert=True,
             )
             return
         try:
-            await bot.send_invoice(
-                chat_id=user_id,
-                title="🎛 Сведение трека"[:32],
-                description=(
-                    f"Mix + master за 3-5 рабочих дней. После оплаты пришли стемы WAV "
-                    f"в DM @iiiplfiii. Готовый master WAV + 1 ревизия в цене."
-                )[:255],
-                payload="mixing_service:rub",
-                provider_token=YOOKASSA_PROVIDER_TOKEN,
-                currency="RUB",
-                prices=[LabeledPrice(label="Mixing & Mastering", amount=licensing.PRICE_MIX_RUB * 100)],
-                need_email=False,
+            payment = await yookassa_api.create_payment(
+                amount_rub=licensing.PRICE_MIX_RUB,
+                description=f"Mixing & Mastering — TRIPLE FILL",
+                metadata={
+                    "type": "mixing_service",
+                    "user_id": str(user_id),
+                    "username": update.effective_user.username or "",
+                },
+                return_url=f"https://t.me/{beat_post_builder.BOT_USERNAME}",
+            )
+            _save_yk_pending(payment["id"], {
+                "type": "mixing_service",
+                "user_id": user_id,
+                "username": update.effective_user.username or "",
+                "amount_rub": licensing.PRICE_MIX_RUB,
+                "created_at": datetime.now(ZoneInfo("Europe/Moscow")).isoformat(),
+            })
+            pay_url = payment["confirmation"]["confirmation_url"]
+            await bot.send_message(
+                user_id,
+                f"🎛 <b>Сведение треков — {licensing.PRICE_MIX_RUB}₽</b>\n\n"
+                "Нажми кнопку ниже → выбери удобный способ оплаты (карта, "
+                "СБП, T-Pay, SberPay, ЮMoney) → подтверди платёж.\n\n"
+                "После оплаты автоматически придёт инструкция что прислать "
+                "(стемы WAV, референс, ТЗ).",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"💳 Оплатить {licensing.PRICE_MIX_RUB}₽", url=pay_url)],
+                ]),
             )
             await query.answer()
-        except TelegramError as e:
-            logger.warning("send_invoice mixing rub failed for %s: %s", user_id, e)
-            await query.answer("Сначала напиши /start в ЛС", show_alert=True)
         except Exception:
-            logger.exception("send_invoice mixing rub error")
+            logger.exception("YK create_payment (mixing) failed")
             await query.answer(_user_error_msg("оплата"), show_alert=True)
         return
 
     if data.startswith("buy_rub_"):
-        # RUB-оплата через YooKassa (MIR/Visa/MC/СБП). Native Telegram Payments 2.0.
-        # Webhook подтверждения → handle_successful_payment → _deliver_mp3_lease.
-        if not YOOKASSA_PROVIDER_TOKEN:
+        # MP3 Lease оплата через YooKassa REST API (все методы RU).
+        import yookassa_api
+        if not yookassa_api.is_configured():
             await query.answer(
                 "RUB-оплата пока не подключена. Используй ⭐ Stars или 💵 USDT.",
                 show_alert=True,
@@ -2291,7 +2348,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             beat_id = int(data[len("buy_rub_"):])
         except ValueError:
-            await query.answer()  # гасим loading-spinner, иначе висит ~60с
+            await query.answer()
             return
         beat = beats_db.get_beat_by_id(beat_id)
         if not beat:
@@ -2299,34 +2356,46 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         bpm = beat.get("bpm") or "?"
         key = beat.get("key") or "?"
-        title = f"MP3 Lease — {beat['name']}"[:32]
-        description = (
-            f"MP3 Lease на «{beat['name']}» ({bpm} BPM, {key}). "
-            f"Non-exclusive: до 100k стримов, до 2000 копий, 1 music video. "
-            f"Credit: prod. by TRIPLE FILL. После оплаты — mp3 + txt-лицензия в ЛС."
-        )[:255]
         try:
-            await bot.send_invoice(
-                chat_id=user_id,
-                title=title,
-                description=description,
-                payload=f"mp3_lease:{beat_id}",
-                provider_token=YOOKASSA_PROVIDER_TOKEN,
-                currency="RUB",
-                # YooKassa требует цену в копейках (minor units of RUB)
-                prices=[LabeledPrice(label="MP3 Lease", amount=licensing.PRICE_MP3_RUB * 100)],
-                need_email=False,  # YooKassa может запросить email сама на чекауте
+            payment = await yookassa_api.create_payment(
+                amount_rub=licensing.PRICE_MP3_RUB,
+                description=f"MP3 Lease — {beat['name']} ({bpm} BPM, {key})",
+                metadata={
+                    "type": "mp3_lease",
+                    "user_id": str(user_id),
+                    "username": update.effective_user.username or "",
+                    "beat_id": str(beat_id),
+                    "beat_name": beat.get("name", "?"),
+                },
+                return_url=f"https://t.me/{beat_post_builder.BOT_USERNAME}?start=buy_{beat_id}",
+            )
+            _save_yk_pending(payment["id"], {
+                "type": "mp3_lease",
+                "user_id": user_id,
+                "username": update.effective_user.username or "",
+                "beat_id": beat_id,
+                "amount_rub": licensing.PRICE_MP3_RUB,
+                "created_at": datetime.now(ZoneInfo("Europe/Moscow")).isoformat(),
+            })
+            pay_url = payment["confirmation"]["confirmation_url"]
+            await bot.send_message(
+                user_id,
+                f"🎧 <b>MP3 Lease на «{beat['name']}» — {licensing.PRICE_MP3_RUB}₽</b>\n\n"
+                f"⚡ {bpm} BPM · 🎹 {key}\n\n"
+                "Нажми кнопку → выбери способ оплаты (карта, СБП, T-Pay, "
+                "SberPay, ЮMoney) → подтверди.\n\n"
+                "После оплаты автоматически придёт mp3 + txt-лицензия в этот чат.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"💳 Оплатить {licensing.PRICE_MP3_RUB}₽", url=pay_url)],
+                ]),
             )
             if query.message.chat_id != user_id:
                 await query.answer("💰 Счёт отправил в ЛС бота", show_alert=False)
-        except TelegramError as e:
-            logger.warning("send_invoice RUB failed for user %s: %s", user_id, e)
-            await query.answer(
-                "Сначала напиши /start боту в ЛС — тогда пришлю счёт.",
-                show_alert=True,
-            )
+            else:
+                await query.answer()
         except Exception:
-            logger.exception("send_invoice RUB error")
+            logger.exception("YK create_payment (mp3_lease) failed")
             await query.answer(_user_error_msg("оплата"), show_alert=True)
         return
 
@@ -3441,6 +3510,175 @@ async def _deliver_mixing_service(bot, user, *, payment_charge_id: str,
         logger.exception("mixing: sales.log_sale failed")
 
 
+# ── YooKassa webhook delivery ─────────────────────────────────
+
+async def _deliver_yk_payment(bot, payment_id: str) -> bool:
+    """Доставляет товар по YooKassa payment_id. Вызывается из webhook'а.
+
+    1. Double-check через GET /v3/payments/{id} что реально succeeded
+       (защита от фальшивых webhook'ов)
+    2. Ищем запись в pending_yk_payments по payment_id
+    3. Dispatching на _deliver_mp3_lease / _deliver_mixing_service /
+       _deliver_product в зависимости от type
+    4. Удаляем из pending
+
+    Returns True если доставили, False если ошибка / уже доставлено.
+    """
+    import yookassa_api
+    # Double-check что payment реально succeeded у YooKassa
+    try:
+        yk_info = await yookassa_api.get_payment(payment_id)
+    except Exception:
+        logger.exception("yk_webhook: get_payment %s failed", payment_id)
+        return False
+    if yk_info.get("status") != "succeeded":
+        logger.warning("yk_webhook: payment %s status=%s, not succeeded, skip",
+                       payment_id, yk_info.get("status"))
+        return False
+
+    # Найти локальную запись
+    pending = pending_yk_payments.get(payment_id)
+    if not pending:
+        # Возможно webhook пришёл до persistence (race) — берём metadata из YooKassa
+        md = yk_info.get("metadata") or {}
+        if not md.get("user_id"):
+            logger.warning("yk_webhook: payment %s not in pending + no metadata, skip",
+                           payment_id)
+            return False
+        pending = {
+            "type": md.get("type", "unknown"),
+            "user_id": int(md["user_id"]),
+            "username": md.get("username", ""),
+            "beat_id": int(md["beat_id"]) if md.get("beat_id") else None,
+        }
+
+    ptype = pending.get("type")
+    user_id = pending.get("user_id")
+
+    # Fake user object для существующих _deliver_* функций
+    try:
+        user_chat = await bot.get_chat(user_id)
+        class _User:
+            pass
+        user = _User()
+        user.id = user_id
+        user.full_name = user_chat.full_name
+        user.username = user_chat.username
+    except Exception:
+        class _U2:
+            pass
+        user = _U2()
+        user.id = user_id
+        user.full_name = pending.get("username") or str(user_id)
+        user.username = pending.get("username")
+
+    amount_value = yk_info.get("amount", {}).get("value", "0")
+    try:
+        amount_rub = float(amount_value)
+    except ValueError:
+        amount_rub = 0.0
+    amount_kopecks = int(amount_rub * 100)
+    charge_id = f"yookassa:{payment_id}"
+
+    try:
+        if ptype == "mp3_lease":
+            beat_id = pending.get("beat_id")
+            beat = beats_db.get_beat_by_id(beat_id) if beat_id else None
+            if not beat:
+                await bot.send_message(
+                    user_id,
+                    f"⚠️ Бит пропал из каталога. Пиши @iiiplfiii — разберёмся.",
+                )
+                await bot.send_message(
+                    ADMIN_ID,
+                    f"🚨 YooKassa оплата прошла, но бит id={beat_id} не найден!\n"
+                    f"payment={payment_id}, user={user_id}, amount={amount_rub}₽",
+                )
+                return False
+            await _deliver_mp3_lease(
+                bot, user, beat,
+                payment_charge_id=charge_id,
+                amount=amount_kopecks,
+                currency="RUB",
+            )
+        elif ptype == "mixing_service":
+            await _deliver_mixing_service(
+                bot, user,
+                payment_charge_id=charge_id,
+                amount=amount_kopecks,
+                currency="RUB",
+            )
+        elif ptype == "product":
+            pid = pending.get("beat_id")
+            product = beats_db.get_beat_by_id(pid) if pid else None
+            if not product or product.get("content_type") not in licensing.PRODUCT_TYPE_LABELS:
+                await bot.send_message(
+                    user_id,
+                    "⚠️ Продукт пропал. Пиши @iiiplfiii — разберёмся.",
+                )
+                return False
+            await _deliver_product(
+                bot, user, product,
+                payment_charge_id=charge_id,
+                amount=amount_kopecks,
+                currency="RUB",
+            )
+        else:
+            logger.warning("yk_webhook: unknown type=%s payment=%s", ptype, payment_id)
+            return False
+    except Exception:
+        logger.exception("yk_webhook: delivery failed for %s", payment_id)
+        return False
+
+    _drop_yk_pending(payment_id)
+    logger.info("yk_webhook: delivered %s (type=%s, user=%d, amount=%s₽)",
+                payment_id, ptype, user_id, amount_rub)
+    return True
+
+
+async def yk_fallback_polling(bot):
+    """Fallback: раз в 5 минут проверяем pending payments старше 2 мин.
+    Если webhook не дошёл (network issue, Render sleep) — polling'ом
+    забираем оплаченные.
+
+    Stale >48h — дропаем без delivery (клиент уже, видимо, забил).
+    """
+    import yookassa_api
+    while True:
+        await asyncio.sleep(5 * 60)
+        if not pending_yk_payments:
+            continue
+        try:
+            now = datetime.now(ZoneInfo("Europe/Moscow"))
+            stale_to_drop = []
+            for pid, pending in list(pending_yk_payments.items()):
+                try:
+                    created = datetime.fromisoformat(pending["created_at"])
+                    age_min = (now - created).total_seconds() / 60
+                except Exception:
+                    age_min = 0
+                if age_min < 2:
+                    continue  # слишком свежий, webhook ещё может прийти
+                if age_min > 48 * 60:
+                    stale_to_drop.append(pid)
+                    continue
+                try:
+                    info = await yookassa_api.get_payment(pid)
+                    if info.get("status") == "succeeded":
+                        logger.info("yk_fallback: polling found succeeded %s (webhook miss), delivering", pid)
+                        await _deliver_yk_payment(bot, pid)
+                    elif info.get("status") == "canceled":
+                        logger.info("yk_fallback: payment %s canceled, dropping", pid)
+                        _drop_yk_pending(pid)
+                except Exception:
+                    logger.warning("yk_fallback: get_payment %s failed", pid)
+            for pid in stale_to_drop:
+                logger.warning("yk_fallback: stale pending %s >48h, dropping", pid)
+                _drop_yk_pending(pid)
+        except Exception:
+            logger.exception("yk_fallback polling iteration failed")
+
+
 # ── Telegram Stars payments ───────────────────────────────────
 
 async def handle_precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4034,9 +4272,24 @@ async def post_init(application):
             logger.info("pending_products: restored %d items on startup", restored)
     except Exception:
         logger.exception("pending_products restore failed (non-fatal)")
+    # Восстанавливаем YooKassa pending payments — те что ждут webhook.
+    # Без этого после redeploy webhook приходит на payment_id которого нет
+    # в памяти → delivery fallback на metadata (рабочий, но лишняя ветка).
+    try:
+        n_yk = _restore_yk_pending()
+        if n_yk:
+            logger.info("yk: restored %d pending payments on startup", n_yk)
+    except Exception:
+        logger.exception("yk: restore pending_yk_payments failed (non-fatal)")
+    # Передаём loop + bot в HTTPServer thread — webhook'у нужно schedule'ить
+    # _deliver_yk_payment обратно на main loop через run_coroutine_threadsafe.
+    global _WEBHOOK_BOT, _WEBHOOK_LOOP
+    _WEBHOOK_BOT = application.bot
+    _WEBHOOK_LOOP = asyncio.get_running_loop()
     asyncio.create_task(scheduled_publish_loop(application.bot))
     asyncio.create_task(heartbeat_scheduler())
     asyncio.create_task(content_reminder_scheduler(application.bot))
+    asyncio.create_task(yk_fallback_polling(application.bot))
     asyncio.create_task(asyncio.to_thread(_warmup_ffmpeg))
     write_heartbeat()
 
@@ -4362,11 +4615,100 @@ def _warmup_ffmpeg():
         logger.warning("ffmpeg warmup failed: %s", e)
 
 
+# Webhook'у нужен async event loop чтобы dispatch'ить delivery — HTTPServer
+# работает в отдельном thread'е, asyncio.run_coroutine_threadsafe требует
+# явную ссылку на loop. Заполняются в post_init (когда loop уже запущен).
+_WEBHOOK_BOT = None
+_WEBHOOK_LOOP = None
+
+
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b'OK')
+
+    def do_POST(self):
+        """YooKassa webhook receiver. Body: {"event": "payment.succeeded",
+        "object": {"id": "<uuid>", ...}}. См. yookassa_api.py — YooKassa не
+        подписывает тело криптографически, единственная защита — IP-whitelist.
+
+        Дополнительный guard: в `_deliver_yk_payment` делаем GET /payments/{id}
+        (double-check перед доставкой) — даже если кто-то прикинулся webhook'ом
+        с правильного IP, он не сможет обмануть API.
+
+        ACK на 200 сразу (YooKassa retry'ит при не-200 в течение 3х суток,
+        нам не нужно её нагружать) → delivery асинхронно в main loop.
+        """
+        if self.path != "/yk_webhook":
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        # X-Forwarded-For приходит через Render proxy — формат "client, proxy, proxy".
+        # Берём самый левый (оригинальный client IP).
+        fwd = self.headers.get("X-Forwarded-For", "") or self.client_address[0]
+        client_ip = fwd.split(",")[0].strip()
+
+        try:
+            import yookassa_api
+            if not yookassa_api.ip_in_webhook_whitelist(client_ip):
+                logger.warning("yk_webhook: IP %s NOT in whitelist, reject", client_ip)
+                self.send_response(403)
+                self.end_headers()
+                return
+        except Exception:
+            logger.exception("yk_webhook: IP whitelist check failed")
+            self.send_response(500)
+            self.end_headers()
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length > 0 else b""
+            payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            logger.exception("yk_webhook: bad body")
+            self.send_response(400)
+            self.end_headers()
+            return
+
+        event = payload.get("event", "")
+        obj = payload.get("object") or {}
+        payment_id = obj.get("id") or ""
+
+        # ACK сначала — не тормозим YooKassa пока мы доставляем.
+        self.send_response(200)
+        self.end_headers()
+        try:
+            self.wfile.write(b'OK')
+        except Exception:
+            pass
+
+        logger.info("yk_webhook: event=%s payment=%s ip=%s", event, payment_id, client_ip)
+
+        if not payment_id:
+            return
+
+        if event == "payment.succeeded":
+            if _WEBHOOK_BOT is None or _WEBHOOK_LOOP is None:
+                logger.error("yk_webhook: bot/loop not initialized — delivery skipped for %s",
+                             payment_id)
+                return
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    _deliver_yk_payment(_WEBHOOK_BOT, payment_id),
+                    _WEBHOOK_LOOP,
+                )
+            except Exception:
+                logger.exception("yk_webhook: schedule delivery failed for %s", payment_id)
+        elif event == "payment.canceled":
+            try:
+                _drop_yk_pending(payment_id)
+                logger.info("yk_webhook: payment %s canceled, dropped from pending", payment_id)
+            except Exception:
+                logger.exception("yk_webhook: drop canceled %s failed", payment_id)
+
     def log_message(self, format, *args):
         pass
 
