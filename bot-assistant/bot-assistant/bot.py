@@ -3520,7 +3520,15 @@ async def _deliver_mp3_lease(bot, user, beat: dict, *, payment_charge_id: str,
         logger.exception("sales.log_sale failed")
 
     try:
-        amount_disp = f"{amount}⭐" if currency == "XTR" else f"{amount} {currency}"
+        # RUB amount приходит в копейках (minor units) — делим на 100 для показа
+        # в рублях. USDT amount приходит в major units (20.00) — не делим.
+        # XTR (Stars) — целое число звёзд, не делим.
+        if currency == "XTR":
+            amount_disp = f"{amount}⭐"
+        elif currency == "RUB":
+            amount_disp = f"{amount/100:g}₽"
+        else:
+            amount_disp = f"{amount} {currency}"
         await bot.send_message(
             ADMIN_ID,
             f"💰 Продажа MP3 Lease\n"
@@ -3599,7 +3607,13 @@ async def _deliver_product(bot, user, product: dict, *, payment_charge_id: str,
         logger.exception("sales.log_sale failed (product)")
 
     try:
-        amount_disp = f"{amount}⭐" if currency == "XTR" else f"{amount} {currency}"
+        # RUB в копейках → рубли. USDT в major units. XTR — звёзды.
+        if currency == "XTR":
+            amount_disp = f"{amount}⭐"
+        elif currency == "RUB":
+            amount_disp = f"{amount/100:g}₽"
+        else:
+            amount_disp = f"{amount} {currency}"
         await bot.send_message(
             ADMIN_ID,
             f"📦 Продажа {type_label}\n"
