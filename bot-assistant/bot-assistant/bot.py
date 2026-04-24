@@ -662,21 +662,42 @@ async def is_subscribed(bot, user_id):
         logger.warning("Sub check error: " + str(e))
         return False
 
-async def send_sample_pack(bot, chat_id):
+async def send_sample_pack(bot, chat_id) -> bool:
+    """Отправляет sample pack юзеру. Returns True если реально отправили файл,
+    False если ни FILE_ID ни локального файла нет.
+
+    Ранее был text-fallback `🎁 Сэмпл пак: {CHANNEL_LINK}` — убрали, потому что
+    это вводило юзеров в заблуждение (обещан файл, пришла ссылка на канал).
+    Сейчас при отсутствии файла — тихо skip'аем и возвращаем False, чтобы
+    вызывающая сторона НЕ помечала `received_sample_pack=True` — тогда когда
+    админ добавит SAMPLE_PACK_FILE_ID в env, этот юзер при следующем /start
+    получит pack корректно.
+    """
     try:
         if SAMPLE_PACK_FILE_ID:
-            await bot.send_document(chat_id, document=SAMPLE_PACK_FILE_ID, caption="🎁 Твой FREE Sample Pack!")
-            return
+            await bot.send_document(
+                chat_id, document=SAMPLE_PACK_FILE_ID,
+                caption="🎁 Твой FREE Sample Pack!",
+            )
+            return True
     except Exception as e:
-        logger.warning("file_id failed: " + str(e))
+        logger.warning("sample_pack: file_id send failed: %s", e)
     try:
-        if os.path.exists(SAMPLE_PACK_PATH):
+        if SAMPLE_PACK_PATH and os.path.exists(SAMPLE_PACK_PATH):
             with open(SAMPLE_PACK_PATH, "rb") as f:
-                await bot.send_document(chat_id, document=f, caption="🎁 Твой FREE Sample Pack!")
-        else:
-            await bot.send_message(chat_id, "🎁 Сэмпл пак: " + CHANNEL_LINK)
+                await bot.send_document(
+                    chat_id, document=f,
+                    caption="🎁 Твой FREE Sample Pack!",
+                )
+            return True
     except Exception as e:
-        logger.error("Sample pack error: " + str(e))
+        logger.error("sample_pack: local file send failed: %s", e)
+    logger.warning(
+        "sample_pack: unavailable (no FILE_ID, no local file at %r) — "
+        "skipping for user %s; will retry on next /start when env is set",
+        SAMPLE_PACK_PATH, chat_id,
+    )
+    return False
 
 async def show_main_menu(bot, chat_id):
     # Защитная перезагрузка: кэш пуст, но файл на диске есть — пробуем снова.
@@ -872,10 +893,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id in users_received_pack if sp_state is None else sp_state
     )
     if not already_received:
-        await send_sample_pack(bot, user_id)
-        users_received_pack.add(user_id)
-        await asyncio.to_thread(users_db.mark_sample_pack_received, user_id)
-        asyncio.create_task(asyncio.to_thread(save_users))
+        # Помечаем как «получил pack» ТОЛЬКО если реально отправили файл.
+        # Если FILE_ID ещё не задан в env — send_sample_pack вернёт False
+        # и юзер получит pack при следующем /start (когда админ поставит FILE_ID).
+        sent = await send_sample_pack(bot, user_id)
+        if sent:
+            users_received_pack.add(user_id)
+            await asyncio.to_thread(users_db.mark_sample_pack_received, user_id)
+            asyncio.create_task(asyncio.to_thread(save_users))
         try:
             uname = "@" + user.username if user.username else user.full_name
             await bot.send_message(ADMIN_ID, "🎁 " + uname + " получил пак! Всего: " + str(len(users_received_pack)))
@@ -1829,10 +1854,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sp_state = await asyncio.to_thread(users_db.has_received_sample_pack, user_id)
             already = user_id in users_received_pack if sp_state is None else sp_state
             if not already:
-                await send_sample_pack(bot, user_id)
-                users_received_pack.add(user_id)
-                await asyncio.to_thread(users_db.mark_sample_pack_received, user_id)
-                asyncio.create_task(asyncio.to_thread(save_users))
+                sent = await send_sample_pack(bot, user_id)
+                if sent:
+                    users_received_pack.add(user_id)
+                    await asyncio.to_thread(users_db.mark_sample_pack_received, user_id)
+                    asyncio.create_task(asyncio.to_thread(save_users))
             await show_main_menu(bot, user_id)
         else:
             await query.answer("Ты ещё не подписан! Подпишись и нажми снова.", show_alert=True)
