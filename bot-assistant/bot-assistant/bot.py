@@ -5112,9 +5112,106 @@ async def cmd_auto_repost(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+YT_SNAPSHOT_PATH = os.path.join(BASE_DIR, "yt_daily_snapshot.json")
+
+
+def _load_yt_snapshot() -> dict:
+    """JSON: { 'YYYY-MM-DD': {'subs': N, 'views': N, 'videos': N} } —
+    нужно чтобы в /today показывать delta (что сегодня изменилось)."""
+    if not os.path.exists(YT_SNAPSHOT_PATH):
+        return {}
+    try:
+        with open(YT_SNAPSHOT_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_yt_snapshot(snap: dict) -> None:
+    try:
+        with open(YT_SNAPSHOT_PATH, "w", encoding="utf-8") as f:
+            json.dump(snap, f, ensure_ascii=False, indent=2)
+    except Exception:
+        logger.warning("yt_snapshot save failed")
+
+
+async def _fetch_yt_today_block(today_iso: str, recent_video_ids: list[str]) -> str:
+    """Возвращает форматированный block для /today с YT-метриками.
+
+    1. Channel stats (subs/views/videos) + delta vs вчера через snapshot
+    2. Top recent uploads с views (для битов залитых сегодня)
+
+    Падение YT API → возвращаем "" (silent skip — не ломаем /today).
+    """
+    try:
+        import yt_api
+    except Exception:
+        return ""
+    loop = asyncio.get_running_loop()
+    try:
+        stats = await loop.run_in_executor(None, yt_api.get_channel_stats)
+    except Exception:
+        logger.warning("yt analytics: get_channel_stats failed")
+        return ""
+    snap = _load_yt_snapshot()
+    # Yesterday key — last entry not equal to today (избегаем сравнения с самим собой)
+    prev_keys = sorted(k for k in snap.keys() if k != today_iso)
+    prev = snap.get(prev_keys[-1]) if prev_keys else None
+
+    def _delta(curr: int, key: str) -> str:
+        if not prev or key not in prev:
+            return ""
+        d = curr - prev[key]
+        if d > 0:
+            return f" (+{d})"
+        if d < 0:
+            return f" ({d})"
+        return ""
+
+    lines = ["", f"📺 YT-канал «{stats['title']}»:"]
+    lines.append(f"   👥 Subscribers: <b>{stats['subs']:,}</b>" + _delta(stats['subs'], 'subs'))
+    lines.append(f"   👁 Total views: <b>{stats['views']:,}</b>" + _delta(stats['views'], 'views'))
+    lines.append(f"   🎬 Videos: <b>{stats['videos']}</b>" + _delta(stats['videos'], 'videos'))
+
+    # Save today's snapshot (overwrite — каждый /today обновляет current day)
+    snap[today_iso] = {"subs": stats["subs"], "views": stats["views"],
+                       "videos": stats["videos"]}
+    # Cleanup старых snapshots (>30 дней — не нужны для daily delta)
+    if len(snap) > 30:
+        for old_key in sorted(snap.keys())[:-30]:
+            snap.pop(old_key, None)
+    _save_yt_snapshot(snap)
+
+    # Per-video stats для сегодняшних upload'ов
+    if recent_video_ids:
+        video_lines = []
+        for vid in recent_video_ids[:5]:
+            try:
+                v = await loop.run_in_executor(None, lambda: yt_api.get_video(vid))
+            except Exception:
+                continue
+            if not v:
+                continue
+            stats_v = v.get("statistics", {})
+            title = (v.get("snippet", {}).get("title") or "")[:40]
+            views = stats_v.get("viewCount", "0")
+            likes = stats_v.get("likeCount", "0")
+            comments = stats_v.get("commentCount", "0")
+            video_lines.append(
+                f"   • {title} · 👁 {views} 👍 {likes} 💬 {comments}"
+            )
+        if video_lines:
+            lines.append("")
+            lines.append(f"🔥 Сегодняшние upload'ы:")
+            lines.extend(video_lines)
+
+    return "\n".join(lines)
+
+
 async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Сводка дня для админа: новые юзеры (с разбивкой по source), продажи,
-    залитые биты. Выборка из Supabase за ts >= сегодня 00:00 МСК."""
+    залитые биты + YT analytics (subscribers/views delta vs вчера + topvideos).
+    Выборка из Supabase за ts >= сегодня 00:00 МСК."""
     if update.effective_user.id != ADMIN_ID:
         return
 
@@ -5208,6 +5305,34 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nm = (e.get("beat_name") or "?")[:35]
         bpm = e.get("bpm", "?")
         lines.append(f"   • {nm} · {bpm} BPM")
+
+    # YT analytics block — channel stats with delta vs yesterday +
+    # per-video views для сегодняшних upload'ов. Silent skip если YT API
+    # недоступен (не ломаем /today).
+    today_iso = today.strftime("%Y-%m-%d")
+    # Recent uploads из Supabase events — используем post_events.yt_video_id
+    recent_vids = []
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r4 = await client.get(
+                f"{sb_url}/rest/v1/post_events",
+                params={
+                    "select": "yt_video_id",
+                    "kind": "in.(upload,scheduled_upload)",
+                    "ts": f"gte.{since}",
+                },
+                headers=headers,
+            )
+            if r4.status_code == 200:
+                recent_vids = [
+                    e["yt_video_id"] for e in r4.json()
+                    if e.get("yt_video_id")
+                ]
+    except Exception:
+        pass
+    yt_block = await _fetch_yt_today_block(today_iso, recent_vids)
+    if yt_block:
+        lines.append(yt_block)
 
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
