@@ -4401,6 +4401,252 @@ async def cmd_feature(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Не смог запостить в канал: {e}")
 
 
+async def cmd_repost_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """`/repost_now <beat_id>` — single-shot repost legacy-бита из канала
+    через нашу новую систему: long YT + новый TG post + удаление старого TG.
+
+    Для битов которые когда-то висели на YT (канал был удалён) и сейчас
+    остались только в TG канале без актуального YT video. Строит на лету
+    thumbnail + video + caption, грузит на YT, постит в TG, удаляет
+    старый TG post, обновляет каталог.
+
+    Use case: тестовый прогон одного бита перед auto_repost_scheduler.
+    """
+    if update.effective_user.id != ADMIN_ID:
+        return
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Usage: /repost_now <beat_id>\n\n"
+            "Бит должен иметь BPM, key, артист-tag, file_id."
+        )
+        return
+    try:
+        beat_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text(f"⚠️ beat_id должен быть числом: {args[0]}")
+        return
+    beat = beats_db.get_beat_by_id(beat_id)
+    if not beat:
+        await update.message.reply_text(f"❌ Бит id={beat_id} не найден в каталоге.")
+        return
+    if beat.get("content_type", "beat") != "beat":
+        await update.message.reply_text(
+            f"❌ id={beat_id} это не бит (content_type={beat.get('content_type')}). "
+            "Repost только для битов."
+        )
+        return
+    import beat_upload
+    meta = beat_upload.beat_record_to_meta(beat)
+    if meta is None:
+        await update.message.reply_text(
+            f"❌ Бит id={beat_id} не подходит для repost — нужны BPM, key, "
+            f"артист-tag.\n"
+            f"Получено: bpm={beat.get('bpm')} key={beat.get('key')!r} "
+            f"tags={beat.get('tags')}"
+        )
+        return
+
+    await _do_repost(context.bot, update.effective_chat.id, beat, meta)
+
+
+async def _do_repost(bot, reply_chat_id: int, beat: dict, meta) -> None:
+    """Полный repost flow для одного бита. Вызывается из /repost_now (manual)
+    и из auto_repost_scheduler (auto).
+
+    Шаги (всё синхронно, ~60 секунд):
+    1. Download mp3 by file_id
+    2. Build thumbnail (brand image) + video (ffmpeg)
+    3. Build YT post + TG caption (LLM)
+    4. YT upload long → vid
+    5. Pinned auto-CTA comment + playlists
+    6. New TG channel post → new_msg_id
+    7. Delete old TG post by beat['msg_id']
+    8. Update beats_db: post_url, msg_id, last_reposted_at
+    9. Notification админу + кнопка 🎬 Сделать Shorts
+    """
+    import beat_post_builder
+    import video_builder
+    import yt_api
+    from pathlib import Path as _P
+
+    beat_id = beat["id"]
+    old_msg_id = beat.get("msg_id")
+    file_id = beat.get("file_id")
+    if not file_id:
+        await bot.send_message(reply_chat_id, f"❌ id={beat_id} нет file_id, не могу скачать mp3")
+        return
+
+    status = await bot.send_message(
+        reply_chat_id,
+        f"🔁 Repost {meta.name} ({meta.artist_display}) запущен...\n"
+        f"⏱ ~60 сек: download → ffmpeg → YT upload → TG post → cleanup"
+    )
+
+    token = uuid.uuid4().hex[:12]
+    mp3_path = _P(TEMP_UPLOAD_DIR) / f"{token}.mp3"
+    video_path = _P(TEMP_UPLOAD_DIR) / f"{token}.mp4"
+    thumb_path = _P(TEMP_UPLOAD_DIR) / f"{token}.jpg"
+
+    loop = asyncio.get_running_loop()
+    try:
+        # 1. Download mp3
+        f = await bot.get_file(file_id)
+        await f.download_to_drive(str(mp3_path))
+
+        # 2. Thumbnail (brand)
+        brand_path = await loop.run_in_executor(None, _ensure_brand_image)
+        if brand_path:
+            import shutil
+            shutil.copy2(brand_path, thumb_path)
+        else:
+            import thumbnail_generator
+            thumbnail_generator.generate_thumbnail(meta.name, meta.artist_line, thumb_path)
+
+        # 3. Video
+        await loop.run_in_executor(
+            None,
+            lambda: video_builder.build_video(thumb_path, mp3_path, video_path),
+        )
+
+        # 4. mp3 duration для YT timestamps
+        try:
+            mp3_duration = video_builder.probe_duration(mp3_path)
+        except Exception:
+            mp3_duration = None
+
+        yt_post = beat_post_builder.build_yt_post(
+            meta, beat_id=beat_id, duration_sec=mp3_duration,
+        )
+        tg_caption, _tg_style = await beat_post_builder.build_tg_caption_async(
+            meta, beat_id=beat_id,
+        )
+
+        # 5. YT upload
+        vid = await loop.run_in_executor(
+            None,
+            lambda: yt_api.upload_video(
+                video_path, yt_post.title, yt_post.description, yt_post.tags,
+                thumb_path,
+            ),
+        )
+        # 6. Auto-CTA + playlists (best-effort)
+        try:
+            await loop.run_in_executor(
+                None, lambda: _post_cta_comment(vid, beat_id, source="yt"),
+            )
+        except Exception:
+            logger.warning("repost: cta comment failed (non-fatal)")
+        try:
+            await loop.run_in_executor(
+                None, lambda: _add_to_yt_playlists(vid, meta),
+            )
+        except Exception:
+            logger.warning("repost: playlists failed (non-fatal)")
+
+        # 7. Post в TG канал
+        sent = await bot.send_audio(CHANNEL_ID, audio=file_id, caption=tg_caption)
+        new_msg_id = sent.message_id
+
+        # 8. Delete old TG post
+        if old_msg_id:
+            try:
+                await bot.delete_message(CHANNEL_ID, old_msg_id)
+            except Exception as e:
+                logger.warning("repost: delete old msg %d failed: %s", old_msg_id, e)
+
+        # 9. Update beats_db
+        try:
+            for b in beats_db.BEATS_CACHE:
+                if b.get("id") == beat_id:
+                    b["msg_id"] = new_msg_id
+                    b["post_url"] = f"https://t.me/{CHANNEL_ID.lstrip('@')}/{new_msg_id}"
+                    b["last_reposted_at"] = datetime.now().isoformat(timespec="seconds")
+                    b["last_posted_at"] = b["last_reposted_at"]
+                    # Обновляем чистое имя в каталоге чтобы будущие посты были аккуратнее
+                    b["name"] = meta.name
+                    break
+            beats_db.save_beats()
+        except Exception:
+            logger.exception("repost: beats_db update failed (non-fatal)")
+
+        # 10. Final notification + Shorts button
+        try:
+            await status.delete()
+        except Exception:
+            pass
+        # Создаём fake "scheduled_uploads" запись чтобы make_shorts callback мог
+        # её найти. Делаем через publish_scheduler.save_yt_video_id с ad-hoc token.
+        # Альтернатива: можно сразу автоматом запускать Shorts через 30s, но
+        # для MVP оставим кнопку (юзер сам решает делать ли Shorts).
+        # Для repost flow чтобы make_shorts работал — нужен row в БД.
+        # Создаю минимальную запись.
+        repost_token = uuid.uuid4().hex[:12]
+        try:
+            import publish_scheduler
+            from dataclasses import asdict
+            sb = publish_scheduler._get_supabase()
+            if sb is not None:
+                sb.table(publish_scheduler.SB_TABLE).insert({
+                    "token": repost_token,
+                    "publish_at": datetime.now(ZoneInfo("Europe/Moscow")).isoformat(),
+                    "actions": ["yt", "tg"],
+                    "meta": asdict(meta),
+                    "yt_post": {**asdict(yt_post), "yt_video_id": vid},
+                    "tg_caption": tg_caption,
+                    "tg_style": "repost",
+                    "tg_file_id": file_id,
+                    "reserved_beat_id": beat_id,
+                    "status": "published",
+                    "enqueued_at": datetime.now(ZoneInfo("Europe/Moscow")).isoformat(),
+                    "published_at": datetime.now(ZoneInfo("Europe/Moscow")).isoformat(),
+                }).execute()
+                # Upload файлы в Storage чтобы on-demand Shorts builder мог их скачать
+                publish_scheduler._upload_files_to_storage(repost_token, {
+                    "mp3": mp3_path, "video": video_path, "thumb": thumb_path,
+                })
+        except Exception:
+            logger.exception("repost: failed to create scheduled_uploads row (Shorts unavailable)")
+            repost_token = ""
+
+        msg_text = (
+            f"✅ Repost готов: {meta.name}\n"
+            f"🎬 https://youtu.be/{vid}\n"
+            f"📢 https://t.me/{CHANNEL_ID.lstrip('@')}/{new_msg_id}\n"
+            f"{'🗑 Старый пост удалён' if old_msg_id else '(старого msg_id не было)'}"
+        )
+        keyboard = None
+        if repost_token:
+            msg_text += "\n\n🎬 <b>Сделать Shorts (YT + TikTok)?</b>"
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🎬 Сделать Shorts (YT + TikTok)",
+                                      callback_data=f"make_shorts:{repost_token}")],
+                [InlineKeyboardButton("❌ Без Shorts",
+                                      callback_data=f"skip_shorts:{repost_token}")],
+            ])
+        await bot.send_message(
+            ADMIN_ID, msg_text,
+            reply_markup=keyboard,
+            parse_mode="HTML" if keyboard else None,
+        )
+    except Exception as e:
+        logger.exception("repost: flow failed for beat_id=%d", beat_id)
+        try:
+            await bot.send_message(
+                reply_chat_id,
+                f"❌ Repost провалился: {type(e).__name__}: {e}\nСм. логи Render."
+            )
+        except Exception:
+            pass
+    finally:
+        # Cleanup local temp-файлы
+        for p in (mp3_path, video_path, thumb_path):
+            try:
+                _P(p).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
 async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Сводка дня для админа: новые юзеры (с разбивкой по source), продажи,
     залитые биты. Выборка из Supabase за ts >= сегодня 00:00 МСК."""
@@ -5216,6 +5462,7 @@ async def run_bot():
     app.add_handler(CommandHandler("upload_product", cmd_upload_product))
     app.add_handler(CommandHandler("cancel_product", cmd_cancel_product))
     app.add_handler(CommandHandler("feature", cmd_feature))
+    app.add_handler(CommandHandler("repost_now", cmd_repost_now))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(PreCheckoutQueryHandler(handle_precheckout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, handle_successful_payment))

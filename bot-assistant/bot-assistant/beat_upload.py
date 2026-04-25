@@ -68,6 +68,77 @@ def _cap_words(s: str) -> str:
     return " ".join(p.capitalize() for p in s.split())
 
 
+def beat_record_to_meta(beat: dict) -> "BeatMeta | None":
+    """Конверт записи каталога (beats_data.json) → BeatMeta для repost-публикации.
+
+    Returns None если данных недостаточно для type-beat YT title:
+    - bpm должен быть 40..250
+    - key должен быть валидным (Am, Dm, C#m, ...)
+    - tags должны содержать хотя бы одного артиста
+
+    Уродские имена legacy постов канала (типа `Kenny_Muney_-_Issues_ type beat
+    Gm 121 bpm with vocal.mp3`) чистятся: убираем артист-префикс, BPM, key,
+    `type beat`, vocal-метки, mp3-расширение, dash/underscore noise.
+    """
+    bpm = beat.get("bpm") or 0
+    if not isinstance(bpm, int) or bpm < 40 or bpm > 250:
+        return None
+    raw_key = (beat.get("key") or "").strip()
+    if not raw_key or raw_key == "-":
+        return None
+    try:
+        key_full, key_short = _parse_key(raw_key)
+    except ValueError:
+        return None
+
+    tags = [t for t in (beat.get("tags") or []) if t]
+    if not tags:
+        return None
+    # Берём первый тэг как артиста (обычно так заполнено для новых битов).
+    # Skip technical tags типа `bpm140`, `dark`, `hard` — это не артисты.
+    SKIP_TAGS = {"hard", "dark", "memphis", "detroit", "trap", "hardtrap",
+                 "atlanta", "future_2026"}
+    artist_raw = next(
+        (t.lower() for t in tags
+         if not t.lower().startswith("bpm")
+         and t.lower() not in SKIP_TAGS),
+        "",
+    )
+    if not artist_raw:
+        return None
+    # Decode "kennymuney" → "kenny muney" (camelCase split).
+    artist_raw_decoded = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", artist_raw).lower()
+    artist_display = ARTIST_CASING.get(artist_raw_decoded, _cap_words(artist_raw_decoded))
+
+    raw_name = beat.get("name") or ""
+    # Cleanup pipeline: убираем технические метки чтобы получить чистое NAME
+    name = re.sub(r"\.mp3$", "", raw_name, flags=re.I)
+    name = re.sub(re.escape(artist_raw_decoded), "", name, flags=re.I)
+    name = re.sub(re.escape(artist_display), "", name, flags=re.I)
+    name = re.sub(r"(?i)\btype\s*beat\b", "", name)
+    name = re.sub(r"(?i)\b(no|with|without)\s*vocal\b", "", name)
+    name = re.sub(r"(?i)\b\d+\s*bpm\b", "", name)
+    # Удаляем key только если стоит standalone (Am, Dm, C#m), не внутри слова.
+    name = re.sub(r"(?i)(?<![a-z])[a-g][#b]?m(?![a-z])", "", name)
+    name = re.sub(r"(?i)\b(prod|by|iiiplfiii|leeptonxt)\b", "", name)
+    name = re.sub(r"[_\-]+", " ", name)
+    name = re.sub(r"\s+", " ", name).strip(" -_")
+    if not name or len(name) < 2:
+        name = "INSTRUMENTAL"
+    name = name[:40].upper().strip()
+
+    artist_line = f"{artist_display} Type Beat"
+    return BeatMeta(
+        artist_raw=artist_raw_decoded,
+        artist_display=artist_display,
+        artist_line=artist_line,
+        name=name,
+        bpm=bpm,
+        key=key_full,
+        key_short=key_short,
+    )
+
+
 def _parse_key(raw: str) -> tuple[str, str]:
     """'Am' → ('A minor', 'Am'); 'C#m' → ('C# minor', 'C#m'); 'D' → ('D major', 'D')."""
     raw = raw.strip()
