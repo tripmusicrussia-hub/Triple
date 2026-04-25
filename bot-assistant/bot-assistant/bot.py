@@ -135,6 +135,12 @@ in_flight_yk: set[str] = set()
 # очищается после создания payment'а или ошибки.
 _yk_creating_payment: set[int] = set()
 
+# Mutex для on-demand Shorts builder (callback `make_shorts:<token>`).
+# ffmpeg + YT upload жрёт ~300MB RAM на Render free 512MB. Если админ
+# дважды кликнул на кнопку → две параллельных сборки → OOM. Set хранит
+# token'ы которые сейчас строятся; повторный клик отменяется alert'ом.
+_building_shorts: set[str] = set()
+
 # Lock на все mutation'ы pending / delivered / in_flight. Lazy-init потому что
 # asyncio.Lock() требует running loop (в старых Python). Создаётся в post_init.
 _yk_lock: asyncio.Lock | None = None
@@ -2615,6 +2621,57 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         return
 
+    # ── Shorts on-demand callbacks ────────────────────────────────────
+    # После плановой публикации long YT бот шлёт админу notification
+    # с кнопками. `make_shorts:<token>` запускает heavy ffmpeg+upload
+    # вне scheduler tick'а — это решает OOM. `skip_shorts:<token>`
+    # просто чистит файлы из Storage если Shorts не нужен.
+    if data.startswith("make_shorts:"):
+        if user_id != ADMIN_ID:
+            await query.answer()
+            return
+        token = data.split(":", 1)[1]
+        # Mutex: не запускаем повторную сборку для того же token
+        if token in _building_shorts:
+            await query.answer("⏳ Уже собираю этот Shorts, подожди...", show_alert=True)
+            return
+        _building_shorts.add(token)
+        await query.answer("🎬 Начинаю сборку Shorts...")
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        try:
+            await _build_and_upload_shorts(bot, token)
+        except Exception:
+            logger.exception("make_shorts: build/upload failed for %s", token)
+            try:
+                await bot.send_message(
+                    ADMIN_ID,
+                    f"❌ Сборка Shorts для {token} провалилась — см. логи Render.",
+                )
+            except Exception:
+                pass
+        finally:
+            _building_shorts.discard(token)
+        return
+
+    if data.startswith("skip_shorts:"):
+        if user_id != ADMIN_ID:
+            await query.answer()
+            return
+        token = data.split(":", 1)[1]
+        await query.answer("Окей, чищу файлы")
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        try:
+            await asyncio.to_thread(publish_scheduler.cleanup_published_files, token)
+        except Exception:
+            logger.exception("skip_shorts: cleanup failed for %s", token)
+        return
+
     if data == "admin_panel":
         if user_id != ADMIN_ID: return
         await _nav_reply(query, "🎛 Панель управления:", reply_markup=kb_admin())
@@ -4563,8 +4620,13 @@ async def scheduled_publish_loop(bot):
             for item in due:
                 try:
                     await _execute_scheduled_publish(bot, item)
-                    publish_scheduler.mark_published(item["token"])
-                    # Чистим temp-файлы
+                    # keep_files=True — оставляем mp3/mp4/thumb в Supabase Storage
+                    # на случай если админ нажмёт «🎬 Сделать Shorts». Cleanup
+                    # делается в callback `make_shorts` / `skip_shorts`.
+                    publish_scheduler.mark_published(item["token"], keep_files=True)
+                    # Чистим только LOCAL temp-файлы (RAM-disk Render). В Supabase
+                    # Storage остаются 3 файла привязанные к token, доступные
+                    # для on-demand Shorts builder.
                     for key in ("mp3_path", "video_path", "thumb_path"):
                         p = item.get(key)
                         if p:
@@ -4639,65 +4701,15 @@ async def _execute_scheduled_publish(bot, item: dict):
             except Exception:
                 logger.exception("scheduled: beats_db append failed (non-fatal)")
 
-            # ── YT Shorts: 9:16 upload для discovery feed ─────────
-            # Регрессия из manual flow (bot.py:1362-1399) — в scheduler
-            # этого не было. Бит получал только long YT video и терял
-            # половину YT-трафика. Теперь auto.
-            short_path_for_tiktok = None  # сохраним для TikTok send ниже
-            try:
-                import shorts_builder
-                from beat_upload import BeatMeta as _BM
-                mp3_path = _P(item["mp3_path"])
-                short_path = video_path.with_name(f"short_{video_path.name}")
-                await loop.run_in_executor(
-                    None, lambda: shorts_builder.build_short(
-                        thumb_path, mp3_path, short_path,
-                    ),
-                )
-                meta_obj_short = _BM(**meta_d)
-                short_title = beat_post_builder.build_shorts_title(meta_obj_short)
-                short_desc = beat_post_builder.build_shorts_description(
-                    meta_obj_short, beat_id=reserved_beat_id,
-                    full_video_url=f"https://youtu.be/{vid}",
-                )
-                short_tags = beat_post_builder.build_shorts_tags(meta_obj_short)
-                short_vid = await loop.run_in_executor(
-                    None, lambda: yt_api.upload_video(
-                        short_path, short_title, short_desc, short_tags, thumb_path,
-                    ),
-                )
-                logger.info("scheduled: YT Short uploaded: https://youtu.be/%s", short_vid)
-                short_path_for_tiktok = short_path  # не удаляем пока — TikTok пошлёт
-            except Exception:
-                logger.exception("scheduled: YT Shorts upload failed (non-fatal)")
-
-            # ── TikTok: semi-auto (бот шлёт mp4 админу в ЛС) ──────
-            # Полный API upload требует TikTok Content Posting API approval
-            # (1-4 недели). Пока — админ постит руками из TG на телефоне.
-            if short_path_for_tiktok and short_path_for_tiktok.exists():
-                try:
-                    from beat_upload import BeatMeta as _BM2
-                    meta_obj_tt = _BM2(**meta_d)
-                    tiktok_caption = beat_post_builder.build_tiktok_caption(meta_obj_tt)
-                    with open(short_path_for_tiktok, "rb") as vf:
-                        await bot.send_video(
-                            ADMIN_ID,
-                            video=InputFile(vf, filename=short_path_for_tiktok.name),
-                            caption=(
-                                f"📱 <b>Готовый TikTok для {meta_obj_tt.name}</b>\n\n"
-                                f"<b>Caption (скопируй):</b>\n<code>{tiktok_caption}</code>\n\n"
-                                f"<i>Открой на телефоне → сохрани видео → загрузи в TikTok app</i>"
-                            ),
-                            parse_mode="HTML",
-                        )
-                    logger.info("scheduled: TikTok mp4 sent to admin for %s", meta_obj_tt.name)
-                except Exception:
-                    logger.exception("scheduled: TikTok send to admin failed (non-fatal)")
-                # Cleanup short mp4
-                try:
-                    short_path_for_tiktok.unlink(missing_ok=True)
-                except Exception:
-                    pass
+            # ── Shorts: НЕ строится автоматом ───────────────────────
+            # Раньше тут билдился 9:16 mp4 + uploaded YT Shorts + TikTok send.
+            # Это был причиной OOM на Render free tier (512MB RAM): scheduler
+            # параллельно держал mp3+mp4+thumb downloads + ffmpeg Shorts encode +
+            # YT upload одновременно → kill процесса.
+            # Теперь Shorts билдится **по запросу** — после long publish бот
+            # шлёт админу notification с кнопками 🎬 Shorts / ❌ Без. RAM
+            # свободна когда админ тапает кнопку (нет других heavy операций).
+            # См. callback `make_shorts:<token>` в handle_callback.
         except Exception:
             logger.exception("scheduled: YT upload failed")
             yt_ok = False
@@ -4736,20 +4748,182 @@ async def _execute_scheduled_publish(bot, item: dict):
         except Exception:
             logger.exception("scheduled: post_analytics failed (non-fatal)")
 
-    # Уведомление админу
+    # Уведомление админу + предложение собрать Shorts on-demand.
+    # Кнопка `make_shorts:<token>` запускает heavy ffmpeg+upload вне
+    # scheduler tick'а — RAM свободна, OOM не случается.
+    # Кнопка `skip_shorts:<token>` чистит файлы из Storage (не нужны).
     try:
         parts = []
         if "yt" in actions:
             parts.append(f"YT: {'✅ https://youtu.be/' + yt_video_id if yt_ok else '❌'}")
         if "tg" in actions:
             parts.append(f"TG: {'✅ msg_id=' + str(tg_message_id) if tg_ok else '❌'}")
-        await bot.send_message(
-            ADMIN_ID,
+        msg_text = (
             f"📅 Плановая публикация отработала — {meta_d.get('name','?')} — {meta_d.get('artist_display','?')}\n"
             + "\n".join(parts)
         )
+        keyboard = None
+        if yt_ok and yt_video_id:
+            msg_text += "\n\n🎬 <b>Сделать Shorts (YT + TikTok)?</b>"
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "🎬 Сделать Shorts (YT + TikTok)",
+                    callback_data=f"make_shorts:{item['token']}",
+                )],
+                [InlineKeyboardButton(
+                    "❌ Без Shorts",
+                    callback_data=f"skip_shorts:{item['token']}",
+                )],
+            ])
+        await bot.send_message(
+            ADMIN_ID, msg_text,
+            reply_markup=keyboard,
+            parse_mode="HTML" if keyboard else None,
+        )
     except Exception:
         logger.exception("scheduled: admin notify failed")
+
+
+async def _build_and_upload_shorts(bot, token: str) -> None:
+    """On-demand Shorts builder. Вызывается из callback `make_shorts:<token>`
+    после клика админа. Шаги:
+
+    1. SELECT scheduled_uploads → достать meta + yt_video_id (long).
+    2. Скачать mp3+thumb из Supabase Storage (если файлы ещё там).
+    3. ffmpeg build_short → 9:16 1080×1920 mp4, offset 30s, длина 30s.
+    4. YT Shorts upload через yt_api.upload_video.
+    5. Send mp4 + TikTok-caption админу в ЛС (semi-auto TikTok).
+    6. Cleanup: local short_*.mp4 + Supabase Storage files (token больше
+       не нужен, long+Shorts опубликованы).
+
+    Heavy операция ~30-60 сек. Mutex `_building_shorts` снаружи защищает
+    от concurrent call'ов с тем же token.
+    """
+    import shorts_builder
+    import yt_api
+    from beat_upload import BeatMeta as _BM
+    from pathlib import Path as _P
+
+    item = await asyncio.to_thread(publish_scheduler.fetch_item, token)
+    if not item:
+        await bot.send_message(
+            ADMIN_ID,
+            f"❌ Shorts: запись `{token}` не найдена в Supabase. Файлы возможно "
+            f"уже почищены (TTL).",
+        )
+        return
+
+    meta_d = item.get("meta") or {}
+    yt_post_d = item.get("yt_post") or {}
+    yt_long_id = yt_post_d.get("yt_video_id") or ""
+    if not yt_long_id:
+        await bot.send_message(
+            ADMIN_ID,
+            f"❌ Shorts: long YT video для `{token}` не найден — Shorts без "
+            f"ссылки на full неэффективен. Отменяю.",
+        )
+        return
+
+    reserved_beat_id = item.get("reserved_beat_id")
+    beat_name = meta_d.get("name", "?")
+    await bot.send_message(
+        ADMIN_ID,
+        f"🎬 Собираю Shorts для «{beat_name}»...\n⏱ ~30-60 сек на ffmpeg + upload.",
+    )
+
+    # 1) Файлы из Storage
+    files = await asyncio.to_thread(publish_scheduler.download_files, token)
+    mp3_path = files.get("mp3")
+    thumb_path = files.get("thumb")
+    if not mp3_path or not thumb_path or not mp3_path.exists() or not thumb_path.exists():
+        await bot.send_message(
+            ADMIN_ID,
+            f"❌ Shorts: mp3 или thumb для `{token}` недоступны в Storage. "
+            f"Файлы устарели (TTL) — собрать Shorts уже нельзя.",
+        )
+        return
+
+    # 2) Build short via ffmpeg (executor — не блокируем event loop)
+    short_path = _P(str(mp3_path)).with_name(f"short_{token}.mp4")
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(
+            None,
+            lambda: shorts_builder.build_short(thumb_path, mp3_path, short_path),
+        )
+    except Exception:
+        logger.exception("shorts: build_short failed for %s", token)
+        await bot.send_message(ADMIN_ID, f"❌ ffmpeg сборка Shorts провалилась для {token}")
+        return
+
+    # 3) YT Shorts upload
+    try:
+        meta_obj = _BM(**meta_d)
+    except Exception:
+        logger.exception("shorts: BeatMeta hydrate failed for %s", token)
+        try:
+            short_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return
+
+    short_title = beat_post_builder.build_shorts_title(meta_obj)
+    short_desc = beat_post_builder.build_shorts_description(
+        meta_obj, beat_id=reserved_beat_id,
+        full_video_url=f"https://youtu.be/{yt_long_id}",
+    )
+    short_tags = beat_post_builder.build_shorts_tags(meta_obj)
+    short_yt_id: str | None = None
+    try:
+        short_yt_id = await loop.run_in_executor(
+            None,
+            lambda: yt_api.upload_video(
+                short_path, short_title, short_desc, short_tags, thumb_path,
+            ),
+        )
+        logger.info("shorts: YT Short uploaded https://youtu.be/%s", short_yt_id)
+    except Exception:
+        logger.exception("shorts: YT upload failed for %s", token)
+
+    # 4) TikTok semi-auto: send mp4 + caption админу в ЛС
+    if short_path.exists():
+        try:
+            tiktok_caption = beat_post_builder.build_tiktok_caption(meta_obj)
+            with open(short_path, "rb") as vf:
+                await bot.send_video(
+                    ADMIN_ID,
+                    video=InputFile(vf, filename=short_path.name),
+                    caption=(
+                        f"📱 <b>Готовый TikTok для {beat_name}</b>\n\n"
+                        f"<b>Caption (скопируй):</b>\n<code>{html.escape(tiktok_caption)}</code>\n\n"
+                        f"<i>Открой на телефоне → сохрани видео → загрузи в TikTok app</i>"
+                    ),
+                    parse_mode="HTML",
+                )
+        except Exception:
+            logger.exception("shorts: TikTok send to admin failed")
+
+    # 5) Cleanup
+    try:
+        short_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+    try:
+        await asyncio.to_thread(publish_scheduler.cleanup_published_files, token)
+    except Exception:
+        logger.exception("shorts: cleanup_published_files failed for %s", token)
+
+    # 6) Final notification
+    summary = []
+    if short_yt_id:
+        summary.append(f"✅ YT Shorts: https://youtu.be/{short_yt_id}")
+    else:
+        summary.append("❌ YT Shorts upload не удался")
+    summary.append("📱 TikTok mp4 + caption отправлены тебе в ЛС выше")
+    try:
+        await bot.send_message(ADMIN_ID, "\n".join(summary))
+    except Exception:
+        pass
 
 
 BRAND_IMAGE_URL = (

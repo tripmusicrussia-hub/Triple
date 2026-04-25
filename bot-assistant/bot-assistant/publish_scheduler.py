@@ -306,8 +306,15 @@ def due_items() -> list[dict]:
     return [q for q in _QUEUE if _parse_dt(q["publish_at"]) <= now]
 
 
-def mark_published(token: str):
-    """После успешной публикации: UPDATE status + remove files from Storage."""
+def mark_published(token: str, keep_files: bool = False):
+    """После успешной публикации: UPDATE status + remove files from Storage.
+
+    `keep_files=True` — оставляем mp3/mp4/thumb в Supabase Storage чтобы
+    on-demand Shorts builder мог скачать их позже (когда админ нажмёт
+    кнопку «🎬 Сделать Shorts»). Cleanup делается отдельно через
+    `cleanup_published_files(token)` после того как Shorts собран
+    (или админ выбрал «❌ Без Shorts»).
+    """
     global _QUEUE
     before = len(_QUEUE)
     _QUEUE = [q for q in _QUEUE if q.get("token") != token]
@@ -322,8 +329,39 @@ def mark_published(token: str):
             }).eq("token", token).execute()
         except Exception:
             logger.exception("mark_published: Supabase UPDATE failed for %s", token)
+    if not keep_files:
+        _remove_files_from_storage(token)
+    logger.info("publish_scheduler: dequeued %s (published, keep_files=%s)",
+                token, keep_files)
+
+
+def cleanup_published_files(token: str):
+    """Удаляет mp3/mp4/thumb из Storage. Вызывается после on-demand
+    Shorts upload или когда админ выбрал «❌ Без Shorts»."""
     _remove_files_from_storage(token)
-    logger.info("publish_scheduler: dequeued %s (published)", token)
+    logger.info("publish_scheduler: cleanup files for %s", token)
+
+
+def fetch_item(token: str) -> dict | None:
+    """SELECT scheduled_uploads по token — нужно для on-demand Shorts
+    builder (после mark_published элемент удалён из _QUEUE, нужно
+    достать meta из БД)."""
+    sb = _get_supabase()
+    if sb is None:
+        return None
+    try:
+        resp = sb.table(SB_TABLE).select("*").eq("token", token).limit(1).execute()
+        rows = resp.data or []
+        return rows[0] if rows else None
+    except Exception:
+        logger.exception("fetch_item failed for %s", token)
+        return None
+
+
+def download_files(token: str) -> dict:
+    """Public wrapper над `_download_files_from_storage` для on-demand
+    Shorts builder (он не в этом модуле)."""
+    return _download_files_from_storage(token)
 
 
 def cancel(token: str) -> bool:

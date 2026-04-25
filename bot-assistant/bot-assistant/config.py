@@ -30,8 +30,19 @@ CHANNEL_POST_HOUR = int(os.getenv("CHANNEL_POST_HOUR", "16"))
 # не увеличить выше 50 без перехода на Local Bot API Server.
 PRODUCT_MAX_SIZE_BYTES = int(os.getenv("PRODUCT_MAX_SIZE_BYTES", str(50 * 1024 * 1024)))
 
-# Длительность YT Shorts-версии видео (секунды). YT лимит 60, запас 15 сек.
-SHORTS_DURATION_SEC = int(os.getenv("SHORTS_DURATION_SEC", "45"))
+# Длительность YT Shorts-версии видео (секунды).
+# Research топ-Shorts (2026-04): для нового канала 90 подписчиков —
+# completion rate важнее чем full-track showcase. 30 сек оптимум:
+# юзер слышит хук → если интересно, идёт по ссылке на Long video.
+# Long YT — это где воронка завершается в покупку через бот.
+SHORTS_DURATION_SEC = int(os.getenv("SHORTS_DURATION_SEC", "30"))
+
+# Offset (секунды от начала mp3) с которого начинается Shorts-нарезка.
+# В hard trap 140-180 BPM drop обычно после 16-го такта = ~25-30 сек.
+# Берём с 30 → попадаем в drop = самая яркая часть бита, hook'ает
+# зрителя в первые 1-2 сек просмотра (критично для алгоритма Shorts).
+# Fallback если mp3 короче offset+duration: shorts_builder возьмёт с 0.
+SHORTS_OFFSET_SEC = int(os.getenv("SHORTS_OFFSET_SEC", "30"))
 
 # Оптимальные слоты для автопубликации битов в формате
 # "wday:hour:minute,wday:hour:minute,...". По умолчанию — Fri 21:30 + Mon 21:00
