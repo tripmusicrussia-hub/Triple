@@ -18,14 +18,23 @@ BRAND = "TRIPLE FILL"
 TG_HANDLE = "@iiiplfiii"
 IG_HANDLE = "@iiiplfiii"
 BOT_USERNAME = "triplekillpost_bot"  # для deep-link покупки из TG
+TG_CHANNEL_URL = "https://t.me/iiiplfiii"  # канал для подписки + free sample pack
 LANDING_URL = "https://tripmusicrussia-hub.github.io/Triple/"  # YT → landing → bot
 YEAR = 2026
 
 
-def _buy_link(beat_id: int | None) -> str:
-    """Deep-link в TG-бот на покупку конкретного битка. beat_id=None → общая ссылка."""
+def _buy_link(beat_id: int | None, source: str | None = None) -> str:
+    """Deep-link в TG-бот на покупку конкретного битка.
+    `beat_id=None` → общая ссылка. `source` ставит first-touch ref в combo
+    формате `ref_<src>_buy_<id>` (см. cmd_start parsing) — это позволяет
+    знать откуда пришёл купивший: yt / ytshorts / tiktok / insta / landing.
+    """
+    if beat_id and source:
+        return f"https://t.me/{BOT_USERNAME}?start=ref_{source}_buy_{beat_id}"
     if beat_id:
         return f"https://t.me/{BOT_USERNAME}?start=buy_{beat_id}"
+    if source:
+        return f"https://t.me/{BOT_USERNAME}?start=ref_{source}"
     return f"https://t.me/{BOT_USERNAME}"
 
 # Mood / описание по основному артисту (для Best for + description phrases)
@@ -299,7 +308,9 @@ def build_yt_description(
         energy_line = f"with {_an(mood_adj_low)} {mood_adj_low}, {second_adj_low} {scene} energy"
 
     best = "\n".join(f"✦ {x}" for x in prof["best_for"])
-    buy = _buy_link(beat_id)
+    # source="yt" → first-touch tracking: знаем что юзер пришёл из long YT.
+    # Combo формат `?start=ref_yt_buy_<id>` парсится в cmd_start.
+    buy = _buy_link(beat_id, source="yt")
 
     # Hashtag-блок в начале — YT показывает до 3 hashtag'ов над тайтлом.
     # 3 tags: artist + scene + 'typebeat' — универсально и в нише.
@@ -368,8 +379,9 @@ def build_yt_description(
 
     return (
         f'{hashtags_top}\n\n'
-        f'🎧 ALL BEATS + LEASE: {LANDING_URL}\n'
+        f'🎁 FREE sample pack + 165+ beats → {TG_CHANNEL_URL}\n'
         f'💰 Instant MP3 Lease (1500⭐ / 20 USDT): {buy}\n'
+        f'🎧 All beats + lease: {LANDING_URL}\n'
         f'💎 WAV · Unlimited · Exclusive — DM {TG_HANDLE}\n\n'
         f'{artist_line} {energy_line}.\n\n'
         f'"{beat.name}" is a hard trap instrumental inspired by this sound. '
@@ -384,7 +396,8 @@ def build_yt_description(
         f'Credit required: (prod. by {BRAND})\n\n'
         f'{faq_block}'
         f'📩 Contact:\n'
-        f'📱 Telegram: {TG_HANDLE}\n'
+        f'📡 Telegram channel: {TG_CHANNEL_URL}\n'
+        f'📱 Telegram DM: {TG_HANDLE}\n'
         f'📱 Instagram: {IG_HANDLE}\n\n'
         f'— tags —\n{keyword_wall}'
     )
@@ -408,9 +421,14 @@ def build_shorts_description(
     beat_id: int | None = None,
     full_video_url: str | None = None,
 ) -> str:
-    """Короткое описание YT Short с CTA на полную версию + покупку."""
+    """Короткое описание YT Short с CTA на:
+    - Full version (Long YT video) — главный funnel-step из Shorts
+    - TG канал — подписка + free sample pack (источник нагона аудитории)
+    - Buy link с ref-tracking `?start=ref_ytshorts_buy_<id>`
+    """
     prof = _get_profile(beat.artist_raw)
-    buy = _buy_link(beat_id)
+    # source="ytshorts" → знаем что купивший пришёл из Shorts (а не из long).
+    buy = _buy_link(beat_id, source="ytshorts")
     primary_slug = beat.artist_display.split(" x ")[0].lower().replace(" ", "")
     scene_slug = prof["scene"].lower().replace(" ", "")
     hashtags = f"#{primary_slug}typebeat #{scene_slug}typebeat #typebeat #Shorts"
@@ -421,6 +439,7 @@ def build_shorts_description(
     parts.append("")
     if full_video_url:
         parts.append(f"🎧 FULL version → {full_video_url}")
+    parts.append(f"🎁 FREE sample pack + 165+ beats → {TG_CHANNEL_URL}")
     parts.append(f"💰 MP3 Lease 1500⭐ / 20 USDT → {buy}")
     parts.append(f"💎 WAV / Exclusive → DM {TG_HANDLE}")
     return "\n".join(parts)
@@ -431,13 +450,12 @@ def build_tiktok_caption(beat: BeatMeta) -> str:
     caption админу в ЛС, админ постит в TikTok app руками.
 
     Дизайн:
-    - Первая строка — hook с огоньком (showing up в первом экране)
-    - Вторая — tech-line (BPM + key) для producer-аудитории
-    - 8-10 hashtags: discovery (#fyp #foryou) + niche (#typebeat) +
-      artist + scene + mood. Порядок важен — TikTok ранжирует первые.
+    - Первая строка — hook (показывается в первом экране)
+    - Вторая — TG mention (TikTok ссылки не кликабельны, но текст видно;
+      главный funnel из TikTok идёт через bio-link на @iiiplfiii)
+    - Третья — tech-line (BPM + key) для producer-аудитории
+    - 8-10 hashtags: discovery (#fyp #foryou) + niche + artist + scene
     - Длина ≤500 chars (TikTok max 2200, но в первом экране ~150)
-    - URL не включаем — в TikTok caption ссылки не кликабельны,
-      смысла тратить символы нет. Все конверсии через bio-link.
     """
     prof = _get_profile(beat.artist_raw)
     primary_slug = beat.artist_display.split(" x ")[0].lower().replace(" ", "")
@@ -445,6 +463,7 @@ def build_tiktok_caption(beat: BeatMeta) -> str:
     mood_slug = prof.get("mood", "").split(" ")[0].lower().replace(",", "")
 
     hook = f"🔥 {beat.name} — {beat.artist_display} type beat"
+    cta = f"🎁 free pack + full beats → t.me/iiiplfiii"
     tech = f"{beat.bpm} BPM · {beat.key}"
 
     # Порядок hashtags: discovery → niche → artist → scene → mood
@@ -467,7 +486,7 @@ def build_tiktok_caption(beat: BeatMeta) -> str:
             seen.add(t)
             tag_out.append(t)
 
-    return f"{hook}\n{tech}\n\n{' '.join(tag_out)}"
+    return f"{hook}\n{cta}\n{tech}\n\n{' '.join(tag_out)}"
 
 
 def build_shorts_tags(beat: BeatMeta) -> list[str]:

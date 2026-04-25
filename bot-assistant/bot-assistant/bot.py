@@ -788,7 +788,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             src_part = rest
             effective_arg = ""  # standalone ref_, нет target
         raw_src = src_part.lower().strip()
-        _REF_WHITELIST = {"yt", "insta", "tg", "tiktok", "soundcloud", "landing", "ads", "collab"}
+        _REF_WHITELIST = {"yt", "ytshorts", "insta", "tg", "tiktok", "soundcloud", "landing", "ads", "collab"}
         ref_source = raw_src if raw_src in _REF_WHITELIST else "other"
 
     # is_new определяется через Supabase (source of truth между Render
@@ -4882,6 +4882,17 @@ async def _build_and_upload_shorts(bot, token: str) -> None:
             ),
         )
         logger.info("shorts: YT Short uploaded https://youtu.be/%s", short_yt_id)
+        # Auto-CTA comment под Shorts (как у Long video) —
+        # дополнительный funnel-point с TG channel link.
+        try:
+            await loop.run_in_executor(
+                None,
+                lambda: _post_cta_comment(
+                    short_yt_id, reserved_beat_id, source="ytshorts",
+                ),
+            )
+        except Exception:
+            logger.warning("shorts: cta comment post failed (non-fatal)")
     except Exception:
         logger.exception("shorts: YT upload failed for %s", token)
 
@@ -4932,19 +4943,28 @@ BRAND_IMAGE_URL = (
 )
 
 
-def _post_cta_comment(video_id: str, reserved_beat_id: int | None):
-    """Постит auto-CTA коммент под YT видео с landing-ссылкой + deep-link.
+def _post_cta_comment(
+    video_id: str,
+    reserved_beat_id: int | None,
+    source: str = "yt",
+):
+    """Постит auto-CTA коммент под YT видео с CTA на TG канал + бот.
 
     Pinning недоступен через API (убрали в 2024) — админ пиннит вручную
     в YouTube Studio один раз. Даже непиннутый коммент от owner'а
     даёт engagement-signal YT алгоритму в первые минуты.
+
+    `source` — для tracking refs (`yt` для long, `ytshorts` для Shorts).
+    Combo deep-link: `?start=ref_<source>_buy_<id>` → first-touch source
+    в bot_users.source.
     """
     import yt_api, beat_post_builder
-    buy_link = beat_post_builder._buy_link(reserved_beat_id)
+    buy_link = beat_post_builder._buy_link(reserved_beat_id, source=source)
     import licensing
     text = (
+        f"🎁 FREE sample pack + 165+ beats → {beat_post_builder.TG_CHANNEL_URL}\n"
+        f"💰 Instant MP3 Lease ({licensing.PRICE_MP3_STARS}⭐ / {licensing.PRICE_MP3_USDT:g} USDT / {licensing.PRICE_MP3_RUB}₽) → {buy_link}\n"
         f"🎧 All beats + lease → {beat_post_builder.LANDING_URL}\n"
-        f"💰 Instant MP3 Lease ({licensing.PRICE_MP3_STARS}⭐ / {licensing.PRICE_MP3_USDT:g} USDT) → {buy_link}\n"
         f"💎 WAV / Unlimited / Exclusive — DM @iiiplfiii"
     )
     yt_api.post_comment(video_id, text)
