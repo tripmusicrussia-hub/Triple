@@ -90,10 +90,15 @@ def build_short(image_path: Path, mp3_path: Path, out_path: Path,
 
     # `-ss` ПЕРЕД `-i` — accurate seek без overhead'а на full decode.
     # Применяем только к audio (image — `-loop 1` бесконечная статика).
+    # `-r 1` (1 fps вместо 30) — статичная картинка, ffmpeg всё равно
+    # дублирует кадры, экономим ~30x на encoding для shared CPU Render.
+    # `preset ultrafast` — 3-5x быстрее `veryfast`, чуть больше bitrate
+    # но для Shorts CRF 28 даёт ~3-5MB файл, ОК для YT и TikTok.
     cmd = [
         _ffmpeg(),
         "-y",
         "-loop", "1",
+        "-r", "1",
         "-i", str(image_path),
         "-ss", str(actual_offset),
         "-i", str(mp3_path),
@@ -102,8 +107,8 @@ def build_short(image_path: Path, mp3_path: Path, out_path: Path,
         "scale=1080:-2,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p",
         "-c:v", "libx264",
         "-tune", "stillimage",
-        "-preset", "veryfast",
-        "-crf", "23",
+        "-preset", "ultrafast",
+        "-crf", "28",
         "-r", "30",
         "-c:a", "aac",
         "-b:a", "128k",
@@ -113,7 +118,9 @@ def build_short(image_path: Path, mp3_path: Path, out_path: Path,
         str(out_path),
     ]
 
-    timeout = max(60, duration_sec * 4)
+    # Render free CPU shared — encoding 30-сек 1080×1920 может занять
+    # 2-5 мин. timeout 600 = 10 мин с большим запасом.
+    timeout = max(600, duration_sec * 20)
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as e:
