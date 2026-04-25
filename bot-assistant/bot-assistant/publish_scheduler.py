@@ -342,6 +342,26 @@ def cleanup_published_files(token: str):
     logger.info("publish_scheduler: cleanup files for %s", token)
 
 
+def save_yt_video_id(token: str, yt_video_id: str) -> None:
+    """После успешного long YT upload — записать `yt_video_id` в Supabase.
+    Без этого `_build_and_upload_shorts` не сможет получить ссылку на
+    full video для description Shorts'а (юзер кликает 🎬 → ошибка).
+    """
+    sb = _get_supabase()
+    if sb is None:
+        return
+    try:
+        # GET текущий yt_post → merge → PATCH
+        resp = sb.table(SB_TABLE).select("yt_post").eq("token", token).limit(1).execute()
+        rows = resp.data or []
+        yt_post = (rows[0].get("yt_post") if rows else {}) or {}
+        yt_post["yt_video_id"] = yt_video_id
+        sb.table(SB_TABLE).update({"yt_post": yt_post}).eq("token", token).execute()
+        logger.info("publish_scheduler: saved yt_video_id=%s for %s", yt_video_id, token)
+    except Exception:
+        logger.exception("save_yt_video_id failed for %s", token)
+
+
 def fetch_item(token: str) -> dict | None:
     """SELECT scheduled_uploads по token — нужно для on-demand Shorts
     builder (после mark_published элемент удалён из _QUEUE, нужно

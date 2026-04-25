@@ -4673,6 +4673,17 @@ async def _execute_scheduled_publish(bot, item: dict):
             )
             yt_video_id = vid
             yt_ok = True
+            # Сохраняем yt_video_id в Supabase сразу — нужно для on-demand
+            # Shorts builder (он читает yt_post.yt_video_id из БД когда
+            # юзер кликает «🎬 Сделать Shorts»). Без этого save make_shorts
+            # упадёт с «long YT video не найден».
+            try:
+                import publish_scheduler
+                await asyncio.to_thread(
+                    publish_scheduler.save_yt_video_id, item["token"], vid,
+                )
+            except Exception:
+                logger.exception("scheduled: save_yt_video_id failed (non-fatal)")
             # Playlists (artist + scene) + auto-CTA comment
             try:
                 from beat_upload import BeatMeta
