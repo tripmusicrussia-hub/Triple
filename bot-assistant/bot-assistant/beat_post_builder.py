@@ -613,12 +613,23 @@ async def build_tg_caption_async(beat: BeatMeta, beat_id: int | None = None) -> 
         <hashtag-nav: #artist #scene #bpmXXX #typebeat>
 
     LLM пишет ТОЛЬКО художественную часть. BPM/key и прочая техника
-    добавляются deterministic'но. Это делает LLM «помощником который
-    подкинул 2 строки», а не маркетологом который всё упаковывает.
+    добавляются deterministic'но.
 
-    Возвращает (full_caption, style_label) — label всегда "minimal"
-    после 2026-04-20 (один стиль вместо 5 ротирующихся).
+    A/B test (с 2026-04-26): random 50/50 между:
+    - "minimal" — LLM-creative (existing) с voice автора
+    - "direct"  — deterministic short (без LLM cost) — может зайти лучше
+                  если юзеры устали от over-creative captions
+
+    Tracking через post_events.tg_style — SELECT после 2-4 недель покажет
+    winner (по views на TG посте / reactions). Тогда переключим на winner.
+
+    Возвращает (full_caption, style_label).
     """
+    import random
+    # A/B branch: 50% deterministic — экономит LLM call + тестирует gипотезу
+    # «short metadata-style зайдёт лучше creative LLM» в type-beat нише.
+    if random.random() < 0.5:
+        return build_tg_caption(beat, beat_id=beat_id), "direct"
     footer = _bot_footer(beat_id)
     tech = _tech_line(beat)
     try:
