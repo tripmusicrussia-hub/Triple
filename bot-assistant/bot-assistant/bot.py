@@ -2647,6 +2647,85 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         return
 
+    # ── /quick_meta callbacks ─────────────────────────────────────────
+    # Batch UX для дозаполнения key у битов с librosa-BPM. Юзер слушает
+    # бит → кликает тональность → бот сохраняет + шлёт next.
+    if data.startswith("qm_set:"):
+        if user_id != ADMIN_ID:
+            await query.answer()
+            return
+        try:
+            _, bid_s, key = data.split(":", 2)
+            bid = int(bid_s)
+        except Exception:
+            await query.answer("⚠️ bad payload", show_alert=True)
+            return
+        # Save key in beats_db
+        for b in beats_db.BEATS_CACHE:
+            if b.get("id") == bid:
+                b["key"] = key
+                # confidence = 0.95 (ручная установка) — выше librosa 0.7
+                b["classification_confidence"] = 0.95
+                break
+        try:
+            beats_db.save_beats()
+        except Exception:
+            logger.exception("qm_set: save_beats failed")
+        await query.answer(f"✅ {key}")
+        await _send_quick_meta_card(bot, query.message.chat_id, user_id)
+        return
+
+    if data.startswith("qm_skip:"):
+        if user_id != ADMIN_ID:
+            await query.answer()
+            return
+        await query.answer("⏭ skip")
+        await _send_quick_meta_card(bot, query.message.chat_id, user_id)
+        return
+
+    if data == "qm_stop":
+        if user_id != ADMIN_ID:
+            await query.answer()
+            return
+        await query.answer("🛑 Stop")
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return
+
+    if data.startswith("qm_major:"):
+        if user_id != ADMIN_ID:
+            await query.answer()
+            return
+        try:
+            bid = int(data.split(":", 1)[1])
+        except Exception:
+            await query.answer()
+            return
+        try:
+            await query.edit_message_reply_markup(reply_markup=_kb_quick_meta_major(bid))
+        except Exception:
+            pass
+        await query.answer()
+        return
+
+    if data.startswith("qm_minor:"):
+        if user_id != ADMIN_ID:
+            await query.answer()
+            return
+        try:
+            bid = int(data.split(":", 1)[1])
+        except Exception:
+            await query.answer()
+            return
+        try:
+            await query.edit_message_reply_markup(reply_markup=_kb_quick_meta_minor(bid))
+        except Exception:
+            pass
+        await query.answer()
+        return
+
     # ── Shorts on-demand callbacks ────────────────────────────────────
     # После плановой публикации long YT бот шлёт админу notification
     # с кнопками. `make_shorts:<token>` запускает heavy ffmpeg+upload
@@ -4427,6 +4506,147 @@ async def cmd_feature(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Не смог запостить в канал: {e}")
 
 
+# ── /quick_meta ───────────────────────────────────────────────
+# Batch UX для дозаполнения key у битов которые получили BPM от librosa
+# но не имеют ноты. Юзер слушает 10-15 сек → кликает кнопку → next.
+# Цель: расширить pool готовых для auto-repost битов с 32 до ~143.
+
+_KEY_NOTES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+
+def _kb_quick_meta_minor(beat_id: int) -> InlineKeyboardMarkup:
+    """Picker минорных тональностей (80% hard trap = minor) + переключатель."""
+    rows = []
+    for i in range(0, 12, 4):
+        rows.append([
+            InlineKeyboardButton(f"{n}m", callback_data=f"qm_set:{beat_id}:{n}m")
+            for n in _KEY_NOTES[i:i+4]
+        ])
+    rows.append([
+        InlineKeyboardButton("→ Мажор", callback_data=f"qm_major:{beat_id}"),
+        InlineKeyboardButton("⏭ Skip", callback_data=f"qm_skip:{beat_id}"),
+        InlineKeyboardButton("🛑 Stop", callback_data="qm_stop"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _kb_quick_meta_major(beat_id: int) -> InlineKeyboardMarkup:
+    """Picker мажорных тональностей."""
+    rows = []
+    for i in range(0, 12, 4):
+        rows.append([
+            InlineKeyboardButton(n, callback_data=f"qm_set:{beat_id}:{n}")
+            for n in _KEY_NOTES[i:i+4]
+        ])
+    rows.append([
+        InlineKeyboardButton("← Минор", callback_data=f"qm_minor:{beat_id}"),
+        InlineKeyboardButton("⏭ Skip", callback_data=f"qm_skip:{beat_id}"),
+        InlineKeyboardButton("🛑 Stop", callback_data="qm_stop"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _pick_next_quick_meta_beat() -> dict | None:
+    """Следующий бит для /quick_meta: BPM>0, key пустой, content_type=beat,
+    file_id есть. Sort by id (deterministic order)."""
+    candidates = [
+        b for b in beats_db.BEATS_CACHE
+        if b.get("content_type", "beat") == "beat"
+        and b.get("file_id")
+        and (b.get("bpm") or 0) > 0
+        and (not b.get("key") or b.get("key") == "-")
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda b: b.get("id", 0))
+    return candidates[0]
+
+
+async def _send_quick_meta_card(bot, chat_id: int, user_id: int):
+    """Шлёт audio + key-picker для следующего бита. Используется и из
+    /quick_meta и из callback'ов qm_set/qm_skip (после save показываем next).
+
+    Single-audio: использует last_bit_audio_msg чтобы предыдущий аудио
+    исчез при кликах next/skip.
+    """
+    beat = _pick_next_quick_meta_beat()
+    if beat is None:
+        await bot.send_message(
+            chat_id,
+            "🎉 Все биты с BPM получили key! Pool готовых битов для auto-repost "
+            "максимально расширен. Запусти `/auto_repost status` посмотреть итог.",
+        )
+        return
+
+    # Single-audio cleanup: удаляем предыдущий бит-аудио этого юзера
+    prev = last_bit_audio_msg.get(user_id)
+    if prev:
+        try:
+            await bot.delete_message(chat_id, prev)
+        except Exception:
+            pass
+
+    bid = beat["id"]
+    name = beat.get("name", "?")[:60]
+    bpm = beat.get("bpm")
+    tags = ", ".join(beat.get("tags") or [])[:60]
+    caption = (
+        f"🎵 <b>id={bid}</b>\n"
+        f"<i>{name}</i>\n"
+        f"⚡ {bpm} BPM | tags: {tags or '—'}\n\n"
+        f"<b>Какая тональность?</b>"
+    )
+    try:
+        sent = await bot.send_audio(
+            chat_id,
+            audio=beat["file_id"],
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=_kb_quick_meta_minor(bid),
+        )
+        last_bit_audio_msg[user_id] = sent.message_id
+    except Exception as e:
+        logger.warning("/quick_meta send_audio failed for %d: %s", bid, e)
+        await bot.send_message(chat_id, f"⚠️ id={bid} — file_id не работает, skip")
+        # Skip and try next
+        beat["key"] = "—broken—"  # marker, beat_record_to_meta вернёт None
+        beats_db.save_beats()
+        await _send_quick_meta_card(bot, chat_id, user_id)
+
+
+async def cmd_quick_meta(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """`/quick_meta` — batch UX для заполнения key у битов с librosa-BPM.
+
+    Flow: бот шлёт первый бит без key + клавиатуру с тональностями →
+    админ слушает 10-20 сек → кликает → бот сохраняет, шлёт следующий.
+    Управление: ⏭ Skip (пропустить), 🛑 Stop (выйти), → Мажор (переключить
+    клавиатуру на мажорные).
+    """
+    if update.effective_user.id != ADMIN_ID:
+        return
+    # Подсчитать сколько осталось
+    pending = [
+        b for b in beats_db.BEATS_CACHE
+        if b.get("content_type", "beat") == "beat"
+        and (b.get("bpm") or 0) > 0
+        and (not b.get("key") or b.get("key") == "-")
+        and b.get("file_id")
+    ]
+    if not pending:
+        await update.message.reply_text(
+            "🎉 Все биты с BPM уже имеют key. Auto-repost pool максимальный."
+        )
+        return
+    await update.message.reply_text(
+        f"🎹 Заполняем key для {len(pending)} битов.\n"
+        f"Слушай 10-15 сек, кликай тональность. Skip — если не уверен, "
+        f"Stop — выйти."
+    )
+    await _send_quick_meta_card(
+        context.bot, update.effective_chat.id, update.effective_user.id,
+    )
+
+
 async def cmd_repost_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """`/repost_now <beat_id>` — single-shot repost legacy-бита из канала
     через нашу новую систему: long YT + новый TG post + удаление старого TG.
@@ -5690,6 +5910,7 @@ async def run_bot():
     app.add_handler(CommandHandler("feature", cmd_feature))
     app.add_handler(CommandHandler("repost_now", cmd_repost_now))
     app.add_handler(CommandHandler("auto_repost", cmd_auto_repost))
+    app.add_handler(CommandHandler("quick_meta", cmd_quick_meta))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(PreCheckoutQueryHandler(handle_precheckout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, handle_successful_payment))
