@@ -701,17 +701,57 @@ def kb_admin():
         queue_n = publish_scheduler.queue_size()
     except Exception:
         queue_n = 0
+    # Quick-meta pending: биты с BPM но без key
+    try:
+        qm_pending = sum(
+            1 for b in beats_db.BEATS_CACHE
+            if b.get("content_type", "beat") == "beat"
+            and (b.get("bpm") or 0) > 0
+            and (not b.get("key") or b.get("key") == "-")
+            and b.get("file_id")
+        )
+    except Exception:
+        qm_pending = 0
+    # Auto-repost on/off + ready pool size
+    try:
+        prefs = _load_admin_prefs()
+        ar_on = prefs.get("auto_repost_enabled", False)
+    except Exception:
+        ar_on = False
+    try:
+        import beat_upload as _bu
+        ready_count = sum(
+            1 for b in beats_db.BEATS_CACHE
+            if b.get("content_type", "beat") == "beat"
+            and b.get("file_id")
+            and _bu.beat_record_to_meta(b) is not None
+        )
+    except Exception:
+        ready_count = 0
+
     queue_label = f"📅 Очередь публикаций ({queue_n})" if queue_n else "📅 Очередь публикаций (пусто)"
     products_label = f"📦 Kits & Packs ({products_n})" if products_n else "📦 Kits & Packs — залить первый"
-    return InlineKeyboardMarkup([
+    qm_label = f"🎹 Заполнить ключи ({qm_pending})" if qm_pending else "🎹 Все ключи заполнены ✅"
+    ar_label = (
+        f"🔁 Auto-repost: ✅ ON · {ready_count} ready"
+        if ar_on
+        else f"🔁 Auto-repost: ⛔ OFF · {ready_count} ready"
+    )
+    rows = [
         [InlineKeyboardButton("📊 Статистика (" + str(len(all_users)) + " польз.)", callback_data="admin_stats")],
         [InlineKeyboardButton("🎹 " + str(beats) + " / 🎤 " + str(tracks) + " / 🔀 " + str(remixes), callback_data="admin_catalog")],
         [InlineKeyboardButton(products_label, callback_data="admin_products")],
         [InlineKeyboardButton(queue_label, callback_data="admin_queue")],
+        [InlineKeyboardButton(ar_label, callback_data="admin_auto_repost_toggle")],
+    ]
+    if qm_pending:
+        rows.append([InlineKeyboardButton(qm_label, callback_data="admin_quick_meta")])
+    rows.extend([
         [InlineKeyboardButton("📌 Обновить закреп-пост (навигация)", callback_data="admin_pin_hub")],
         [InlineKeyboardButton("🗑 Удалить бит из каталога", callback_data="admin_clearbeats")],
         [InlineKeyboardButton("🎬 YouTube", callback_data="admin_yt_menu")],
     ])
+    return InlineKeyboardMarkup(rows)
 
 
 def kb_admin_queue():
@@ -2861,6 +2901,37 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "admin_panel":
         if user_id != ADMIN_ID: return
         await _nav_reply(query, "🎛 Панель управления:", reply_markup=kb_admin())
+        return
+
+    if data == "admin_quick_meta":
+        if user_id != ADMIN_ID:
+            await query.answer()
+            return
+        await query.answer("🎹 Запускаю flow...")
+        # Кратко поясняем + сразу шлём первый бит-карточку через
+        # _send_quick_meta_card (та же логика что в /quick_meta команде)
+        try:
+            await _send_quick_meta_card(bot, query.message.chat_id, user_id)
+        except Exception:
+            logger.exception("admin_quick_meta failed")
+            await bot.send_message(query.message.chat_id, "❌ Ошибка запуска /quick_meta")
+        return
+
+    if data == "admin_auto_repost_toggle":
+        if user_id != ADMIN_ID:
+            await query.answer()
+            return
+        prefs = _load_admin_prefs()
+        was_on = prefs.get("auto_repost_enabled", False)
+        prefs["auto_repost_enabled"] = not was_on
+        _save_admin_prefs(prefs)
+        new_state = "✅ ВКЛ" if not was_on else "⛔ ВЫКЛ"
+        await query.answer(f"Auto-repost: {new_state}", show_alert=True)
+        # Refresh админ-панели чтобы кнопка обновила label
+        try:
+            await query.edit_message_reply_markup(reply_markup=kb_admin())
+        except Exception:
+            pass
         return
 
     if data == "admin_pin_hub":
