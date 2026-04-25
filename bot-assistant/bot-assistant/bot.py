@@ -4797,12 +4797,32 @@ async def _do_repost(bot, reply_chat_id: int, beat: dict, meta) -> str | None:
         sent = await bot.send_audio(CHANNEL_ID, audio=file_id, caption=tg_caption)
         new_msg_id = sent.message_id
 
-        # 8. Delete old TG post
+        # 8. Delete old TG post.
+        # Bot API ограничен: бот может delete только свои сообщения и
+        # только в пределах 48ч после публикации. Legacy-биты публиковались
+        # давно → Bot API всегда возвращает 400 'Message can't be deleted'.
+        # Fallback: Telethon (user-account API), который не имеет 48h лимита.
         if old_msg_id:
+            deleted = False
             try:
                 await bot.delete_message(CHANNEL_ID, old_msg_id)
+                deleted = True
             except Exception as e:
-                logger.warning("repost: delete old msg %d failed: %s", old_msg_id, e)
+                logger.info(
+                    "repost: bot.delete failed (expected for legacy >48h): %s", e,
+                )
+            if not deleted:
+                try:
+                    await _telethon_delete(CHANNEL_ID, old_msg_id)
+                    deleted = True
+                except Exception as e:
+                    logger.warning("repost: telethon delete %d failed: %s",
+                                   old_msg_id, e)
+            if not deleted:
+                logger.warning(
+                    "repost: НЕ удалил старый пост msg_id=%d — удали вручную",
+                    old_msg_id,
+                )
 
         # 9. Update beats_db
         try:
@@ -5742,6 +5762,67 @@ def _warmup_ffmpeg():
         video_builder.warmup()
     except Exception as e:
         logger.warning("ffmpeg warmup failed: %s", e)
+
+
+# ── Telethon (user-account API) для delete_message без 48h лимита ────
+# Bot API → 48h delete. Telethon с StringSession от phone-аккаунта
+# админа → unlimited delete своих сообщений.
+# Setup: см. setup_telethon.py + env vars TELETHON_API_ID/HASH/SESSION_STRING.
+# Если env пустые → silent skip (бот работает как раньше, только без auto-delete).
+
+_telethon_client = None
+_telethon_lock: "asyncio.Lock | None" = None
+
+
+async def _get_telethon():
+    """Lazy-init Telethon client. None если env credentials отсутствуют."""
+    global _telethon_client, _telethon_lock
+    if _telethon_lock is None:
+        _telethon_lock = asyncio.Lock()
+    async with _telethon_lock:
+        if _telethon_client is not None:
+            return _telethon_client if _telethon_client is not False else None
+        api_id = (os.getenv("TELETHON_API_ID") or "").strip()
+        api_hash = (os.getenv("TELETHON_API_HASH") or "").strip()
+        session_str = (os.getenv("TELETHON_SESSION_STRING") or "").strip()
+        if not api_id or not api_hash or not session_str:
+            _telethon_client = False
+            return None
+        try:
+            from telethon import TelegramClient
+            from telethon.sessions import StringSession
+            client = TelegramClient(StringSession(session_str), int(api_id), api_hash)
+            await client.connect()
+            if not await client.is_user_authorized():
+                logger.error("telethon: not authorized — re-run setup_telethon.py")
+                _telethon_client = False
+                return None
+            me = await client.get_me()
+            logger.info("telethon: authorized as %s (@%s)",
+                        me.first_name, me.username)
+            _telethon_client = client
+            return client
+        except Exception:
+            logger.exception("telethon init failed")
+            _telethon_client = False
+            return None
+
+
+async def _telethon_delete(channel_id: str, msg_id: int) -> None:
+    """Удаляет сообщение в канале через user-account (без 48h лимита).
+
+    `channel_id` — `@iiiplfiii` или `-100...` форма.
+    Raises на ошибку — caller catch'ит.
+    """
+    client = await _get_telethon()
+    if client is None:
+        raise RuntimeError("Telethon not configured (env TELETHON_* missing)")
+    # Telethon принимает username в формате '@channel' или int chat_id
+    target = channel_id
+    if isinstance(target, str) and target.startswith("@"):
+        target = target[1:]  # без '@'
+    await client.delete_messages(target, [msg_id])
+    logger.info("telethon: deleted msg %d from %s", msg_id, channel_id)
 
 
 # Webhook'у нужен async event loop чтобы dispatch'ить delivery — HTTPServer
