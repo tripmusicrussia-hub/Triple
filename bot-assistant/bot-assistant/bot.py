@@ -50,6 +50,12 @@ batch_report_task = None  # текущий таймер отчёта
 beat_plays = {}
 beat_plays_users = {}
 
+# Single-audio playback: храним id последнего bit-аудио сообщения для каждого
+# юзера. При следующем send_beat (Next/Random) удаляем предыдущий аудио →
+# в чате юзера всегда **один** играющий бит, не накапливается лента.
+# In-memory only — после redeploy state потеряется (юзеры начнут заново).
+last_bit_audio_msg: dict[int, int] = {}
+
 # (Автопостинг текстовых рубрик удалён 2026-04-20 — автор сам пишет посты.
 # Остаётся только upload-flow битов, превью которого через pending_uploads
 # в памяти — при redeploy файлы mp3/video всё равно пропадают.)
@@ -746,16 +752,36 @@ async def send_beat(bot, chat_id, beat, user_id):
         caption += "\n" + tags_str
     content_type = beat.get("content_type", "beat")
 
+    # Single-audio playback: удаляем предыдущий бит-аудио этого юзера, чтобы
+    # в чате не накапливалась лента из десятка треков. Best-effort: если не
+    # получилось (TG лимит 48ч на delete или старый id неактуальный) — просто
+    # шлём новое сообщение поверх.
+    prev_msg_id = last_bit_audio_msg.get(user_id)
+    if prev_msg_id:
+        try:
+            await bot.delete_message(chat_id, prev_msg_id)
+        except Exception:
+            pass
+
+    sent = None
     if beat.get("file_id"):
         try:
-            await bot.send_audio(chat_id, audio=beat["file_id"], caption=caption,
-                                 reply_markup=kb_after_beat(beat["id"], content_type))
-            return
+            sent = await bot.send_audio(
+                chat_id, audio=beat["file_id"], caption=caption,
+                reply_markup=kb_after_beat(beat["id"], content_type),
+            )
         except Exception as e:
             logger.warning("Audio send failed: " + str(e))
 
-    caption += "\n\n👉 " + beat["post_url"]
-    await bot.send_message(chat_id, caption, reply_markup=kb_after_beat(beat["id"], content_type))
+    if sent is None:
+        caption += "\n\n👉 " + beat["post_url"]
+        sent = await bot.send_message(
+            chat_id, caption,
+            reply_markup=kb_after_beat(beat["id"], content_type),
+        )
+
+    if sent is not None:
+        last_bit_audio_msg[user_id] = sent.message_id
 
 
 # ── /start ────────────────────────────────────────────────────
@@ -2025,7 +2051,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "beats_by_artist":
-        await _nav_reply(query, "🎤 Под кого делаем? Выбирай артиста — найду похожие биты!", reply_markup=kb_artists())
+        await _nav_reply(query, "🎤 Выбирай тайп — найду похожие биты!", reply_markup=kb_artists())
         return
 
     if data.startswith("cattag_"):
