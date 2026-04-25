@@ -2667,6 +2667,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         try:
+            import publish_scheduler
             await asyncio.to_thread(publish_scheduler.cleanup_published_files, token)
         except Exception:
             logger.exception("skip_shorts: cleanup failed for %s", token)
@@ -4801,6 +4802,7 @@ async def _build_and_upload_shorts(bot, token: str) -> None:
     """
     import shorts_builder
     import yt_api
+    import publish_scheduler
     from beat_upload import BeatMeta as _BM
     from pathlib import Path as _P
 
