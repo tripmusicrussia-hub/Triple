@@ -3,6 +3,7 @@ import html
 import logging
 import re
 import threading
+import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import random
 import os
@@ -55,6 +56,82 @@ beat_plays_users = {}
 # в чате юзера всегда **один** играющий бит, не накапливается лента.
 # In-memory only — после redeploy state потеряется (юзеры начнут заново).
 last_bit_audio_msg: dict[int, int] = {}
+
+# Re-marketing: отслеживаем какие биты юзер посмотрел но не купил.
+# Через 24-48 часов шлём ОДИН reminder с CTA. Структура:
+# {(user_id, beat_id): { "ts": float, "name": str, "reminded": bool }}
+# Persist в JSON чтобы переживать redeploy. Опт-аут через /stop_reminders.
+pending_reminders: dict[str, dict] = {}
+PENDING_REMINDERS_PATH = os.path.join(BASE_DIR, "pending_reminders.json")
+# Юзеры которые опт-аутнулись из reminders (не шлём им)
+reminders_optout: set[int] = set()
+REMINDERS_OPTOUT_PATH = os.path.join(BASE_DIR, "reminders_optout.json")
+
+
+def _reminder_key(user_id: int, beat_id: int) -> str:
+    """JSON-keys должны быть строками — encode tuple."""
+    return f"{user_id}:{beat_id}"
+
+
+def _load_reminders_state() -> None:
+    """Восстановить pending_reminders + opt-out на startup."""
+    if os.path.exists(PENDING_REMINDERS_PATH):
+        try:
+            with open(PENDING_REMINDERS_PATH, encoding="utf-8") as f:
+                pending_reminders.update(json.load(f))
+        except Exception:
+            logger.exception("reminders: load pending failed")
+    if os.path.exists(REMINDERS_OPTOUT_PATH):
+        try:
+            with open(REMINDERS_OPTOUT_PATH, encoding="utf-8") as f:
+                reminders_optout.update(json.load(f))
+        except Exception:
+            logger.exception("reminders: load optout failed")
+
+
+def _save_reminders() -> None:
+    try:
+        with open(PENDING_REMINDERS_PATH, "w", encoding="utf-8") as f:
+            json.dump(pending_reminders, f, ensure_ascii=False, indent=2)
+    except Exception:
+        logger.exception("reminders: save pending failed")
+
+
+def _save_optout() -> None:
+    try:
+        with open(REMINDERS_OPTOUT_PATH, "w", encoding="utf-8") as f:
+            json.dump(sorted(reminders_optout), f)
+    except Exception:
+        logger.exception("reminders: save optout failed")
+
+
+def track_bit_view(user_id: int, beat: dict) -> None:
+    """Юзер посмотрел preview бита — записываем для re-marketing.
+    Вызывается из send_beat / deep-link buy_/prod_ handlers.
+    Skip если юзер опт-аутнулся."""
+    if user_id in reminders_optout:
+        return
+    if user_id == ADMIN_ID:
+        return  # сам себе reminders не шлём
+    bid = beat.get("id")
+    name = beat.get("name") or "?"
+    if not bid:
+        return
+    key = _reminder_key(user_id, bid)
+    pending_reminders[key] = {
+        "ts": time.time(),
+        "name": name,
+        "reminded": False,
+    }
+    _save_reminders()
+
+
+def mark_bit_purchased(user_id: int, beat_id: int) -> None:
+    """Юзер купил бит — удаляем из pending (reminder уже не нужен)."""
+    key = _reminder_key(user_id, beat_id)
+    if key in pending_reminders:
+        pending_reminders.pop(key, None)
+        _save_reminders()
 
 # (Автопостинг текстовых рубрик удалён 2026-04-20 — автор сам пишет посты.
 # Остаётся только upload-flow битов, превью которого через pending_uploads
@@ -739,6 +816,9 @@ async def send_beat(bot, chat_id, beat, user_id):
     if bid not in beat_plays_users:
         beat_plays_users[bid] = set()
     beat_plays_users[bid].add(user_id)
+    # Re-marketing tracking: юзер посмотрел preview бита.
+    # Через 24h, если не купит — отправим reminder (см. remarketing_scheduler).
+    track_bit_view(user_id, beat)
 
     tags_str = " ".join(["#" + t for t in beat["tags"]]) if beat["tags"] else ""
     icon = {"beat": "🎹", "track": "🎤", "remix": "🔀"}.get(beat.get("content_type", "beat"), "🎧")
@@ -3630,6 +3710,11 @@ async def handle_assistant(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _deliver_mp3_lease(bot, user, beat: dict, *, payment_charge_id: str,
                              amount: int | float, currency: str) -> None:
     """Отправляет mp3 + txt-лицензию покупателю, логирует продажу, уведомляет админа."""
+    # Юзер купил → удалить из pending re-marketing reminders.
+    try:
+        mark_bit_purchased(user.id, beat["id"])
+    except Exception:
+        pass
     buyer_name = (user.full_name or user.username or str(user.id)).strip()
     license_text = licensing.mp3_lease_text(
         buyer_name=buyer_name,
@@ -4954,6 +5039,135 @@ def _pick_next_repost_candidate() -> dict | None:
     return candidates[0][1]
 
 
+async def remarketing_scheduler(bot):
+    """Раз в час проходит pending_reminders. Если запись >24h и юзер ещё не
+    куплен этот бит — шлёт ОДИН reminder с CTA + ref_remind tracking.
+    Если >7 дней — silent drop (не агрессивно).
+
+    Anti-spam защита:
+    - Один reminder per (user, beat)
+    - Skip юзеров в reminders_optout (через /stop_reminders)
+    - Skip ADMIN_ID
+    - Если bot.send_message упал с Forbidden (юзер blocked бот) — auto-optout
+    """
+    REMINDER_AFTER_SEC = 24 * 3600       # 24h after view
+    DROP_AFTER_SEC = 7 * 24 * 3600        # 7d → drop без действия
+    while True:
+        try:
+            await asyncio.sleep(60 * 60)  # каждый час
+            now = time.time()
+            to_drop = []
+            to_remind = []
+            for key, rec in list(pending_reminders.items()):
+                age = now - rec.get("ts", now)
+                if age > DROP_AFTER_SEC:
+                    to_drop.append(key)
+                    continue
+                if rec.get("reminded"):
+                    continue
+                if age >= REMINDER_AFTER_SEC:
+                    to_remind.append((key, rec))
+
+            for key, rec in to_remind:
+                try:
+                    user_id_s, beat_id_s = key.split(":", 1)
+                    user_id = int(user_id_s)
+                    beat_id = int(beat_id_s)
+                except Exception:
+                    to_drop.append(key)
+                    continue
+                if user_id in reminders_optout:
+                    to_drop.append(key)
+                    continue
+                if user_id == ADMIN_ID:
+                    to_drop.append(key)
+                    continue
+
+                beat = beats_db.get_beat_by_id(beat_id)
+                if not beat:
+                    to_drop.append(key)
+                    continue
+
+                # Сообщение с deep-link `?start=ref_remind_buy_<id>` —
+                # ref tracking покажет в /today сколько конверсий из reminders.
+                buy_url = (
+                    f"https://t.me/{beat_post_builder.BOT_USERNAME}"
+                    f"?start=ref_remind_buy_{beat_id}"
+                )
+                bpm = beat.get("bpm") or "?"
+                key_short = beat.get("key") or ""
+                rec_name = rec.get("name") or beat.get("name") or "бит"
+                text = (
+                    f"🎧 Помнишь <b>«{html.escape(str(rec_name))}»</b>?\n"
+                    f"⚡ {bpm} BPM · 🎹 {html.escape(str(key_short))}\n\n"
+                    f"Бит ещё на месте — <b>1500⭐ / 20 USDT / 1700₽</b>\n"
+                    f"Купи: {buy_url}\n\n"
+                    f"<i>Не интересно? /stop_reminders — больше не напишу.</i>"
+                )
+                try:
+                    await bot.send_message(user_id, text, parse_mode="HTML",
+                                           disable_web_page_preview=True)
+                    rec["reminded"] = True
+                    logger.info("remarketing: sent reminder user=%d beat=%d",
+                                user_id, beat_id)
+                except Exception as e:
+                    err_s = str(e).lower()
+                    if "forbidden" in err_s or "blocked" in err_s or "deactivated" in err_s:
+                        # Юзер blocked бот — auto-optout
+                        reminders_optout.add(user_id)
+                        _save_optout()
+                        to_drop.append(key)
+                        logger.info("remarketing: auto-optout user=%d (blocked)", user_id)
+                    else:
+                        logger.warning("remarketing: send failed user=%d: %s",
+                                       user_id, e)
+
+            for key in to_drop:
+                pending_reminders.pop(key, None)
+            if to_remind or to_drop:
+                _save_reminders()
+        except Exception:
+            logger.exception("remarketing_scheduler iteration failed")
+
+
+async def cmd_stop_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """`/stop_reminders` — юзер отказывается от reminder-сообщений
+    о просмотренных битах. Anti-spam, mandatory для TG ToS-friendly bot.
+    """
+    user_id = update.effective_user.id
+    if user_id in reminders_optout:
+        await update.message.reply_text(
+            "Уже отписан. Если передумаешь — /start_reminders включит снова."
+        )
+        return
+    reminders_optout.add(user_id)
+    _save_optout()
+    # Удалить все pending для этого юзера
+    to_drop = [k for k in pending_reminders if k.startswith(f"{user_id}:")]
+    for k in to_drop:
+        pending_reminders.pop(k, None)
+    if to_drop:
+        _save_reminders()
+    await update.message.reply_text(
+        "🤐 Окей, больше не напомню про просмотренные биты.\n\n"
+        "Включить обратно: /start_reminders"
+    )
+
+
+async def cmd_start_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Откатывает /stop_reminders."""
+    user_id = update.effective_user.id
+    if user_id not in reminders_optout:
+        await update.message.reply_text("Reminders уже включены.")
+        return
+    reminders_optout.discard(user_id)
+    _save_optout()
+    await update.message.reply_text(
+        "✅ Reminders включены. Если посмотрел бит и не купил — через 24ч "
+        "напомню (один раз)."
+    )
+
+
 async def auto_repost_scheduler(bot):
     """Раз в сутки в `AUTO_REPOST_TIME_MSK` выбирает next бит и запускает
     repost flow. После long publish (если AUTO_SHORTS=1) — автоматически
@@ -5410,11 +5624,21 @@ async def post_init(application):
     global _WEBHOOK_BOT, _WEBHOOK_LOOP
     _WEBHOOK_BOT = application.bot
     _WEBHOOK_LOOP = asyncio.get_running_loop()
+    # Re-marketing state — load from disk перед запуском loop'а
+    try:
+        _load_reminders_state()
+        logger.info(
+            "remarketing: loaded %d pending, %d opted-out",
+            len(pending_reminders), len(reminders_optout),
+        )
+    except Exception:
+        logger.exception("remarketing load failed")
     asyncio.create_task(scheduled_publish_loop(application.bot))
     asyncio.create_task(heartbeat_scheduler())
     asyncio.create_task(content_reminder_scheduler(application.bot))
     asyncio.create_task(yk_fallback_polling(application.bot))
     asyncio.create_task(auto_repost_scheduler(application.bot))
+    asyncio.create_task(remarketing_scheduler(application.bot))
     asyncio.create_task(asyncio.to_thread(_warmup_ffmpeg))
     write_heartbeat()
 
@@ -6117,6 +6341,8 @@ async def run_bot():
     app.add_handler(CommandHandler("repost_now", cmd_repost_now))
     app.add_handler(CommandHandler("auto_repost", cmd_auto_repost))
     app.add_handler(CommandHandler("quick_meta", cmd_quick_meta))
+    app.add_handler(CommandHandler("stop_reminders", cmd_stop_reminders))
+    app.add_handler(CommandHandler("start_reminders", cmd_start_reminders))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(PreCheckoutQueryHandler(handle_precheckout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, handle_successful_payment))

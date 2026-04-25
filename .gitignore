@@ -45,6 +45,11 @@ bot-assistant/bot-assistant/heartbeat.txt
 # YooKassa pending payments — содержит payment_id + user_id + username.
 # PII + реквизиты платежей. НИКОГДА не в git.
 bot-assistant/bot-assistant/pending_yk_payments.json
+# Re-marketing state — содержит user_id × beat_id pairs (PII)
+bot-assistant/bot-assistant/pending_reminders.json
+bot-assistant/bot-assistant/reminders_optout.json
+# YT daily snapshot для /today delta — нет PII, но runtime, в git не нужно
+bot-assistant/bot-assistant/yt_daily_snapshot.json
 bot-assistant/bot-assistant/pending_yk_payments.json.tmp
 # YooKassa delivered-set — idempotency guard, список доставленных payment_id'ов
 bot-assistant/bot-assistant/delivered_yk_payments.json
