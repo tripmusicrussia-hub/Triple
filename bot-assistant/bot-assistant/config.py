@@ -65,6 +65,16 @@ PUBLISH_OPTIMAL_SLOTS = _parse_slots(
     os.getenv("PUBLISH_OPTIMAL_SLOTS", "4:21:30,0:21:0")
 ) or [(4, 21, 30), (0, 21, 0)]
 
+# Auto-repost: время ежедневной перепубликации legacy-битов из канала
+# на YT через нашу новую систему (см. cmd_repost_now). Default 21:00 МСК
+# — пиковое время для type-beat ниши в РФ-time. Ровно один бит в день.
+AUTO_REPOST_TIME_MSK = os.getenv("AUTO_REPOST_TIME_MSK", "21:00")
+
+# Auto-Shorts: автоматическая сборка Shorts через 30 сек после long
+# YT publish. "1" = автомат, "0" = ждать админ-кнопки. Default off для
+# защиты от OOM на Render free; включай когда уверен в стабильности.
+AUTO_SHORTS = os.getenv("AUTO_SHORTS", "1") == "1"
+
 # YooKassa provider_token для Telegram sendInvoice (RUB оплата MIR/СБП/карты).
 # Получается в BotFather → /mybots → Payments → YooKassa → Connect.
 # Если пустой — RUB-кнопка автоматически скрывается в preview битов.

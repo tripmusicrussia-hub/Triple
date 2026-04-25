@@ -4450,9 +4450,12 @@ async def cmd_repost_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _do_repost(context.bot, update.effective_chat.id, beat, meta)
 
 
-async def _do_repost(bot, reply_chat_id: int, beat: dict, meta) -> None:
+async def _do_repost(bot, reply_chat_id: int, beat: dict, meta) -> str | None:
     """Полный repost flow для одного бита. Вызывается из /repost_now (manual)
     и из auto_repost_scheduler (auto).
+
+    Returns repost_token (для последующего вызова Shorts builder) или None
+    при ошибке.
 
     Шаги (всё синхронно, ~60 секунд):
     1. Download mp3 by file_id
@@ -4629,6 +4632,7 @@ async def _do_repost(bot, reply_chat_id: int, beat: dict, meta) -> None:
             reply_markup=keyboard,
             parse_mode="HTML" if keyboard else None,
         )
+        return repost_token or None
     except Exception as e:
         logger.exception("repost: flow failed for beat_id=%d", beat_id)
         try:
@@ -4638,6 +4642,7 @@ async def _do_repost(bot, reply_chat_id: int, beat: dict, meta) -> None:
             )
         except Exception:
             pass
+        return None
     finally:
         # Cleanup local temp-файлы
         for p in (mp3_path, video_path, thumb_path):
@@ -4645,6 +4650,200 @@ async def _do_repost(bot, reply_chat_id: int, beat: dict, meta) -> None:
                 _P(p).unlink(missing_ok=True)
             except Exception:
                 pass
+
+
+def _pick_next_repost_candidate() -> dict | None:
+    """Выбирает следующий бит для auto-repost по LRU policy.
+
+    Filter: content_type=beat, file_id есть, beat_record_to_meta returns
+    not None (есть BPM+key+артист), не репостился последние 30 дней.
+
+    Sort key: (last_reposted_at OR last_posted_at OR null) ASC — это
+    least-recently-posted идёт первым. Бит который **никогда** не
+    репостился (last_reposted_at=None) приоритетнее всех — оба None
+    sortируются в начало.
+
+    Returns None если нет подходящих кандидатов.
+    """
+    import beat_upload as _bu
+    from datetime import timedelta as _td
+    cutoff = (datetime.now() - _td(days=30)).isoformat()
+    candidates = []
+    for b in beats_db.BEATS_CACHE:
+        if b.get("content_type", "beat") != "beat":
+            continue
+        if not b.get("file_id"):
+            continue
+        meta = _bu.beat_record_to_meta(b)
+        if meta is None:
+            continue
+        last_repost = b.get("last_reposted_at") or ""
+        # Skip recently reposted (< 30 days ago)
+        if last_repost and last_repost > cutoff:
+            continue
+        candidates.append((last_repost or b.get("last_posted_at") or "", b))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x[0])  # LRU first
+    return candidates[0][1]
+
+
+async def auto_repost_scheduler(bot):
+    """Раз в сутки в `AUTO_REPOST_TIME_MSK` выбирает next бит и запускает
+    repost flow. После long publish (если AUTO_SHORTS=1) — автоматически
+    через 30 сек запускает Shorts builder.
+
+    Управление через `/auto_repost on|off|status`. Состояние хранится в
+    admin_prefs.json (`auto_repost_enabled` ключ) — переключение мгновенно
+    без redeploy. По умолчанию **ВЫКЛЮЧЕНО** — включай когда готов.
+    """
+    from config import AUTO_REPOST_TIME_MSK, AUTO_SHORTS
+    msk = ZoneInfo("Europe/Moscow")
+    while True:
+        try:
+            now = datetime.now(msk)
+            target_h, target_m = map(int, AUTO_REPOST_TIME_MSK.split(":"))
+            target = now.replace(hour=target_h, minute=target_m,
+                                 second=0, microsecond=0)
+            if target <= now:
+                target = target + timedelta(days=1)
+            wait_sec = max(60, (target - now).total_seconds())
+            logger.info(
+                "auto_repost: next run at %s МСК (wait %ds)",
+                target.strftime("%Y-%m-%d %H:%M"), int(wait_sec),
+            )
+            await asyncio.sleep(wait_sec)
+        except Exception:
+            logger.exception("auto_repost: sleep iteration failed")
+            await asyncio.sleep(60 * 60)
+            continue
+
+        # Check enable flag (file-based, мгновенное переключение через /auto_repost)
+        try:
+            prefs = _load_admin_prefs()
+            if not prefs.get("auto_repost_enabled", False):
+                logger.info("auto_repost: disabled in admin_prefs, skip iteration")
+                continue
+        except Exception:
+            logger.exception("auto_repost: load_prefs failed")
+            continue
+
+        # Pick next bit
+        try:
+            beat = _pick_next_repost_candidate()
+        except Exception:
+            logger.exception("auto_repost: pick_candidate failed")
+            continue
+        if beat is None:
+            logger.warning(
+                "auto_repost: no candidates available (need bpm+key+артист в tags); "
+                "запусти /quick_meta чтобы дополнить metadata legacy битов"
+            )
+            try:
+                await bot.send_message(
+                    ADMIN_ID,
+                    "⚠️ auto_repost: нет битов готовых к repost.\n\n"
+                    "Все ready-биты репостились < 30 дней назад, или в каталоге "
+                    "только legacy-биты без BPM/key. Дополни metadata через "
+                    "/quick_meta или подожди пока 30-day cooldown пройдёт.",
+                )
+            except Exception:
+                pass
+            continue
+
+        import beat_upload as _bu
+        meta = _bu.beat_record_to_meta(beat)
+        if meta is None:
+            logger.warning("auto_repost: candidate %d no longer valid, skip", beat.get("id"))
+            continue
+
+        logger.info("auto_repost: starting %s (id=%d)", meta.name, beat.get("id"))
+        repost_token = await _do_repost(bot, ADMIN_ID, beat, meta)
+        if not repost_token:
+            logger.warning("auto_repost: _do_repost returned None for %d", beat.get("id"))
+            continue
+
+        # Auto-Shorts через 30 сек (RAM Render free должен освободиться от
+        # long upload), если флаг включён. Запускаем как отдельную task'у
+        # чтобы не блокировать scheduler loop.
+        if AUTO_SHORTS:
+            async def _auto_shorts_after_delay(t: str):
+                try:
+                    await asyncio.sleep(30)
+                    if t in _building_shorts:
+                        logger.info("auto_shorts: already in flight for %s, skip", t)
+                        return
+                    _building_shorts.add(t)
+                    try:
+                        await _build_and_upload_shorts(bot, t)
+                    finally:
+                        _building_shorts.discard(t)
+                except Exception:
+                    logger.exception("auto_shorts: failed for %s", t)
+            asyncio.create_task(_auto_shorts_after_delay(repost_token))
+            logger.info("auto_repost: Shorts scheduled in 30s for %s", repost_token)
+
+
+async def cmd_auto_repost(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """`/auto_repost on|off|status` — управление авто-репостом legacy битов.
+
+    Состояние в admin_prefs.json — изменение мгновенное без redeploy.
+    Auto-loop работает раз в сутки в AUTO_REPOST_TIME_MSK (env, default 21:00).
+    """
+    if update.effective_user.id != ADMIN_ID:
+        return
+    args = (context.args or [])
+    cmd = args[0].lower() if args else "status"
+    prefs = _load_admin_prefs()
+
+    if cmd == "on":
+        prefs["auto_repost_enabled"] = True
+        _save_admin_prefs(prefs)
+        from config import AUTO_REPOST_TIME_MSK
+        # Сразу показать сколько кандидатов в очереди
+        try:
+            count_ready = 0
+            import beat_upload as _bu
+            for b in beats_db.BEATS_CACHE:
+                if b.get("content_type", "beat") == "beat" and b.get("file_id"):
+                    if _bu.beat_record_to_meta(b) is not None:
+                        count_ready += 1
+        except Exception:
+            count_ready = 0
+        await update.message.reply_text(
+            f"✅ Auto-repost ВКЛЮЧЁН\n\n"
+            f"⏰ Время: {AUTO_REPOST_TIME_MSK} МСК ежедневно\n"
+            f"📚 Готовых битов: {count_ready}\n"
+            f"🎬 Auto-Shorts: ON (через 30 сек после long)\n\n"
+            f"Управление: /auto_repost off · /auto_repost status"
+        )
+    elif cmd == "off":
+        prefs["auto_repost_enabled"] = False
+        _save_admin_prefs(prefs)
+        await update.message.reply_text("⛔ Auto-repost ВЫКЛЮЧЕН")
+    else:  # status
+        from config import AUTO_REPOST_TIME_MSK, AUTO_SHORTS
+        enabled = prefs.get("auto_repost_enabled", False)
+        # Подсчитать кандидатов
+        count_ready = 0
+        count_total_beats = 0
+        try:
+            import beat_upload as _bu
+            for b in beats_db.BEATS_CACHE:
+                if b.get("content_type", "beat") == "beat":
+                    count_total_beats += 1
+                    if b.get("file_id") and _bu.beat_record_to_meta(b) is not None:
+                        count_ready += 1
+        except Exception:
+            pass
+        await update.message.reply_text(
+            f"📋 Auto-repost статус\n\n"
+            f"{'✅ ВКЛ' if enabled else '⛔ ВЫКЛ'}\n"
+            f"⏰ {AUTO_REPOST_TIME_MSK} МСК ежедневно\n"
+            f"📚 Готовых: {count_ready} из {count_total_beats}\n"
+            f"🎬 Auto-Shorts: {'ON' if AUTO_SHORTS else 'OFF'}\n\n"
+            f"Команды: /auto_repost on · /auto_repost off"
+        )
 
 
 async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4824,6 +5023,7 @@ async def post_init(application):
     asyncio.create_task(heartbeat_scheduler())
     asyncio.create_task(content_reminder_scheduler(application.bot))
     asyncio.create_task(yk_fallback_polling(application.bot))
+    asyncio.create_task(auto_repost_scheduler(application.bot))
     asyncio.create_task(asyncio.to_thread(_warmup_ffmpeg))
     write_heartbeat()
 
@@ -5463,6 +5663,7 @@ async def run_bot():
     app.add_handler(CommandHandler("cancel_product", cmd_cancel_product))
     app.add_handler(CommandHandler("feature", cmd_feature))
     app.add_handler(CommandHandler("repost_now", cmd_repost_now))
+    app.add_handler(CommandHandler("auto_repost", cmd_auto_repost))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(PreCheckoutQueryHandler(handle_precheckout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, handle_successful_payment))
