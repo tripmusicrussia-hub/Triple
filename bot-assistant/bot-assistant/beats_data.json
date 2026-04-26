@@ -467,11 +467,11 @@
     ],
     "post_url": "https://t.me/iiiplfiii/83",
     "bpm": 156,
-    "key": "-",
+    "key": "Dm",
     "file_id": "CQACAgIAAx0Cb_cPkAADU2nTCd5ep0QkU_EUUFdCMqHEOxSDAAIHRAACUc-xS3_0fDC2OH91OwQ",
     "content_type": "beat",
     "file_unique_id": "AgADB0QAAlHPsUs",
-    "classification_confidence": 1.0
+    "classification_confidence": 0.95
   },
   {
     "id": 8593121,
@@ -568,11 +568,11 @@
     "tags": [],
     "post_url": "https://t.me/iiiplfiii/93",
     "bpm": 117,
-    "key": "-",
+    "key": "D#m",
     "file_id": "CQACAgIAAx0Cb_cPkAADXWnTCeND67JQTn8AAVQZzYA-7ZHcpAACLD4AAhxK4Evo3ShY8_2YITsE",
     "content_type": "beat",
     "file_unique_id": "AgADLD4AAhxK4Es",
-    "classification_confidence": 1.0
+    "classification_confidence": 0.95
   },
   {
     "id": 1713568,
@@ -837,7 +837,7 @@
     "bpm": 123,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADcWnTCe3L3lRAK6ZjA37BoJln3zKPAAKFQgACBCfJSBhOL_Bde4wZOwQ",
-    "content_type": "beat",
+    "content_type": "remix",
     "file_unique_id": "AgADhUIAAgQnyUg",
     "classification_confidence": 0.95
   },
@@ -1351,11 +1351,11 @@
     ],
     "post_url": "https://t.me/iiiplfiii/154",
     "bpm": 96,
-    "key": "-",
+    "key": "Em",
     "file_id": "CQACAgIAAx0Cb_cPkAADmmnTCgJHMdznmTC8P9gMTZ4wt5_kAAJQVQACb_ZASvah_KUWE1sROwQ",
     "content_type": "beat",
     "file_unique_id": "AgADUFUAAm_2QEo",
-    "classification_confidence": 0.7
+    "classification_confidence": 0.95
   },
   {
     "id": 445854,
@@ -1882,11 +1882,11 @@
     ],
     "post_url": "https://t.me/iiiplfiii/198",
     "bpm": 108,
-    "key": "-",
+    "key": "Cm",
     "file_id": "CQACAgIAAx0Cb_cPkAADxmnTChjGDtczDSXa2ihCpyFp4_bkAAIiaQACDdKASLidq4s00-PbOwQ",
     "content_type": "beat",
     "file_unique_id": "AgADImkAAg3SgEg",
-    "classification_confidence": 1.0
+    "classification_confidence": 0.95
   },
   {
     "id": 1522437,
@@ -2446,11 +2446,11 @@
     ],
     "post_url": "https://t.me/iiiplfiii/247",
     "bpm": 92,
-    "key": "-",
+    "key": "Cm",
     "file_id": "CQACAgIAAx0Cb_cPkAAD92nTCi_S2ZMOBe-9TWHbPw9lbBhQAAIwYAACs0QIS1nI3POeNRxuOwQ",
     "content_type": "beat",
     "file_unique_id": "AgADMGAAArNECEs",
-    "classification_confidence": 0.8
+    "classification_confidence": 0.95
   },
   {
     "id": 2838929,
@@ -2981,7 +2981,7 @@
     "bpm": 144,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAACAR1p0wpBiEt3Bx84w2W61Y8FlEzPmAACaHMAAv8JAAFIp3qTAjxr-Kk7BA",
-    "content_type": "beat",
+    "content_type": "remix",
     "file_unique_id": "AgADaHMAAv8JAAFI",
     "classification_confidence": 1.0
   },
@@ -4119,7 +4119,7 @@
     "bpm": 178,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAACAXdp0wpvhFH6OFJ_wEJ8i3Fp0Cfr7AACo4kAAq13CUi9PS59clhAaTsE",
-    "content_type": "beat",
+    "content_type": "track",
     "file_unique_id": "AgADo4kAAq13CUg",
     "classification_confidence": 1.0
   },
@@ -4419,10 +4419,10 @@
     ],
     "post_url": "https://t.me/iiiplfiii/404",
     "bpm": 103,
-    "key": "-",
+    "key": "Dm",
     "file_id": "CQACAgIAAx0Cb_cPkAACAZRp0wzBuTzDl1Z4Ui8flp9R9G51MQACLaUAAklJSUryLp4_a7MIsjsE",
     "content_type": "beat",
     "file_unique_id": "AgADLaUAAklJSUo",
-    "classification_confidence": 1.0
+    "classification_confidence": 0.95
   }
 ]
