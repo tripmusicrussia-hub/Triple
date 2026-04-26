@@ -5092,6 +5092,12 @@ def _save_admin_prefs(prefs: dict) -> None:
     try:
         with open(ADMIN_PREFS_PATH, "w", encoding="utf-8") as f:
             json.dump(prefs, f, ensure_ascii=False, indent=2)
+        # Mark for git autopush — admin_prefs тоже эфемерный на Render free disk.
+        try:
+            import git_autopush
+            git_autopush.mark_dirty(ADMIN_PREFS_PATH)
+        except Exception:
+            logger.warning("git_autopush.mark_dirty(admin_prefs) failed (non-fatal)", exc_info=True)
     except Exception:
         logger.exception("save admin_prefs failed (non-fatal)")
 
@@ -6472,6 +6478,13 @@ async def post_init(application):
     asyncio.create_task(yk_fallback_polling(application.bot))
     asyncio.create_task(auto_repost_scheduler(application.bot))
     asyncio.create_task(remarketing_scheduler(application.bot))
+    # Git autopush для beats_data.json + admin_prefs.json — Render free disk
+    # эфемерный, без push'а файлы слетают на каждый redeploy. Loop debounced 60с.
+    try:
+        import git_autopush
+        asyncio.create_task(git_autopush.autopush_loop())
+    except Exception:
+        logger.exception("git_autopush loop start failed (non-fatal)")
     asyncio.create_task(asyncio.to_thread(_warmup_ffmpeg))
     write_heartbeat()
 

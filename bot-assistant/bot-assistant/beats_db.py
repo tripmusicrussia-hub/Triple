@@ -58,6 +58,13 @@ def save_beats() -> None:
                 pass  # не все FS поддерживают fsync (docker/overlayfs)
         os.replace(tmp, BEATS_FILE)  # atomic на Linux+Windows
         logger.info("Beats saved: %d", len(BEATS_CACHE))
+        # Mark for git autopush (если ENABLED — background loop push'нет в next tick).
+        # Render free disk эфемерный → без push'а beats_data слетит на следующем deploy.
+        try:
+            import git_autopush
+            git_autopush.mark_dirty(BEATS_FILE)
+        except Exception:
+            logger.warning("git_autopush.mark_dirty failed (non-fatal)", exc_info=True)
     except Exception as e:
         logger.error("Save error: %s", e)
         try:
