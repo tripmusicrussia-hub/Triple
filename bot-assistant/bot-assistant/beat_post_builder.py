@@ -249,22 +249,144 @@ def _mood_label(prof: dict, bpm: int) -> str:
 
 
 def build_yt_title(beat: BeatMeta) -> str:
-    """SEO-оптимизированный тайтл по паттерну топ type-beat каналов.
-
-    Формат: `(FREE) <Artist> Type Beat <YEAR> - "<NAME>"`
-
-    Обоснование (анализ топ-30 видео по Kenny Muney / Key Glock / Memphis):
-    - 90% (27/30) используют `(FREE)` или `[FREE]` префикс
-    - 87% (26/30) разделитель `-` (не `|` и не `—`)
-    - имя бита в кавычках `"NAME"` в конце (не в начале)
-    - средняя длина 56 симв, макс 94 — вписываемся
-    - наш прежний формат `NAME — Artist Type Beat | Fast Memphis Trap` встречался
-      в 0/30 топ-видео → алгоритм YT не распознавал паттерн ниши
-
-    Жанровые ключи (scene, mood) перенесены в description и tags — там они
-    работают на SEO без раздувания тайтла.
+    """LEGACY title (старый формат). Используется только в старых местах
+    которые ещё не мигрировали на canonical_yt_title.
+    Новый код должен использовать `canonical_yt_title()`.
     """
     return f'(FREE) {beat.artist_display} Type Beat {YEAR} - "{beat.name}"'
+
+
+# ── Canonical YT title (юзер-approved шаблон 2026-04-26) ───────────
+# Шаблон A:
+#   [FREE] {ARTIST} Type Beat 2026 - "{NAME}" | {SCENE} | {BPM} BPM {KEY}
+# Examples:
+#   [FREE] Kenny Muney Type Beat 2026 - "HEAT" | Memphis | 145 BPM Am
+#   [FREE] Obladaet Type Beat 2026 - "DARK" | RU Hard | 152 BPM C#m
+#   [FREE] Hard Trap Type Beat 2026 - "Long Beat Name" | 150 BPM (no artist, no key)
+# Decisions locked в plan'е:
+#   - [FREE] (квадратные брекеты) — 87% топ-каналов используют такой формат
+#   - NAME в CAPS если ≤16 символов (короткий = читается как brand);
+#     длинное имя сохраняется как есть (CAPS делает его кашей)
+#   - KEY skip целиком если пустой — не показываем «??»
+#   - SCENE определяется по ARTIST_PROFILE; RU артисты override → "RU Hard"
+#   - Year 2026 (текущий, обновляется в YEAR const на стыке года)
+
+# Артисты которых нужно метить как RU (даже если ARTIST_PROFILE.scene != "RU Hard")
+_RU_ARTIST_KEYS = {
+    "obladaet", "kizaru", "скриптонит", "skriptonit",
+    "og buda", "ogbuda", "платина", "platina",
+    "slava marlow", "slavamarlow", "big baby tape", "bigbabytape",
+    "mayot",
+}
+
+# Маппинг scene из ARTIST_PROFILE → canonical short name для title.
+# Без override — fallback "Hard Trap".
+_SCENE_TITLE_MAP = {
+    "Memphis": "Memphis",
+    "Detroit": "Detroit",
+    "New Orleans": "NOLA",
+    "Florida": "FL Hard",
+    "Atlanta": "Atlanta",
+    "Hard trap": "Hard Trap",  # generic / RU fallback (RU override ниже)
+}
+
+YT_TITLE_MAX_LEN = 100  # YT API лимит
+
+
+def _canonical_scene(beat: BeatMeta) -> str:
+    """Возвращает scene-label для title: 'Memphis' / 'Detroit' / 'NOLA' /
+    'FL Hard' / 'Atlanta' / 'RU Hard' / 'Hard Trap' (default).
+
+    RU artists override любой scene из ARTIST_PROFILE.
+    """
+    raw = (beat.artist_raw or "").split(" x ")[0].strip().lower()
+    if raw in _RU_ARTIST_KEYS:
+        return "RU Hard"
+    prof = _get_profile(raw)
+    return _SCENE_TITLE_MAP.get(prof.get("scene", ""), "Hard Trap")
+
+
+def _canonical_name(name: str) -> str:
+    """Имя бита для title: CAPS если ≤16 символов, иначе как есть.
+
+    16 — empirical порог: 'HEAT' / 'DARK NIGHT' / 'GLOCK' читаются brand'ом
+    в caps. 'Some Long Beat Title' в caps выглядит как кричащий мусор.
+    """
+    n = (name or "").strip()
+    if not n:
+        return "?"
+    if len(n) <= 16:
+        return n.upper()
+    return n
+
+
+def _canonical_artist(beat: BeatMeta) -> str:
+    """Display-имя артиста для title. Если artist_display пуст или unknown —
+    fallback на scene-prefix `Hard Trap` (не оставляем title без artist phrase
+    т.к. это убивает SEO match для type-beat search queries).
+    """
+    display = (beat.artist_display or "").strip()
+    if display:
+        return display
+    return "Hard Trap"
+
+
+def canonical_yt_title(beat: BeatMeta) -> str:
+    """Шаблон A: [FREE] {ARTIST} Type Beat {YEAR} - "{NAME}" | {SCENE} | {BPM} BPM {KEY}
+
+    Защита от длины: если результат >YT_TITLE_MAX_LEN — обрезаем хвост
+    (сначала KEY, потом BPM, потом SCENE) пока не уложится. Брендирующая
+    часть `[FREE] {ARTIST} Type Beat YEAR - "{NAME}"` не режется.
+    """
+    artist = _canonical_artist(beat)
+    name_disp = _canonical_name(beat.name)
+    scene = _canonical_scene(beat)
+    bpm = beat.bpm or 0
+    key_short = (beat.key_short or "").strip()
+
+    base = f'[FREE] {artist} Type Beat {YEAR} - "{name_disp}"'
+    parts: list[str] = []
+    if scene:
+        parts.append(scene)
+    if bpm:
+        if key_short:
+            parts.append(f"{bpm} BPM {key_short}")
+        else:
+            parts.append(f"{bpm} BPM")
+    elif key_short:
+        parts.append(key_short)
+
+    full = base + ("".join(f" | {p}" for p in parts) if parts else "")
+    if len(full) <= YT_TITLE_MAX_LEN:
+        return full
+
+    # Truncation: убираем по одной части с хвоста пока влезет
+    while parts and len(base + "".join(f" | {p}" for p in parts)) > YT_TITLE_MAX_LEN:
+        parts.pop()
+    full = base + ("".join(f" | {p}" for p in parts) if parts else "")
+    if len(full) <= YT_TITLE_MAX_LEN:
+        return full
+    # Brand part всё равно не лезет (имя слишком длинное) — обрезаем имя
+    overflow = len(full) - YT_TITLE_MAX_LEN + 3  # +3 для "..."
+    if name_disp and overflow > 0:
+        truncated_name = name_disp[: max(1, len(name_disp) - overflow)] + "..."
+        base = f'[FREE] {artist} Type Beat {YEAR} - "{truncated_name}"'
+    return base[:YT_TITLE_MAX_LEN]
+
+
+def canonical_yt_description_disclaimer(beat_id: int | None = None) -> str:
+    """Standalone disclaimer block. Вставляется в начало или конец description.
+
+    Юзер approved 2026-04-26: показывать non-profit clause + redirect на bot.
+    """
+    buy = _buy_link(beat_id, source="yt") if beat_id else f"https://t.me/{BOT_USERNAME}"
+    return (
+        "🆓 FREE FOR NON-PROFIT USE ONLY (SoundCloud, demos, freestyle, school).\n"
+        "For monetized release (Spotify/Apple/YouTube/iTunes/TikTok) → MP3 lease 1700₽:\n"
+        f"👉 {buy}\n\n"
+        f'License terms: 100k streams, 2k copies, 1 music video, '
+        f'credit "prod. by {BRAND}".'
+    )
 
 
 def _an(word: str) -> str:
