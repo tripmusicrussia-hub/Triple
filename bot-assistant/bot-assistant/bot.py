@@ -127,11 +127,13 @@ def track_bit_view(user_id: int, beat: dict) -> None:
 
 
 def mark_bit_purchased(user_id: int, beat_id: int) -> None:
-    """Юзер купил бит — удаляем из pending (reminder уже не нужен)."""
+    """Юзер купил бит — удаляем из pending (reminder уже не нужен) +
+    убираем из корзины (если был — куплен, нет смысла держать)."""
     key = _reminder_key(user_id, beat_id)
     if key in pending_reminders:
         pending_reminders.pop(key, None)
         _save_reminders()
+    _cart_remove(user_id, beat_id)
 
 # (Автопостинг текстовых рубрик удалён 2026-04-20 — автор сам пишет посты.
 # Остаётся только upload-flow битов, превью которого через pending_uploads
@@ -231,6 +233,76 @@ _building_shorts: set[str] = set()
 bundle_selection: dict[int, dict] = {}
 BUNDLE_TOTAL = 3        # сколько битов в bundle (anchor + selected)
 BUNDLE_PAGE_SIZE = 10   # битов на странице picker'а
+
+# Bundle cart: персистентная корзина — юзер слушает биты в каталоге, кликает
+# «🛒 + В корзину» по тем что нравятся, потом в /cart покупает 3-pack за 4500₽.
+# Persist чтобы переживать redeploy (юзер собирал корзину 30 мин — обидно потерять).
+# Format: { "<user_id>": [<beat_id>, <beat_id>, ...] } (порядок добавления)
+bundle_cart: dict[str, list[int]] = {}
+BUNDLE_CART_PATH = os.path.join(BASE_DIR, "bundle_carts.json")
+BUNDLE_CART_MAX = 10  # защита от abuse — больше 10 в корзине не нужно
+
+
+def _load_bundle_carts() -> None:
+    if os.path.exists(BUNDLE_CART_PATH):
+        try:
+            with open(BUNDLE_CART_PATH, encoding="utf-8") as f:
+                bundle_cart.update(json.load(f))
+        except Exception:
+            logger.exception("bundle_cart: load failed")
+
+
+def _save_bundle_carts() -> None:
+    try:
+        with open(BUNDLE_CART_PATH, "w", encoding="utf-8") as f:
+            json.dump(bundle_cart, f, ensure_ascii=False, indent=2)
+        try:
+            import git_autopush
+            git_autopush.mark_dirty(BUNDLE_CART_PATH)
+        except Exception:
+            pass
+    except Exception:
+        logger.exception("bundle_cart: save failed")
+
+
+def _cart_get(user_id: int) -> list[int]:
+    """Возвращает копию корзины юзера (чтобы случайно не мутировать через ref)."""
+    return list(bundle_cart.get(str(user_id), []))
+
+
+def _cart_add(user_id: int, beat_id: int) -> tuple[bool, str]:
+    """Добавляет бит в корзину. Возвращает (ok, message_for_user)."""
+    key = str(user_id)
+    cur = list(bundle_cart.get(key, []))
+    if beat_id in cur:
+        return False, "уже в корзине"
+    if len(cur) >= BUNDLE_CART_MAX:
+        return False, f"корзина полная ({BUNDLE_CART_MAX})"
+    cur.append(beat_id)
+    bundle_cart[key] = cur
+    _save_bundle_carts()
+    return True, f"добавлен ({len(cur)}/{BUNDLE_TOTAL})"
+
+
+def _cart_remove(user_id: int, beat_id: int) -> bool:
+    """Удаляет бит из корзины. Возвращает True если был."""
+    key = str(user_id)
+    cur = list(bundle_cart.get(key, []))
+    if beat_id not in cur:
+        return False
+    cur.remove(beat_id)
+    if cur:
+        bundle_cart[key] = cur
+    else:
+        bundle_cart.pop(key, None)
+    _save_bundle_carts()
+    return True
+
+
+def _cart_clear(user_id: int) -> None:
+    if str(user_id) in bundle_cart:
+        bundle_cart.pop(str(user_id), None)
+        _save_bundle_carts()
 
 # Lock на все mutation'ы pending / delivered / in_flight. Lazy-init потому что
 # asyncio.Lock() требует running loop (в старых Python). Создаётся в post_init.
@@ -484,16 +556,23 @@ def kb_subscribe():
         InlineKeyboardButton("✅ Я подписался!", callback_data="check_sub")
     ]])
 
-def kb_main_menu():
+def kb_main_menu(user_id: int | None = None):
     beats = len([b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == "beat"])
     tracks = len([b for b in beats_db.BEATS_CACHE if b.get("content_type") == "track"])
     remixes = len([b for b in beats_db.BEATS_CACHE if b.get("content_type") == "remix"])
+    cart_n = len(_cart_get(user_id)) if user_id is not None else 0
+    cart_label = (
+        f"🛒 Корзина · {cart_n} ({licensing.PRICE_BUNDLE3_RUB}₽ за 3)"
+        if cart_n else
+        "🛒 Корзина (пусто)"
+    )
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"🎹 Биты ({beats})", callback_data="menu_beat")],
         [InlineKeyboardButton(f"🎤 Треки ({tracks})", callback_data="menu_track"),
          InlineKeyboardButton(f"🔀 Ремиксы ({remixes})", callback_data="menu_remix")],
         [InlineKeyboardButton("📦 Kits & Packs", callback_data="menu_products")],
         [InlineKeyboardButton(f"🎛 Сведение треков ({licensing.PRICE_MIX_RUB}₽)", callback_data="menu_mixing")],
+        [InlineKeyboardButton(cart_label, callback_data="cart_show")],
         [InlineKeyboardButton("ℹ️ Услуги и цены", callback_data="menu_services")],
         # Quick-filter chips — быстрый доступ к популярным сценам / mood
         [InlineKeyboardButton("🔥 Hard", callback_data="qf_hard"),
@@ -651,7 +730,10 @@ def kb_remixes_menu():
         [InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")],
     ])
 
-def kb_after_beat(beat_id, content_type="beat"):
+def kb_after_beat(beat_id, content_type="beat", user_id: int | None = None):
+    """Клавиатура под битом в DM. Если user_id передан — cart-кнопка показывает
+    статус (✅ В корзине / 🛒 + В корзину) и счётчик корзины.
+    """
     back_map = {"beat": "menu_beat", "track": "menu_track", "remix": "menu_remix"}
     rows = [[InlineKeyboardButton("▶️ Следующий похожий", callback_data="next_" + str(beat_id))]]
     if content_type == "beat":
@@ -668,6 +750,19 @@ def kb_after_beat(beat_id, content_type="beat"):
                 callback_data="buy_rub_" + str(beat_id),
             ),
         ])
+        # Cart-кнопка: статус зависит от текущей корзины юзера.
+        if user_id is not None:
+            cart = _cart_get(user_id)
+            if beat_id in cart:
+                cart_label = f"✅ В корзине ({len(cart)}/{BUNDLE_TOTAL}) → /cart"
+                cart_cb = "cart_show"
+            elif len(cart) >= BUNDLE_TOTAL:
+                cart_label = f"🛒 Корзина полная ({len(cart)}) → /cart"
+                cart_cb = "cart_show"
+            else:
+                cart_label = f"🛒 + В корзину ({len(cart)}/{BUNDLE_TOTAL})"
+                cart_cb = f"cart_add_{beat_id}"
+            rows.append([InlineKeyboardButton(cart_label, callback_data=cart_cb)])
         rows.append([
             InlineKeyboardButton(
                 f"🎁 3 бита {licensing.PRICE_BUNDLE3_RUB}₽ (выгода 600₽)",
@@ -695,6 +790,12 @@ def kb_channel_beat_buy(beat_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(
             f"💳 MP3 · {licensing.PRICE_MP3_RUB}₽ (MIR/СБП)",
             callback_data="buy_rub_" + str(beat_id),
+        )],
+        # В канале не знаем user_id заранее — кнопка просто пробует add. Handler
+        # покажет alert если в корзине / уже там / переполнена.
+        [InlineKeyboardButton(
+            f"🛒 + В корзину (3 за {licensing.PRICE_BUNDLE3_RUB}₽)",
+            callback_data="cart_add_" + str(beat_id),
         )],
         [InlineKeyboardButton(
             f"🎁 3 бита {licensing.PRICE_BUNDLE3_RUB}₽ (выгода 600₽)",
@@ -784,6 +885,86 @@ def kb_bundle_pay() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(f"💳 {licensing.PRICE_BUNDLE3_RUB}₽ (MIR/СБП)", callback_data="bundle_pay_rub")],
         [InlineKeyboardButton("❌ Отмена", callback_data="bundle_cancel")],
     ])
+
+
+def kb_cart(user_id: int) -> InlineKeyboardMarkup:
+    """UI корзины: список битов с ❌ удалить + footer (купить/добавить ещё/очистить)."""
+    cart = _cart_get(user_id)
+    rows: list[list[InlineKeyboardButton]] = []
+    for bid in cart:
+        b = beats_db.get_beat_by_id(bid) or {"name": f"id={bid}"}
+        name = (b.get("name") or "?")[:30]
+        rows.append([
+            InlineKeyboardButton(f"🎵 {name}", callback_data=f"buy_mp3_{bid}"),
+            InlineKeyboardButton("❌", callback_data=f"cart_remove_{bid}"),
+        ])
+    if not cart:
+        rows.append([InlineKeyboardButton(
+            "🎲 Найти биты для bundle", callback_data="random_beat",
+        )])
+    elif len(cart) >= BUNDLE_TOTAL:
+        rows.append([InlineKeyboardButton(
+            f"✅ Купить {BUNDLE_TOTAL} бит(ов) за {licensing.PRICE_BUNDLE3_RUB}₽",
+            callback_data="cart_buy",
+        )])
+        rows.append([InlineKeyboardButton(
+            "➕ Добавить ещё битов", callback_data="random_beat",
+        )])
+    else:
+        need = BUNDLE_TOTAL - len(cart)
+        rows.append([InlineKeyboardButton(
+            f"➕ Добавь ещё {need} → bundle 4500₽", callback_data="random_beat",
+        )])
+    if cart:
+        rows.append([InlineKeyboardButton("🗑 Очистить корзину", callback_data="cart_clear")])
+    rows.append([InlineKeyboardButton("◀️ Меню", callback_data="main_menu")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _send_cart_view(bot, user_id: int, edit_message=None) -> None:
+    """Шлёт юзеру актуальный вид корзины. Если edit_message задан — пытается
+    edit (для callback `cart_show` из main_menu); иначе reply_text.
+    """
+    cart = _cart_get(user_id)
+    if not cart:
+        text = (
+            "🛒 <b>Корзина пуста</b>\n\n"
+            f"Добавь любой бит через кнопку «🛒 + В корзину» → когда наберётся "
+            f"{BUNDLE_TOTAL}, купишь все за <b>{licensing.PRICE_BUNDLE3_RUB}₽</b>\n"
+            f"(вместо {BUNDLE_TOTAL * licensing.PRICE_MP3_RUB}₽ по одному, "
+            f"экономия {BUNDLE_TOTAL * licensing.PRICE_MP3_RUB - licensing.PRICE_BUNDLE3_RUB}₽)"
+        )
+    else:
+        names = []
+        for bid in cart:
+            b = beats_db.get_beat_by_id(bid)
+            if b:
+                bpm = b.get("bpm") or "?"
+                names.append(f"• <b>{html.escape(b.get('name') or '?')}</b> · {bpm} BPM")
+            else:
+                names.append(f"• id={bid} (бит пропал из каталога)")
+        names_block = "\n".join(names)
+        if len(cart) >= BUNDLE_TOTAL:
+            total_single = len(cart) * licensing.PRICE_MP3_RUB
+            tail = (
+                f"\n\n💰 <b>Купить {BUNDLE_TOTAL} = {licensing.PRICE_BUNDLE3_RUB}₽</b>\n"
+                f"(по одному это {total_single}₽ за {len(cart)} штук)"
+            )
+        else:
+            need = BUNDLE_TOTAL - len(cart)
+            tail = f"\n\n👇 Добавь ещё <b>{need} бит(ов)</b> → bundle {licensing.PRICE_BUNDLE3_RUB}₽"
+        text = (
+            f"🛒 <b>Корзина · {len(cart)}/{BUNDLE_TOTAL}</b>\n\n"
+            f"{names_block}{tail}"
+        )
+    kb = kb_cart(user_id)
+    if edit_message is not None:
+        try:
+            await edit_message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+            return
+        except TelegramError:
+            pass
+    await bot.send_message(user_id, text, parse_mode="HTML", reply_markup=kb)
 
 
 def _bundle_anchor_and_selected(user_id: int) -> tuple[dict, list[dict]] | None:
@@ -954,7 +1135,7 @@ async def send_sample_pack(bot, chat_id) -> bool:
     )
     return False
 
-async def show_main_menu(bot, chat_id):
+async def show_main_menu(bot, chat_id, user_id: int | None = None):
     # Защитная перезагрузка: кэш пуст, но файл на диске есть — пробуем снова.
     # Размер не проверяем: даже корректные 2 байта "[]" — валидный JSON,
     # а битые 500 байт всё равно выявятся парсером (load_beats ловит и
@@ -967,7 +1148,9 @@ async def show_main_menu(bot, chat_id):
     tracks = len([b for b in beats_db.BEATS_CACHE if b.get("content_type") == "track"])
     remixes = len([b for b in beats_db.BEATS_CACHE if b.get("content_type") == "remix"])
     text = "Привет! 👋 Что слушаем сегодня?\n\nВ каталоге: " + str(beats) + " битов, " + str(tracks) + " треков, " + str(remixes) + " ремиксов.\nВыбирай по настроению или жми случайный — не прогадаешь 🎲"
-    await bot.send_message(chat_id, text, reply_markup=kb_main_menu())
+    # user_id default = chat_id (в DM это совпадает)
+    uid = user_id if user_id is not None else chat_id
+    await bot.send_message(chat_id, text, reply_markup=kb_main_menu(user_id=uid))
 
 async def send_beat(bot, chat_id, beat, user_id):
     add_to_history(user_id, beat["id"])
@@ -1008,7 +1191,7 @@ async def send_beat(bot, chat_id, beat, user_id):
         try:
             sent = await bot.send_audio(
                 chat_id, audio=beat["file_id"], caption=caption,
-                reply_markup=kb_after_beat(beat["id"], content_type),
+                reply_markup=kb_after_beat(beat["id"], content_type, user_id=user_id),
             )
         except Exception as e:
             logger.warning("Audio send failed: " + str(e))
@@ -1017,7 +1200,7 @@ async def send_beat(bot, chat_id, beat, user_id):
         caption += "\n\n👉 " + beat["post_url"]
         sent = await bot.send_message(
             chat_id, caption,
-            reply_markup=kb_after_beat(beat["id"], content_type),
+            reply_markup=kb_after_beat(beat["id"], content_type, user_id=user_id),
         )
 
     if sent is not None:
@@ -1118,7 +1301,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_id,
                 f"📦 Продукт по этой ссылке пока недоступен (id={pid}).\n"
                 "Вот весь каталог:",
-                reply_markup=kb_main_menu(),
+                reply_markup=kb_main_menu(user_id=user_id),
             )
             return
         except Exception as e:
@@ -1152,7 +1335,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_id,
                 f"🎧 Бит по этой ссылке пока не публичный (id={beat_id}).\n"
                 "Вот весь каталог + поиск по BPM/сцене:",
-                reply_markup=kb_main_menu(),
+                reply_markup=kb_main_menu(user_id=user_id),
             )
             return
         except Exception as e:
@@ -2147,7 +2330,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tracks = len([b for b in beats_db.BEATS_CACHE if b.get("content_type") == "track"])
         remixes = len([b for b in beats_db.BEATS_CACHE if b.get("content_type") == "remix"])
         text = "Привет! 👋 Что слушаем сегодня?\n\nВ каталоге: " + str(beats) + " битов, " + str(tracks) + " треков, " + str(remixes) + " ремиксов.\nВыбирай по настроению или жми случайный — не прогадаешь 🎲"
-        await _nav_reply(query, text, reply_markup=kb_main_menu())
+        await _nav_reply(query, text, reply_markup=kb_main_menu(user_id=user_id))
         return
 
     if data == "menu_beat":
@@ -2739,6 +2922,107 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer(_user_error_msg("оплата"), show_alert=True)
         finally:
             _yk_creating_payment.discard(user_id)
+        return
+
+    # ── Cart (накопительная корзина для bundle) ────────────────
+    if data.startswith("cart_add_"):
+        try:
+            beat_id = int(data[len("cart_add_"):])
+        except ValueError:
+            await query.answer()
+            return
+        beat = beats_db.get_beat_by_id(beat_id)
+        if not beat or beat.get("content_type", "beat") != "beat":
+            await query.answer("Бит не найден", show_alert=True)
+            return
+        ok, msg = _cart_add(user_id, beat_id)
+        if not ok:
+            await query.answer(msg, show_alert=False)
+            return
+        cart = _cart_get(user_id)
+        # Показываем alert + если в корзине достигли BUNDLE_TOTAL — приглашаем купить
+        if len(cart) >= BUNDLE_TOTAL:
+            await query.answer(
+                f"🎁 В корзине {len(cart)} бит(ов)! Открой /cart чтобы купить.",
+                show_alert=True,
+            )
+        else:
+            need = BUNDLE_TOTAL - len(cart)
+            await query.answer(
+                f"✅ Добавлен в корзину ({len(cart)}/{BUNDLE_TOTAL}). Ещё {need} → bundle.",
+                show_alert=False,
+            )
+        # Обновляем карточку — кнопка должна стать «✅ В корзине»
+        try:
+            ct = beat.get("content_type", "beat")
+            await query.message.edit_reply_markup(
+                reply_markup=kb_after_beat(beat_id, ct, user_id=user_id),
+            )
+        except TelegramError:
+            pass
+        return
+
+    if data.startswith("cart_remove_"):
+        try:
+            beat_id = int(data[len("cart_remove_"):])
+        except ValueError:
+            await query.answer()
+            return
+        was = _cart_remove(user_id, beat_id)
+        await query.answer("🗑 Удалён" if was else "Не было в корзине", show_alert=False)
+        # Перерисуем cart-view
+        await _send_cart_view(bot, user_id, edit_message=query.message)
+        return
+
+    if data == "cart_clear":
+        _cart_clear(user_id)
+        await query.answer("🗑 Корзина очищена")
+        await _send_cart_view(bot, user_id, edit_message=query.message)
+        return
+
+    if data == "cart_show":
+        await _send_cart_view(bot, user_id, edit_message=query.message)
+        return
+
+    if data == "cart_buy":
+        cart = _cart_get(user_id)
+        if len(cart) < BUNDLE_TOTAL:
+            await query.answer(
+                f"Нужно {BUNDLE_TOTAL} бита в корзине, у тебя {len(cart)}.",
+                show_alert=True,
+            )
+            return
+        # Берём первые BUNDLE_TOTAL битов из корзины (порядок добавления).
+        # Юзер может перед buy удалить ❌ ненужные — picker остаётся в корзине.
+        chosen_ids = cart[:BUNDLE_TOTAL]
+        chosen_beats = [beats_db.get_beat_by_id(bid) for bid in chosen_ids]
+        chosen_beats = [b for b in chosen_beats if b]
+        if len(chosen_beats) != BUNDLE_TOTAL:
+            await query.answer(
+                "Часть битов из корзины пропала — обнови /cart.",
+                show_alert=True,
+            )
+            return
+        # Кладём в bundle_selection как если бы юзер прошёл picker — переиспользуем
+        # bundle_pay_* флоу. anchor = первый, selected = остальные.
+        bundle_selection[user_id] = {
+            "anchor": int(chosen_beats[0]["id"]),
+            "selected": [int(b["id"]) for b in chosen_beats[1:]],
+            "page": 0,
+        }
+        names_block = "\n".join(f"• {b['name']}" for b in chosen_beats)
+        try:
+            await query.message.edit_text(
+                (
+                    f"🎁 <b>Bundle из корзины — {licensing.PRICE_BUNDLE3_RUB}₽</b>\n\n"
+                    f"<b>3 бита:</b>\n{names_block}\n\n"
+                    "Выбери способ оплаты:"
+                ),
+                parse_mode="HTML",
+                reply_markup=kb_bundle_pay(),
+            )
+        except TelegramError:
+            pass
         return
 
     # ── Bundle deals (3 бита одной транзакцией) ────────────────
@@ -4282,6 +4566,8 @@ async def _deliver_bundle(bot, user, beats: list[dict], *, payment_charge_id: st
     """
     buyer_name = (user.full_name or user.username or str(user.id)).strip()
     failed_beats: list[dict] = []
+    # Очищаем все 3 бита из корзины ДО send_audio — даже если send упадёт,
+    # не хотим повторно показывать «🛒 ✅ В корзине» на купленный бит.
     for b in beats:
         try:
             mark_bit_purchased(user.id, b["id"])
@@ -5820,6 +6106,12 @@ async def remarketing_scheduler(bot):
             logger.exception("remarketing_scheduler iteration failed")
 
 
+async def cmd_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """`/cart` — показ персональной корзины битов для bundle-покупки."""
+    user_id = update.effective_user.id
+    await _send_cart_view(context.bot, user_id, edit_message=None)
+
+
 async def cmd_stop_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """`/stop_reminders` — юзер отказывается от reminder-сообщений
     о просмотренных битах. Anti-spam, mandatory для TG ToS-friendly bot.
@@ -6472,6 +6764,12 @@ async def post_init(application):
         )
     except Exception:
         logger.exception("remarketing load failed")
+    # Bundle carts — load from disk (persist через git autopush)
+    try:
+        _load_bundle_carts()
+        logger.info("bundle_cart: loaded %d users with non-empty carts", len(bundle_cart))
+    except Exception:
+        logger.exception("bundle_cart load failed")
     asyncio.create_task(scheduled_publish_loop(application.bot))
     asyncio.create_task(heartbeat_scheduler())
     asyncio.create_task(content_reminder_scheduler(application.bot))
@@ -7191,6 +7489,7 @@ async def run_bot():
     app.add_handler(CommandHandler("start_reminders", cmd_start_reminders))
     app.add_handler(CommandHandler("yt_audit", cmd_yt_audit))
     app.add_handler(CommandHandler("yt_refresh_old", cmd_yt_refresh_old))
+    app.add_handler(CommandHandler("cart", cmd_cart))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(PreCheckoutQueryHandler(handle_precheckout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, handle_successful_payment))
