@@ -2766,8 +2766,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Готовый master за 3-5 рабочих дней. Делаю как для себя.\n"
             "• Присылаешь: стемы WAV (24-bit, отдельные дорожки) + референс\n"
             "• Получаешь: master -9 dBTP, готовый под Spotify/Apple/YouTube\n"
-            "• Правки без ограничений — пока не скажешь «огонь»\n"
-            "• Не зашло — возврат денег без вопросов\n"
+            "• До 3 ревизий правок включено в цену\n"
+            "• <b>До оплаты</b> — пришли 30-сек кусок, оценю стемы бесплатно\n"
             "• 🎁 Первые 5 клиентов — free MP3 lease на любой бит из каталога\n"
             "Заказать: кнопка «🎛 Сведение треков» в главном меню.\n\n"
 
@@ -2803,8 +2803,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "<b>🎚 Что делаю:</b>\n"
             "• Mix: балансы, панорама, EQ, компрессия, эффекты — звук как у топов\n"
             "• Master: -9 dBTP, готовый под Spotify / Apple Music / YouTube / DSP\n"
-            "• Доделываю пока ты не скажешь «огонь» — правки без ограничений\n"
-            "• Если не зашло — возврат денег без вопросов\n\n"
+            "• До 3 ревизий правок включено в цену\n\n"
 
             "<b>📦 Что от тебя:</b>\n"
             "• Стемы WAV (24-bit) — каждая дорожка отдельным файлом\n"
@@ -2814,11 +2813,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "<b>⏱ Срок:</b> 3-5 рабочих дней с момента получения стемов.\n\n"
 
             "<b>🎁 Бонусы:</b>\n"
-            "• Перед оплатой можешь прислать 30-сек кусок — оценю стемы и скажу что выйдет\n"
+            "• <b>До оплаты</b> — пришли 30-сек кусок, оценю стемы и скажу что выйдет (бесплатно)\n"
             "• Первые 5 клиентов — даю free MP3 lease на любой бит из каталога\n"
             "• Постоянным клиентам — каждое 4-е сведение со скидкой 30%\n\n"
 
-            "<i>Вопросы — @iiiplfiii. Делаю как для себя, иначе не отдам.</i>"
+            "<i>Вопросы — @iiiplfiii. Делаю как для себя.</i>"
         )
         rows = [
             [InlineKeyboardButton(f"⭐ {licensing.PRICE_MIX_STARS}", callback_data="buy_mix_stars"),
@@ -2837,8 +2836,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 title="🎛 Сведение трека"[:32],
                 description=(
                     f"Mix + master под ключ за 3-5 рабочих дней. "
-                    f"-9 dBTP, готовый master WAV под DSP. Правки без ограничений. "
-                    f"Не зашло — возврат денег."
+                    f"-9 dBTP, готовый master WAV под DSP. До 3 ревизий правок включено."
                 )[:255],
                 payload="mixing_service:stars",
                 provider_token="",
@@ -4785,7 +4783,7 @@ async def _deliver_mixing_service(bot, user, *, payment_charge_id: str,
             "   • Референс-трек (Spotify / YT / SoundCloud)\n"
             "   • 2 строки ТЗ: жанр, mood, что важно\n"
             "3. Через 3-5 рабочих дней → готовый master (-9 dBTP, под DSP)\n"
-            "4. Правки — без ограничений, доделаем пока не зайдёт\n\n"
+            "4. До 3 ревизий правок включено в цену\n\n"
             f"<i>Номер заказа: {payment_charge_id[:16]}...</i>",
             parse_mode="HTML",
         )
