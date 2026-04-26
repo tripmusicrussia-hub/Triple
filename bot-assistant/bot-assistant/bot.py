@@ -4472,13 +4472,28 @@ CONTENT_REMINDER_TEMPLATES = {
 
 
 def _load_admin_prefs() -> dict:
+    """Загружает admin_prefs из disk. На Render free disk эфемерный →
+    после redeploy файл потерян → fallback на env defaults.
+
+    Env-overrides (для persistence через redeploy):
+    - AUTO_REPOST_DEFAULT="1" → auto_repost_enabled=True если файла нет
+    - CONTENT_REMINDERS_DEFAULT="1" → content_reminders=True если файла нет
+    """
+    defaults = {
+        "content_reminders": (os.getenv("CONTENT_REMINDERS_DEFAULT", "1") == "1"),
+        "auto_repost_enabled": (os.getenv("AUTO_REPOST_DEFAULT", "0") == "1"),
+        "last_reminder_date": None,
+    }
     if not os.path.exists(ADMIN_PREFS_PATH):
-        return {"content_reminders": True, "last_reminder_date": None}
+        return defaults
     try:
         with open(ADMIN_PREFS_PATH, encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        # Merge с defaults — если файл существует но не имеет какого-то ключа
+        merged = {**defaults, **data}
+        return merged
     except Exception:
-        return {"content_reminders": True, "last_reminder_date": None}
+        return defaults
 
 
 def _save_admin_prefs(prefs: dict) -> None:
