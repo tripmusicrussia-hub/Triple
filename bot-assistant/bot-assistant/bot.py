@@ -2767,7 +2767,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• Присылаешь: стемы WAV (24-bit, отдельные дорожки) + референс\n"
             "• Получаешь: master -9 dBTP, готовый под Spotify/Apple/YouTube\n"
             "• До 3 ревизий правок включено в цену\n"
-            "• <b>До оплаты</b> — пришли 30-сек кусок, оценю стемы бесплатно\n"
             "• 🎁 Первые 5 клиентов — free MP3 lease на любой бит из каталога\n"
             "Заказать: кнопка «🎛 Сведение треков» в главном меню.\n\n"
 
@@ -2813,7 +2812,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "<b>⏱ Срок:</b> 3-5 рабочих дней с момента получения стемов.\n\n"
 
             "<b>🎁 Бонусы:</b>\n"
-            "• <b>До оплаты</b> — пришли 30-сек кусок, оценю стемы и скажу что выйдет (бесплатно)\n"
             "• Первые 5 клиентов — даю free MP3 lease на любой бит из каталога\n"
             "• Постоянным клиентам — каждое 4-е сведение со скидкой 30%\n\n"
 
@@ -6133,6 +6131,48 @@ async def cmd_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_cart_view(context.bot, user_id, edit_message=None)
 
 
+async def cmd_export_beats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """`/export_beats` — admin only. Шлёт текущий beats_data.json + admin_prefs.json
+    в DM админу. Rescue-инструмент: если autopush не работает или Render redeploy
+    готовится, можно срочно выгрузить локальный файл и не потерять данные.
+    """
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        return
+    bot = context.bot
+    sent_files = []
+    for path, label in [
+        (beats_db.BEATS_FILE, "beats_data.json"),
+        (ADMIN_PREFS_PATH, "admin_prefs.json"),
+        (BUNDLE_CART_PATH, "bundle_carts.json"),
+        (PENDING_REMINDERS_PATH, "pending_reminders.json"),
+    ]:
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "rb") as f:
+                content = f.read()
+            buf = io.BytesIO(content)
+            buf.name = label
+            await bot.send_document(
+                user.id,
+                document=InputFile(buf, filename=label),
+                caption=f"📦 {label} ({len(content)} bytes)",
+            )
+            sent_files.append(label)
+        except Exception:
+            logger.exception("export_beats: send %s failed", label)
+            await bot.send_message(user.id, f"⚠️ Не смог выгрузить {label}")
+    if not sent_files:
+        await bot.send_message(user.id, "📭 Локально нет ни одного state-файла (свежий deploy?)")
+    else:
+        await bot.send_message(
+            user.id,
+            f"✅ Выгрузил: {', '.join(sent_files)}\n\n"
+            "Сохрани куда-нибудь — это backup на случай если autopush не сработает.",
+        )
+
+
 async def cmd_stop_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """`/stop_reminders` — юзер отказывается от reminder-сообщений
     о просмотренных битах. Anti-spam, mandatory для TG ToS-friendly bot.
@@ -7511,6 +7551,7 @@ async def run_bot():
     app.add_handler(CommandHandler("yt_audit", cmd_yt_audit))
     app.add_handler(CommandHandler("yt_refresh_old", cmd_yt_refresh_old))
     app.add_handler(CommandHandler("cart", cmd_cart))
+    app.add_handler(CommandHandler("export_beats", cmd_export_beats))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(PreCheckoutQueryHandler(handle_precheckout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, handle_successful_payment))

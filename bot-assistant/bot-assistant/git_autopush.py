@@ -37,6 +37,11 @@ _lock = asyncio.Lock()
 
 _REPO_ROOT: Path | None = None  # вычисляем lazy
 
+# Дросселирование warn'ов про missing origin: если remote 'origin' нет
+# (типичный Render quirk при clone через proxy) — спамить каждые 60 сек
+# не нужно, пишем 1 раз и молчим до restart.
+_remote_warned_once: bool = False
+
 
 def is_enabled() -> bool:
     return os.getenv("GIT_AUTOPUSH_ENABLED", "0") == "1"
@@ -67,7 +72,14 @@ def mark_dirty(filepath: str | Path) -> None:
 
 
 def _build_remote_url(token: str) -> str | None:
-    """Подставляет PAT в origin URL — для push'а без интерактивного auth."""
+    """Подставляет PAT в URL для push'а без интерактивного auth.
+
+    Приоритет источников remote:
+    1. ENV `GIT_AUTOPUSH_REMOTE` — явно заданный (использовать на Render если
+       origin не настроен при clone — типичный Render quirk).
+    2. `git remote get-url origin` — fallback для local dev.
+    """
+    global _remote_warned_once
     explicit = os.getenv("GIT_AUTOPUSH_REMOTE", "").strip()
     if explicit:
         host_path = explicit
@@ -79,11 +91,20 @@ def _build_remote_url(token: str) -> str | None:
                 capture_output=True, text=True, timeout=5,
             )
             if res.returncode != 0:
-                logger.warning("autopush: git remote get-url failed: %s", res.stderr.strip())
+                if not _remote_warned_once:
+                    logger.error(
+                        "autopush: no 'origin' remote AND GIT_AUTOPUSH_REMOTE env "
+                        "not set — push DISABLED. Set ENV "
+                        "GIT_AUTOPUSH_REMOTE=github.com/owner/repo.git to fix. "
+                        "(stderr: %s)", res.stderr.strip(),
+                    )
+                    _remote_warned_once = True
                 return None
             url = res.stdout.strip()
         except Exception:
-            logger.exception("autopush: failed to read origin url")
+            if not _remote_warned_once:
+                logger.exception("autopush: failed to read origin url")
+                _remote_warned_once = True
             return None
         # Нормализуем:
         #   https://github.com/owner/repo.git → github.com/owner/repo.git
@@ -94,7 +115,9 @@ def _build_remote_url(token: str) -> str | None:
         else:
             m = re.match(r"git@([^:]+):(.+)", url)
             if not m:
-                logger.warning("autopush: cannot parse origin url %s", url)
+                if not _remote_warned_once:
+                    logger.warning("autopush: cannot parse origin url %s", url)
+                    _remote_warned_once = True
                 return None
             host_path = f"{m.group(1)}/{m.group(2)}"
     return f"https://x-access-token:{token}@{host_path}"
@@ -154,11 +177,15 @@ async def _do_push_once() -> int:
 
     # Pull first, чтобы избежать non-fast-forward (на Render может быть slightly
     # outdated если кто-то push'ил с моей машины). --rebase + --autostash чтобы
-    # текущие dirty уже в working tree (мы их add'нем дальше).
-    rc, out, err = await _run_git(["pull", "--rebase", "--autostash", "origin", branch],
+    # текущие dirty уже в working tree (мы их add'нем дальше). Используем
+    # explicit URL вместо named "origin" — на Render origin может быть не
+    # настроен (см. _build_remote_url docstring).
+    rc, out, err = await _run_git(["pull", "--rebase", "--autostash", remote_url, branch],
                                   cwd=repo, env=env, timeout=30)
     if rc != 0:
-        logger.warning("autopush: git pull failed (rc=%d): %s", rc, err.strip()[-300:])
+        # Sanitize — token не должен попасть в лог
+        safe_err = err.replace(token, "***")[-300:]
+        logger.warning("autopush: git pull failed (rc=%d): %s", rc, safe_err)
         # Продолжаем — push может всё равно пройти если ничего не сменилось
 
     # Add только наши файлы (не trash, не временные)
