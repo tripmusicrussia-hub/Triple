@@ -232,7 +232,6 @@ _building_shorts: set[str] = set()
 # 2 других бита для bundle. page — пагинация по каталогу (10 битов на страницу).
 bundle_selection: dict[int, dict] = {}
 BUNDLE_TOTAL = 3        # сколько битов в bundle (anchor + selected)
-BUNDLE_PAGE_SIZE = 10   # битов на странице picker'а
 
 # Bundle cart: персистентная корзина — юзер слушает биты в каталоге, кликает
 # «🛒 + В корзину» по тем что нравятся, потом в /cart покупает 3-pack за 4500₽.
@@ -767,12 +766,6 @@ def kb_after_beat(beat_id, content_type="beat", user_id: int | None = None):
                 cart_cb = f"cart_add_{beat_id}"
             rows.append([InlineKeyboardButton(cart_label, callback_data=cart_cb)])
         rows.append([
-            InlineKeyboardButton(
-                f"🎁 3 бита {licensing.PRICE_BUNDLE3_RUB}₽ (выгода 600₽)",
-                callback_data="bundle_start_" + str(beat_id),
-            ),
-        ])
-        rows.append([
             InlineKeyboardButton("💎 Exclusive ($500+)", callback_data="excl_" + str(beat_id)),
         ])
     rows.append([InlineKeyboardButton("❤️ В избранное", callback_data="fav_" + str(beat_id)),
@@ -808,85 +801,12 @@ def kb_channel_beat_buy(beat_id: int) -> InlineKeyboardMarkup:
             f"🎁 В набор «3 за {licensing.PRICE_BUNDLE3_RUB}₽» (-600₽)",
             callback_data="cart_add_" + str(beat_id),
         )],
-        [InlineKeyboardButton(
-            f"🎁 Купить 3 разом · {licensing.PRICE_BUNDLE3_RUB}₽ (выгода 600₽)",
-            callback_data="bundle_start_" + str(beat_id),
-        )],
         [InlineKeyboardButton("💎 WAV / Unlimited / Exclusive", callback_data="excl_" + str(beat_id))],
     ]
     return InlineKeyboardMarkup(rows)
 
 
-# ── Bundle picker UI ─────────────────────────────────────────
-
-def _bundle_eligible_beats(exclude_ids: set[int]) -> list[dict]:
-    """Биты-кандидаты для bundle: только beat content_type, есть file_id, не из exclude_ids.
-
-    Сортировка по id desc — последние загруженные сверху (свежее = интереснее).
-    """
-    out = []
-    for b in beats_db.BEATS_CACHE:
-        if b.get("content_type", "beat") != "beat":
-            continue
-        if not b.get("file_id"):
-            continue
-        if int(b.get("id", 0)) in exclude_ids:
-            continue
-        out.append(b)
-    out.sort(key=lambda x: int(x.get("id", 0)), reverse=True)
-    return out
-
-
-def kb_bundle_picker(user_id: int) -> InlineKeyboardMarkup:
-    """Picker для выбора `BUNDLE_TOTAL - 1` дополнительных битов к anchor'у.
-
-    Каждый бит — кнопка с ✅/⬜ префиксом. Внизу: counter + Confirm/Cancel + nav.
-    """
-    state = bundle_selection.get(user_id) or {}
-    anchor_id = int(state.get("anchor", 0))
-    selected: list[int] = list(state.get("selected", []))
-    page: int = int(state.get("page", 0))
-    candidates = _bundle_eligible_beats(exclude_ids={anchor_id})
-
-    start = page * BUNDLE_PAGE_SIZE
-    end = start + BUNDLE_PAGE_SIZE
-    page_beats = candidates[start:end]
-
-    rows: list[list[InlineKeyboardButton]] = []
-    need_more = max(0, (BUNDLE_TOTAL - 1) - len(selected))
-
-    for b in page_beats:
-        bid = int(b["id"])
-        is_picked = bid in selected
-        marker = "✅" if is_picked else "⬜"
-        # Имя обрезаем до 36 символов чтобы кнопка влазила.
-        name = (b.get("name") or "?")[:36]
-        bpm = b.get("bpm") or "?"
-        label = f"{marker} {name} · {bpm}"
-        action = "bundle_unpick_" if is_picked else "bundle_pick_"
-        rows.append([InlineKeyboardButton(label, callback_data=action + str(bid))])
-
-    # Пагинация
-    nav_row: list[InlineKeyboardButton] = []
-    if page > 0:
-        nav_row.append(InlineKeyboardButton("◀️ Назад", callback_data="bundle_page_" + str(page - 1)))
-    if end < len(candidates):
-        nav_row.append(InlineKeyboardButton("Ещё ▶️", callback_data="bundle_page_" + str(page + 1)))
-    if nav_row:
-        rows.append(nav_row)
-
-    # Footer: counter + confirm + cancel
-    counter_label = f"Выбрано {len(selected)}/{BUNDLE_TOTAL - 1}"
-    if need_more == 0:
-        rows.append([InlineKeyboardButton(
-            f"✅ Купить 3 бита · {licensing.PRICE_BUNDLE3_RUB}₽",
-            callback_data="bundle_confirm",
-        )])
-    else:
-        rows.append([InlineKeyboardButton(counter_label, callback_data="bundle_noop")])
-    rows.append([InlineKeyboardButton("❌ Отмена", callback_data="bundle_cancel")])
-    return InlineKeyboardMarkup(rows)
-
+# ── Bundle payment UI (cart_buy переиспользует kb_bundle_pay) ────────
 
 def kb_bundle_pay() -> InlineKeyboardMarkup:
     """3 кнопки оплаты для подтверждённого bundle: Stars / USDT / RUB."""
@@ -3051,142 +2971,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # ── Bundle deals (3 бита одной транзакцией) ────────────────
-    if data.startswith("bundle_start_"):
-        try:
-            anchor_id = int(data[len("bundle_start_"):])
-        except ValueError:
-            await query.answer()
-            return
-        anchor = beats_db.get_beat_by_id(anchor_id)
-        if not anchor or anchor.get("content_type", "beat") != "beat":
-            await query.answer("Бит не найден", show_alert=True)
-            return
-        eligible_n = len(_bundle_eligible_beats(exclude_ids={anchor_id}))
-        if eligible_n < BUNDLE_TOTAL - 1:
-            await query.answer(
-                f"В каталоге слишком мало битов для бандла (нужно ≥{BUNDLE_TOTAL}).",
-                show_alert=True,
-            )
-            return
-        bundle_selection[user_id] = {"anchor": anchor_id, "selected": [], "page": 0}
-        anchor_name = anchor.get("name") or "?"
-        anchor_bpm = anchor.get("bpm") or "?"
-        try:
-            await bot.send_message(
-                user_id,
-                (
-                    f"🎁 <b>Набор «3 бита за {licensing.PRICE_BUNDLE3_RUB}₽»</b>\n"
-                    f"<i>Вместо {3 * licensing.PRICE_MP3_RUB}₽ поодиночке — "
-                    f"экономия {3 * licensing.PRICE_MP3_RUB - licensing.PRICE_BUNDLE3_RUB}₽</i>\n\n"
-                    f"<b>Первый бит:</b> {anchor_name} ({anchor_bpm} BPM)\n\n"
-                    f"👇 Выбери ещё {BUNDLE_TOTAL - 1} бита из каталога:"
-                ),
-                parse_mode="HTML",
-                reply_markup=kb_bundle_picker(user_id),
-            )
-            if query.message.chat_id != user_id:
-                await query.answer("📨 Picker отправил в ЛС бота", show_alert=False)
-        except TelegramError:
-            await query.answer("Сначала напиши /start боту в ЛС.", show_alert=True)
-            bundle_selection.pop(user_id, None)
-        return
-
-    if data.startswith("bundle_pick_") or data.startswith("bundle_unpick_"):
-        is_pick = data.startswith("bundle_pick_")
-        prefix_len = len("bundle_pick_") if is_pick else len("bundle_unpick_")
-        try:
-            bid = int(data[prefix_len:])
-        except ValueError:
-            await query.answer()
-            return
-        state = bundle_selection.get(user_id)
-        if not state:
-            await query.answer("Сессия устарела, нажми «🎁 3 бита» заново.", show_alert=True)
-            return
-        selected = list(state.get("selected", []))
-        if is_pick:
-            if bid in selected:
-                pass
-            elif len(selected) >= BUNDLE_TOTAL - 1:
-                await query.answer(
-                    f"Уже выбрано {BUNDLE_TOTAL - 1}, дальше — ✅ Купить.",
-                    show_alert=False,
-                )
-                return
-            elif bid == int(state.get("anchor", 0)):
-                await query.answer("Этот бит уже якорь bundle.", show_alert=False)
-                return
-            else:
-                selected.append(bid)
-        else:
-            selected = [x for x in selected if x != bid]
-        state["selected"] = selected
-        bundle_selection[user_id] = state
-        try:
-            await query.message.edit_reply_markup(reply_markup=kb_bundle_picker(user_id))
-        except TelegramError:
-            pass
-        return
-
-    if data.startswith("bundle_page_"):
-        try:
-            page = max(0, int(data[len("bundle_page_"):]))
-        except ValueError:
-            await query.answer()
-            return
-        state = bundle_selection.get(user_id)
-        if not state:
-            await query.answer("Сессия устарела, нажми «🎁 3 бита» заново.", show_alert=True)
-            return
-        state["page"] = page
-        bundle_selection[user_id] = state
-        try:
-            await query.message.edit_reply_markup(reply_markup=kb_bundle_picker(user_id))
-        except TelegramError:
-            pass
-        return
-
-    if data == "bundle_noop":
-        return  # query.answer() уже сделан в начале handle_callback
-
-    if data == "bundle_cancel":
-        bundle_selection.pop(user_id, None)
-        try:
-            await query.message.edit_text("❌ Bundle отменён.")
-        except TelegramError:
-            pass
-        return
-
-    if data == "bundle_confirm":
-        resolved = _bundle_anchor_and_selected(user_id)
-        if not resolved:
-            await query.answer(
-                f"Сначала выбери {BUNDLE_TOTAL - 1} бита.", show_alert=True,
-            )
-            return
-        anchor, selected_beats = resolved
-        names_block = (
-            f"• {anchor['name']}\n" + "\n".join(f"• {b['name']}" for b in selected_beats)
-        )
-        try:
-            await query.message.edit_text(
-                (
-                    f"🎁 <b>Bundle готов — {licensing.PRICE_BUNDLE3_RUB}₽</b>\n\n"
-                    f"<b>3 бита:</b>\n{names_block}\n\n"
-                    "Выбери способ оплаты:"
-                ),
-                parse_mode="HTML",
-                reply_markup=kb_bundle_pay(),
-            )
-        except TelegramError:
-            pass
-        return
-
+    # ── Bundle payments (используются cart_buy → bundle_selection state) ──
+    # Picker FSM (bundle_start/pick/unpick/page/confirm/cancel/noop) удалён —
+    # cart покрывает оба use-case (накопить + сразу 3) через одну кнопку.
     if data == "bundle_pay_stars":
         resolved = _bundle_anchor_and_selected(user_id)
         if not resolved:
-            await query.answer("Сессия устарела, начни заново через «🎁 3 бита».", show_alert=True)
+            await query.answer("Сессия устарела, начни заново через /cart.", show_alert=True)
             return
         anchor, selected_beats = resolved
         ids_csv = ",".join(str(b["id"]) for b in [anchor, *selected_beats])
@@ -3215,7 +3006,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "bundle_pay_usdt":
         resolved = _bundle_anchor_and_selected(user_id)
         if not resolved:
-            await query.answer("Сессия устарела, начни заново через «🎁 3 бита».", show_alert=True)
+            await query.answer("Сессия устарела, начни заново через /cart.", show_alert=True)
             return
         anchor, selected_beats = resolved
         ids_csv = ",".join(str(b["id"]) for b in [anchor, *selected_beats])
@@ -3268,7 +3059,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         resolved = _bundle_anchor_and_selected(user_id)
         if not resolved:
-            await query.answer("Сессия устарела, начни заново через «🎁 3 бита».", show_alert=True)
+            await query.answer("Сессия устарела, начни заново через /cart.", show_alert=True)
             return
         anchor, selected_beats = resolved
         ids_csv = ",".join(str(b["id"]) for b in [anchor, *selected_beats])
