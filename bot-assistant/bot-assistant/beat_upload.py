@@ -74,7 +74,11 @@ def beat_record_to_meta(beat: dict) -> "BeatMeta | None":
     Returns None если данных недостаточно для type-beat YT title:
     - bpm должен быть 40..250
     - key должен быть валидным (Am, Dm, C#m, ...)
-    - tags должны содержать хотя бы одного артиста
+
+    Если artist-tag отсутствует в `tags` — fallback на generic «Hard Trap»
+    (canonical_yt_title подхватит как `[FREE] Hard Trap Type Beat ...`).
+    Если в tags только сцена (memphis/detroit) — используем её как artist
+    (Memphis Type Beat / Detroit Type Beat — валидный SEO pattern).
 
     Уродские имена legacy постов канала (типа `Kenny_Muney_-_Issues_ type beat
     Gm 121 bpm with vocal.mp3`) чистятся: убираем артист-префикс, BPM, key,
@@ -92,20 +96,30 @@ def beat_record_to_meta(beat: dict) -> "BeatMeta | None":
         return None
 
     tags = [t for t in (beat.get("tags") or []) if t]
-    if not tags:
-        return None
-    # Берём первый тэг как артиста (обычно так заполнено для новых битов).
     # Skip technical tags типа `bpm140`, `dark`, `hard` — это не артисты.
-    SKIP_TAGS = {"hard", "dark", "memphis", "detroit", "trap", "hardtrap",
-                 "atlanta", "future_2026"}
+    # Сцены (memphis/detroit/atlanta) — fallback artist если нет конкретного
+    # рэпера: «Memphis Type Beat» / «Detroit Type Beat» = valid SEO.
+    SKIP_TAGS = {"hard", "dark", "trap", "hardtrap", "future_2026"}
+    SCENE_TAGS = {"memphis", "detroit", "atlanta", "florida", "neworleans", "nola"}
     artist_raw = next(
         (t.lower() for t in tags
          if not t.lower().startswith("bpm")
-         and t.lower() not in SKIP_TAGS),
+         and t.lower() not in SKIP_TAGS
+         and t.lower() not in SCENE_TAGS),
         "",
     )
     if not artist_raw:
-        return None
+        # Нет конкретного артиста — пробуем сцену как fallback artist.
+        scene_tag = next(
+            (t.lower() for t in tags if t.lower() in SCENE_TAGS), "",
+        )
+        if scene_tag:
+            # «memphis» → «Memphis» (заглавная) — будет «Memphis Type Beat».
+            artist_raw = scene_tag
+        else:
+            # Совсем без identifying tags — generic Hard Trap.
+            # canonical_yt_title fallback'ом сделает «Hard Trap Type Beat».
+            artist_raw = "hard trap"
     # Decode "kennymuney" → "kenny muney" (camelCase split).
     artist_raw_decoded = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", artist_raw).lower()
     artist_display = ARTIST_CASING.get(artist_raw_decoded, _cap_words(artist_raw_decoded))

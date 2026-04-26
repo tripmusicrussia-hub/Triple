@@ -428,14 +428,12 @@ def _load_bundle_carts() -> None:
 
 
 def _save_bundle_carts() -> None:
+    """Save in-memory carts to disk. НЕ autopush'им — bundle_carts.json в
+    .gitignore (cascade redeploy bug в commit `55b13fe5`). Persist только
+    переживёт single instance restart, не deploy."""
     try:
         with open(BUNDLE_CART_PATH, "w", encoding="utf-8") as f:
             json.dump(bundle_cart, f, ensure_ascii=False, indent=2)
-        try:
-            import git_autopush
-            git_autopush.mark_dirty(BUNDLE_CART_PATH)
-        except Exception:
-            pass
     except Exception:
         logger.exception("bundle_cart: save failed")
 
@@ -1010,7 +1008,9 @@ def kb_after_beat(beat_id, content_type="beat", user_id: int | None = None):
                     f"🛒 Изменить набор ({len(cart)})", callback_data="cart_show",
                 )])
             elif beat_id in cart:
-                cart_label = f"✅ В наборе ({len(cart)}/{BUNDLE_TOTAL}) — добавь ещё"
+                # бит уже в корзине — основная кнопка «Купить набор» уже выше,
+                # эта вторичная компактная — открыть /cart изменить состав
+                cart_label = f"✅ В наборе ({len(cart)}/{BUNDLE_TOTAL})"
                 rows.append([InlineKeyboardButton(cart_label, callback_data="cart_show")])
             else:
                 cart_label = f"🎁 В набор «3 за {licensing.PRICE_BUNDLE3_RUB}₽» ({len(cart)}/{BUNDLE_TOTAL})"
@@ -1069,7 +1069,12 @@ def kb_bundle_pay() -> InlineKeyboardMarkup:
 
 
 def kb_cart(user_id: int) -> InlineKeyboardMarkup:
-    """UI набора: список битов с ❌ удалить + footer (купить/добавить ещё/очистить)."""
+    """UI набора: список битов с ❌ удалить + footer (купить/добавить ещё/очистить).
+
+    Empty cart → подсовываем 3 random битов (только beats с file_id, не из
+    user_history) кнопками «🎵 NAME» которые ведут на send_beat → юзер
+    послушает и нажмёт «🎁 В набор» прямо в карточке.
+    """
     cart = _cart_get(user_id)
     rows: list[list[InlineKeyboardButton]] = []
     for bid in cart:
@@ -1080,9 +1085,26 @@ def kb_cart(user_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton("❌", callback_data=f"cart_remove_{bid}"),
         ])
     if not cart:
-        rows.append([InlineKeyboardButton(
-            "🎲 Найти биты для набора", callback_data="random_beat",
-        )])
+        # Suggest 3 random битов (anti-repeat через user_history)
+        history = set(get_history(user_id))
+        candidates = [
+            b for b in beats_db.BEATS_CACHE
+            if b.get("content_type", "beat") == "beat"
+            and b.get("file_id")
+            and b["id"] not in history
+        ]
+        sample = random.sample(candidates, k=min(3, len(candidates))) if candidates else []
+        for b in sample:
+            name = (b.get("name") or "?")[:32]
+            bpm = b.get("bpm") or "?"
+            rows.append([InlineKeyboardButton(
+                f"🎵 {name} · {bpm}",
+                callback_data=f"play_{b['id']}",
+            )])
+        if not sample:
+            rows.append([InlineKeyboardButton(
+                "🎲 Случайный из каталога", callback_data="random_beat",
+            )])
     elif len(cart) >= BUNDLE_TOTAL:
         rows.append([InlineKeyboardButton(
             f"✅ Купить набор · {licensing.PRICE_BUNDLE3_RUB}₽ (выгода 600₽)",
@@ -1105,6 +1127,9 @@ def kb_cart(user_id: int) -> InlineKeyboardMarkup:
 async def _send_cart_view(bot, user_id: int, edit_message=None) -> None:
     """Шлёт юзеру актуальный вид корзины. Если edit_message задан — пытается
     edit (для callback `cart_show` из main_menu); иначе reply_text.
+
+    Empty cart → подсовываем 3 random бита-suggestion кнопками для warm-up
+    (вместо тупикового текста «добавляй через кнопку В Набор»).
     """
     cart = _cart_get(user_id)
     full_single = BUNDLE_TOTAL * licensing.PRICE_MP3_RUB
@@ -1112,10 +1137,8 @@ async def _send_cart_view(bot, user_id: int, edit_message=None) -> None:
     if not cart:
         text = (
             f"🎁 <b>Набор «{BUNDLE_TOTAL} бита за {licensing.PRICE_BUNDLE3_RUB}₽»</b>\n"
-            f"<i>Скидка {saving}₽ при покупке трёх битов одной транзакцией</i>\n\n"
-            f"📭 Пока пусто. Добавляй биты через кнопку <b>«🎁 В набор»</b> "
-            f"в карточке любого бита — когда наберётся {BUNDLE_TOTAL}, купишь всё за "
-            f"<b>{licensing.PRICE_BUNDLE3_RUB}₽</b> (вместо {full_single}₽ поодиночке)."
+            f"<i>Скидка {saving}₽ vs {full_single}₽ поодиночке</i>\n\n"
+            f"📭 Пока пусто. Послушай 3 свежих бита и закидывай в набор:"
         )
     else:
         names = []
@@ -1504,16 +1527,24 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     # Friend мог заблокировать бота / удалить аккаунт — не критично
                     logger.info("referral: friend %d notify failed", referral_friend_id)
-            # Notify new user
+            # Notify new user — с прямой CTA-кнопкой чтобы юзер сразу попал на бит,
+            # иначе discount сгорит за 30 дней не использован.
             try:
+                cta_kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        f"🎧 Открыть случайный бит и применить -{pct}%",
+                        callback_data="random_beat",
+                    )],
+                    [InlineKeyboardButton("🎹 Каталог битов", callback_data="menu_beat")],
+                ])
                 await bot.send_message(
                     user_id,
                     f"🎁 <b>Скидка -{pct}% от друга!</b>\n\n"
                     f"Тебе и тому кто тебя пригласил — по <b>-{pct}%</b> на любой бит "
                     "(действует 30 дней).\n\n"
-                    "Слушай биты в каталоге — кнопка «🎁 Купить со скидкой» появится "
-                    "на каждой карточке.",
+                    "Открой бит → кнопка «🎁 Купить со скидкой» появится автоматом.",
                     parse_mode="HTML",
+                    reply_markup=cta_kb,
                 )
             except Exception:
                 pass
@@ -3304,7 +3335,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not rec:
             await query.answer("Скидка истекла или уже использована.", show_alert=True)
             return
-        beat = beats_db.get_beat_by_id(int(rec["beat_id"]))
+        # Universal token (referral): beat_id=None → нужен disc_apply_<bid>
+        # сначала. Если юзер кликнул pay напрямую (cached old keyboard) —
+        # graceful reject вместо TypeError crash.
+        beat_id_raw = rec.get("beat_id")
+        if not beat_id_raw:
+            await query.answer(
+                "Сначала открой бит и кликни «🎁 Купить со скидкой».",
+                show_alert=True,
+            )
+            return
+        beat = beats_db.get_beat_by_id(int(beat_id_raw))
         if not beat:
             await query.answer("Бит больше недоступен.", show_alert=True)
             return
@@ -3339,7 +3380,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not rec:
             await query.answer("Скидка истекла или уже использована.", show_alert=True)
             return
-        beat_id = int(rec["beat_id"])
+        beat_id_raw = rec.get("beat_id")
+        if not beat_id_raw:
+            await query.answer(
+                "Сначала открой бит и кликни «🎁 Купить со скидкой».",
+                show_alert=True,
+            )
+            return
+        beat_id = int(beat_id_raw)
         beat = beats_db.get_beat_by_id(beat_id)
         if not beat:
             await query.answer("Бит больше недоступен.", show_alert=True)
@@ -3393,32 +3441,44 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 show_alert=True,
             )
             return
+        # Multi-click guard (тот же _yk_creating_payment что и для buy_rub_).
+        # Без него тап 3 раза подряд = 3 платежа в YK + 3 message в ЛС.
+        if user_id in _yk_creating_payment:
+            await query.answer("⏳ Уже создаю платёж, подожди...", show_alert=False)
+            return
         token = data[len("disc_pay_rub_"):]
         rec = _validate_discount_token(token, user_id)
         if not rec:
             await query.answer("Скидка истекла или уже использована.", show_alert=True)
             return
-        beat_id = int(rec["beat_id"])
+        beat_id_raw = rec.get("beat_id")
+        if not beat_id_raw:
+            await query.answer(
+                "Сначала открой бит и кликни «🎁 Купить со скидкой».",
+                show_alert=True,
+            )
+            return
+        beat_id = int(beat_id_raw)
         beat = beats_db.get_beat_by_id(beat_id)
         if not beat:
             await query.answer("Бит больше недоступен.", show_alert=True)
             return
         pct = int(rec["pct"])
         amount_rub = int(licensing.mp3_price_with_discount(pct, "RUB"))
-        if user_id in _yk_creating_payment:
-            await query.answer("⏳ Уже создаю платёж, подожди...", show_alert=False)
-            return
+        # Multi-click guard уже захвачен выше при входе в handler
         _yk_creating_payment.add(user_id)
         try:
+            beat_name_safe = html.escape(beat.get("name") or "?")
             payment = await yookassa_api.create_payment(
                 amount_rub=amount_rub,
-                description=f"MP3 -{pct}% «{beat['name']}»",
+                description=f"MP3 -{pct}% {beat.get('name') or '?'}",
                 metadata={
                     "type": "mp3_disc",
                     "user_id": str(user_id),
                     "username": update.effective_user.username or "",
                     "beat_id": str(beat_id),
                     "token": token,
+                    "pct": str(pct),  # сохраняем для fallback после Render restart
                 },
                 return_url=f"https://t.me/{beat_post_builder.BOT_USERNAME}",
             )
@@ -3428,6 +3488,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "username": update.effective_user.username or "",
                 "beat_id": beat_id,
                 "token": token,
+                "pct": pct,  # для license_type='mp3_lease_disc<pct>' если active_discounts эфемерно потерян
                 "amount_rub": amount_rub,
                 "created_at": datetime.now(ZoneInfo("Europe/Moscow")).isoformat(),
             })
@@ -3435,7 +3496,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await bot.send_message(
                 user_id,
                 (
-                    f"🎁 <b>MP3 -{pct}% «{beat['name']}» — {amount_rub}₽</b>\n\n"
+                    f"🎁 <b>MP3 -{pct}% «{beat_name_safe}» — {amount_rub}₽</b>\n\n"
                     "Нажми кнопку → выбери способ оплаты → подтверди.\n\n"
                     "После оплаты — mp3 + лицензия в этот чат."
                 ),
@@ -3664,6 +3725,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Bundle payments (используются cart_buy → bundle_selection state) ──
     # Picker FSM (bundle_start/pick/unpick/page/confirm/cancel/noop) удалён —
     # cart покрывает оба use-case (накопить + сразу 3) через одну кнопку.
+    # `bundle_cancel` остался в kb_bundle_pay — кнопка ❌ Отмена в payment menu.
+    if data == "bundle_cancel":
+        bundle_selection.pop(user_id, None)
+        try:
+            await query.message.edit_text(
+                "❌ Покупка набора отменена.\n\nКорзина сохранена — открой /cart когда захочешь.",
+            )
+            await query.answer()
+        except TelegramError:
+            await query.answer("Отменено", show_alert=False)
+        return
+
     if data == "bundle_pay_stars":
         resolved = _bundle_anchor_and_selected(user_id)
         if not resolved:
@@ -5588,7 +5661,14 @@ async def _deliver_yk_payment(bot, payment_id: str) -> bool:
                         "⚠️ Бит пропал. Пиши @iiiplfiii — разберёмся.",
                     )
                     return False
-                pct = int(rec.get("pct", licensing.DISCOUNT_PCT)) if rec else licensing.DISCOUNT_PCT
+                # Pct fallback chain: pending (saved at creation) → rec (in-memory)
+                # → licensing.DISCOUNT_PCT (default). Это надёжно после Render
+                # restart когда active_discounts эфемерно потерян.
+                pct = int(
+                    pending.get("pct")
+                    or (rec.get("pct") if rec else None)
+                    or licensing.DISCOUNT_PCT
+                )
                 await _deliver_mp3_lease(
                     bot, user, beat,
                     payment_charge_id=charge_id,
@@ -5743,13 +5823,19 @@ async def handle_precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if rec.get("expires_at", 0) < time.time():
                 await pcq.answer(ok=False, error_message="Скидка истекла")
                 return
-            if not beats_db.get_beat_by_id(int(rec.get("beat_id", 0))):
+            # Universal token (referral) с beat_id=None — не валиден для оплаты
+            # без bind через disc_apply_<bid>. Guard от TypeError int(None).
+            beat_id_raw = rec.get("beat_id")
+            if not beat_id_raw:
+                await pcq.answer(ok=False, error_message="Скидка не привязана к биту — открой бит и нажми «Купить со скидкой»")
+                return
+            if not beats_db.get_beat_by_id(int(beat_id_raw)):
                 await pcq.answer(ok=False, error_message="Бит больше недоступен")
                 return
         else:
             await pcq.answer(ok=False, error_message="Неизвестный тип покупки")
             return
-    except ValueError:
+    except (ValueError, TypeError):
         await pcq.answer(ok=False, error_message="Некорректный payload")
         return
     await pcq.answer(ok=True)
@@ -7661,6 +7747,52 @@ async def post_init(application):
         logger.info("post_init: webhook cleared, pending updates dropped")
     except Exception as e:
         logger.warning("post_init: delete_webhook failed: %s", e)
+    # Регистрируем команды в TG /menu — юзер видит autocomplete при наборе `/`.
+    # Scope: default (для всех юзеров) — только основные команды.
+    # Admin команды НЕ регистрируем в default scope (через `chat` scope для
+    # ADMIN_ID — отдельным вызовом ниже).
+    try:
+        from telegram import BotCommand, BotCommandScopeChat
+        user_commands = [
+            BotCommand("start", "Главное меню"),
+            BotCommand("cart", "🎁 Набор «3 за 4500₽»"),
+            BotCommand("reset_history", "🔄 Сбросить историю прослушанных"),
+            BotCommand("stop_reminders", "Отписаться от напоминаний"),
+            BotCommand("start_reminders", "Включить напоминания обратно"),
+            BotCommand("cancel_excl", "Отменить exclusive-заявку"),
+        ]
+        await application.bot.set_my_commands(user_commands)
+        logger.info("post_init: set_my_commands (default scope, %d cmds)", len(user_commands))
+        # Админ-команды доступны только ADMIN_ID — отдельный chat scope.
+        admin_commands = user_commands + [
+            BotCommand("admin", "🛠 Админ-панель"),
+            BotCommand("today", "📊 Сводка дня (sales + YT)"),
+            BotCommand("quick_meta", "🎹 Заполнить ключи битов"),
+            BotCommand("queue", "📅 Очередь публикаций"),
+            BotCommand("auto_repost", "🔁 Auto-repost on/off/status"),
+            BotCommand("repost_now", "🚀 Опубликовать бит сейчас"),
+            BotCommand("yt_audit", "📺 YouTube канал audit"),
+            BotCommand("yt_refresh_old", "🔄 Обновить description старого видео"),
+            BotCommand("yt_rename_one", "🏷 Переименовать YT видео по canonical"),
+            BotCommand("export_beats", "💾 Скачать backup beats_data.json"),
+            BotCommand("feature", "🎤 Опубликовать «На бите X записан трек Y»"),
+            BotCommand("pin_hub", "📌 Обновить закреп-пост канала"),
+            BotCommand("fix_hashtags", "🏷 Backfill хэштегов в старых постах"),
+            BotCommand("upload_product", "📦 Загрузить kit/pack/loop"),
+            BotCommand("cancel_product", "Отменить upload продукта"),
+            BotCommand("cancel_sched", "Отменить scheduled публикацию"),
+            BotCommand("content", "📝 Content reminders on/off"),
+        ]
+        try:
+            await application.bot.set_my_commands(
+                admin_commands,
+                scope=BotCommandScopeChat(chat_id=ADMIN_ID),
+            )
+            logger.info("post_init: set_my_commands (admin scope, %d cmds)", len(admin_commands))
+        except Exception as e:
+            logger.warning("post_init: admin set_my_commands failed: %s", e)
+    except Exception as e:
+        logger.warning("post_init: set_my_commands failed: %s", e)
     beats_db.load_beats()
     if not beats_db.BEATS_CACHE and os.path.exists(beats_db.BEATS_FILE):
         # Файл есть, кэш пуст → значит парсинг упал. Ждём 2 сек (вдруг
