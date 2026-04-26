@@ -1082,7 +1082,7 @@
     "bpm": 136,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADhWnTCffPg9vP4vqe0bQE_dGZNxWFAAKbRwACL9dxSXTQhtO8GhvXOwQ",
-    "content_type": "beat",
+    "content_type": "remix",
     "file_unique_id": "AgADm0cAAi_XcUk",
     "classification_confidence": 0.7
   },
@@ -2430,11 +2430,11 @@
     ],
     "post_url": "https://t.me/iiiplfiii/245",
     "bpm": 92,
-    "key": "-",
+    "key": "Dm",
     "file_id": "CQACAgIAAx0Cb_cPkAAD9WnTCi6GsIeE9kWSBxOPKczZsfHlAAJeXAACUcHhSsgfeNEaeKdwOwQ",
     "content_type": "beat",
     "file_unique_id": "AgADXlwAAlHB4Uo",
-    "classification_confidence": 1.0
+    "classification_confidence": 0.95
   },
   {
     "id": 3881713,
