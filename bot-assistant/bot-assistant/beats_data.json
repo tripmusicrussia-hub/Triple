@@ -860,7 +860,7 @@
     "tags": [],
     "post_url": "https://t.me/iiiplfiii/115",
     "bpm": 144,
-    "key": "-",
+    "key": "D#m",
     "file_id": "CQACAgIAAx0Cb_cPkAADc2nTCe7-KyKTIuKbLSGrk037j8PRAAKiTQAC-G_hSMmvEEQXU10QOwQ",
     "content_type": "beat",
     "file_unique_id": "AgADok0AAvhv4Ug",
@@ -1541,11 +1541,11 @@
     ],
     "post_url": "https://t.me/iiiplfiii/168",
     "bpm": 92,
-    "key": "-",
+    "key": "Cm",
     "file_id": "CQACAgIAAx0Cb_cPkAADqGnTCgmd89WYXHkV9uHlNll9ny0_AAIlWgACfyz5SnX8Ft3-x9fIOwQ",
     "content_type": "beat",
     "file_unique_id": "AgADJVoAAn8s-Uo",
-    "classification_confidence": 0.7
+    "classification_confidence": 0.95
   },
   {
     "id": 4061296,
@@ -1930,11 +1930,11 @@
     ],
     "post_url": "https://t.me/iiiplfiii/201",
     "bpm": 108,
-    "key": "-",
+    "key": "Cm",
     "file_id": "CQACAgIAAx0Cb_cPkAADyWnTChqDr2ElplZUEnpDhqqPdgqVAAKMVQACfCWQSPT3khG1A_HYOwQ",
     "content_type": "beat",
     "file_unique_id": "AgADjFUAAnwlkEg",
-    "classification_confidence": 1.0
+    "classification_confidence": 0.95
   },
   {
     "id": 8777514,
@@ -2049,11 +2049,11 @@
     ],
     "post_url": "https://t.me/iiiplfiii/210",
     "bpm": 103,
-    "key": "-",
+    "key": "C#m",
     "file_id": "CQACAgIAAx0Cb_cPkAAD0mnTCh5cRTXjIMr6--pCpscFaDazAAIhVAACsyJBSReC3lSoZT-4OwQ",
     "content_type": "beat",
     "file_unique_id": "AgADIVQAArMiQUk",
-    "classification_confidence": 1.0
+    "classification_confidence": 0.95
   },
   {
     "id": 5248064,
@@ -2079,7 +2079,7 @@
     ],
     "post_url": "https://t.me/iiiplfiii/214",
     "bpm": 156,
-    "key": "D#m",
+    "key": "Cm",
     "file_id": "CQACAgIAAx0Cb_cPkAAD1mnTCiB-NteDxCdeYwhUos7hqi82AAJuWQACAbWASfyRpbqt0kRXOwQ",
     "content_type": "beat",
     "file_unique_id": "AgADblkAAgG1gEk",
@@ -2997,7 +2997,7 @@
     "bpm": 92,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAACAR5p0wpC11ioJC2yVg5y3zag60w0MQACK3QAAi3EYUgzD6z5ttGefDsE",
-    "content_type": "beat",
+    "content_type": "remix",
     "file_unique_id": "AgADK3QAAi3EYUg",
     "classification_confidence": 1.0
   },
