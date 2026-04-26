@@ -572,7 +572,7 @@ def kb_main_menu(user_id: int | None = None):
         [InlineKeyboardButton(f"🎤 Треки ({tracks})", callback_data="menu_track"),
          InlineKeyboardButton(f"🔀 Ремиксы ({remixes})", callback_data="menu_remix")],
         [InlineKeyboardButton("📦 Kits & Packs", callback_data="menu_products")],
-        [InlineKeyboardButton(f"🎛 Сведение треков ({licensing.PRICE_MIX_RUB}₽)", callback_data="menu_mixing")],
+        [InlineKeyboardButton(f"🎛 Сведение трека под ключ — {licensing.PRICE_MIX_RUB}₽", callback_data="menu_mixing")],
         [InlineKeyboardButton(cart_label, callback_data="cart_show")],
         [InlineKeyboardButton("ℹ️ Услуги и цены", callback_data="menu_services")],
         # Quick-filter chips — быстрый доступ к популярным сценам / mood
@@ -2761,12 +2761,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Готовые наборы ударных, сэмплов, лупов для продюсеров. После оплаты — "
             "zip-файл мгновенно в ЛС. Смотри каталог «📦 Kits &amp; Packs» в меню.\n\n"
 
-            f"🎛 <b>Сведение треков (mixing + mastering) — "
+            f"🎛 <b>Сведение треков · mix + master под ключ — "
             f"{licensing.PRICE_MIX_STARS}⭐ / {licensing.PRICE_MIX_USDT:g} USDT / {licensing.PRICE_MIX_RUB}₽</b>\n"
-            "Готовый master-файл твоего трека за 3-5 рабочих дней.\n"
-            "• Что ты присылаешь: стемы WAV (вокал, биты, инструменты отдельно)\n"
-            "• Что получаешь: mix-mastered WAV (24-bit, -14 LUFS для стримов)\n"
-            "• Оплата сначала в боте → потом стемы в DM @iiiplfiii\n"
+            "Готовый master за 3-5 рабочих дней. Делаю как для себя.\n"
+            "• Присылаешь: стемы WAV (24-bit, отдельные дорожки) + референс\n"
+            "• Получаешь: master -9 dBTP, готовый под Spotify/Apple/YouTube\n"
+            "• Правки без ограничений — пока не скажешь «огонь»\n"
+            "• Не зашло — возврат денег без вопросов\n"
+            "• 🎁 Первые 5 клиентов — free MP3 lease на любой бит из каталога\n"
             "Заказать: кнопка «🎛 Сведение треков» в главном меню.\n\n"
 
             "<b>Как купить</b>\n"
@@ -2790,27 +2792,33 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "menu_mixing":
         # Mixing service: отдельный товар (не бит). Покупка через Stars/USDT/RUB,
         # после оплаты — клиент высылает стемы в DM @iiiplfiii.
+        # Тон: «свой человек, делаю для души» — клиентов мало, нужно завлечь,
+        # никаких лимитов на правки, явный «pre-mix listen» (бесплатное
+        # прослушивание стемов до оплаты).
         text = (
-            "<b>🎛 Сведение треков (mix + master)</b>\n\n"
-            f"<b>Цена: {licensing.PRICE_MIX_STARS}⭐ / {licensing.PRICE_MIX_USDT:g} USDT / "
-            f"{licensing.PRICE_MIX_RUB}₽</b> за 1 трек «под ключ»\n\n"
+            "<b>🎛 Сведение треков · mix + master под ключ</b>\n\n"
+            f"<b>{licensing.PRICE_MIX_STARS}⭐ / {licensing.PRICE_MIX_USDT:g} USDT / "
+            f"{licensing.PRICE_MIX_RUB}₽</b> за трек\n\n"
 
-            "<b>Что входит:</b>\n"
-            "• Сведение (балансы, панорама, компрессия, EQ, эффекты)\n"
-            "• Мастеринг (loudness −14 LUFS для стримов, пиковая −1 dBTP)\n"
-            "• 1 ревизия правок если что-то нужно подправить\n\n"
+            "<b>🎚 Что делаю:</b>\n"
+            "• Mix: балансы, панорама, EQ, компрессия, эффекты — звук как у топов\n"
+            "• Master: -9 dBTP, готовый под Spotify / Apple Music / YouTube / DSP\n"
+            "• Доделываю пока ты не скажешь «огонь» — правки без ограничений\n"
+            "• Если не зашло — возврат денег без вопросов\n\n"
 
-            "<b>Срок:</b> 3-5 рабочих дней с момента получения стемов.\n\n"
+            "<b>📦 Что от тебя:</b>\n"
+            "• Стемы WAV (24-bit) — каждая дорожка отдельным файлом\n"
+            "• Референс-трек или ссылка — на что ориентируемся\n"
+            "• 2 строки ТЗ: жанр, mood, что важно\n\n"
 
-            "<b>Что от тебя:</b>\n"
-            "1. Оплатить заказ (кнопки ниже)\n"
-            "2. Прислать в DM @iiiplfiii:\n"
-            "   — стемы в формате WAV (24-bit, 44.1 kHz)\n"
-            "   — референс-трек (на что ориентируемся)\n"
-            "   — краткое ТЗ: жанр, акценты, пожелания\n\n"
+            "<b>⏱ Срок:</b> 3-5 рабочих дней с момента получения стемов.\n\n"
 
-            "<b>Что получаешь:</b> готовый master WAV + ревизия в цене.\n\n"
-            "<i>Вопросы до оплаты — пиши @iiiplfiii</i>"
+            "<b>🎁 Бонусы:</b>\n"
+            "• Перед оплатой можешь прислать 30-сек кусок — оценю стемы и скажу что выйдет\n"
+            "• Первые 5 клиентов — даю free MP3 lease на любой бит из каталога\n"
+            "• Постоянным клиентам — каждое 4-е сведение со скидкой 30%\n\n"
+
+            "<i>Вопросы — @iiiplfiii. Делаю как для себя, иначе не отдам.</i>"
         )
         rows = [
             [InlineKeyboardButton(f"⭐ {licensing.PRICE_MIX_STARS}", callback_data="buy_mix_stars"),
@@ -2828,9 +2836,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=user_id,
                 title="🎛 Сведение трека"[:32],
                 description=(
-                    f"Mix + master твоего трека за 3-5 рабочих дней. "
-                    f"После оплаты пришли стемы WAV в DM @iiiplfiii. "
-                    f"Готовый master WAV + 1 ревизия в цене."
+                    f"Mix + master под ключ за 3-5 рабочих дней. "
+                    f"-9 dBTP, готовый master WAV под DSP. Правки без ограничений. "
+                    f"Не зашло — возврат денег."
                 )[:255],
                 payload="mixing_service:stars",
                 provider_token="",
@@ -4769,15 +4777,15 @@ async def _deliver_mixing_service(bot, user, *, payment_charge_id: str,
     try:
         await bot.send_message(
             user.id,
-            "✅ <b>Оплата получена, заказ на сведение оформлен!</b>\n\n"
-            "<b>Что делать дальше:</b>\n"
-            "1. Напиши в ЛС @iiiplfiii «пришёл на сведение» — я свяжусь с тобой\n"
+            "✅ <b>Оплата получена, беру в работу!</b>\n\n"
+            "<b>Что дальше:</b>\n"
+            "1. Напиши в ЛС @iiiplfiii «пришёл на сведение»\n"
             "2. Пришли:\n"
-            "   • Стемы WAV (24-bit, 44.1 kHz) — вокал, биты, инструменты отдельными файлами\n"
-            "   • Референс-трек (ссылку на Spotify / YT / как звучать)\n"
-            "   • Краткое ТЗ: жанр, желаемая громкость, акценты\n"
-            "3. Через 3-5 рабочих дней → готовый master WAV\n"
-            "4. Если нужны правки — 1 ревизия в цене\n\n"
+            "   • Стемы WAV (24-bit) — каждая дорожка отдельным файлом\n"
+            "   • Референс-трек (Spotify / YT / SoundCloud)\n"
+            "   • 2 строки ТЗ: жанр, mood, что важно\n"
+            "3. Через 3-5 рабочих дней → готовый master (-9 dBTP, под DSP)\n"
+            "4. Правки — без ограничений, доделаем пока не зайдёт\n\n"
             f"<i>Номер заказа: {payment_charge_id[:16]}...</i>",
             parse_mode="HTML",
         )
