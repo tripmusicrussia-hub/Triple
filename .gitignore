@@ -71,3 +71,7 @@ Thumbs.db
 .vscode/
 .idea/
 bot-assistant/bot-assistant/post_events.jsonl
+# Bundle carts — корзины юзеров (session-state). Пропадают при redeploy — OK.
+# НЕ пушим в git: каждое изменение корзины вызывает Render re-deploy loop.
+bot-assistant/bot-assistant/bundle_carts.json
+bot-assistant/bot-assistant/bundle_carts.json.tmp
