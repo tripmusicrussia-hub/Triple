@@ -42,6 +42,71 @@ def get_yt_client():
     return build("youtube", "v3", credentials=creds, cache_discovery=False)
 
 
+def list_channel_videos(max_results: int = 200) -> list[dict]:
+    """Получает все видео канала через uploads playlist (paginated).
+
+    Возвращает list dict с полями: video_id, title, published_at, thumbnail_url.
+    Per-video stats не включены (тяжело — отдельный get_video_stats для них).
+
+    `max_results` — soft limit. Каждая страница = 50 items + 1 quota unit.
+    """
+    yt = get_yt_client()
+    # 1) Get my channel's uploads playlist id
+    ch = yt.channels().list(part="contentDetails", mine=True).execute()
+    uploads_pl = ch["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
+
+    # 2) Pagination через playlistItems().list
+    items = []
+    page_token = None
+    while True:
+        resp = yt.playlistItems().list(
+            part="snippet,contentDetails",
+            playlistId=uploads_pl,
+            maxResults=50,
+            pageToken=page_token,
+        ).execute()
+        for it in resp.get("items", []):
+            sn = it.get("snippet", {})
+            cd = it.get("contentDetails", {})
+            items.append({
+                "video_id": cd.get("videoId") or sn.get("resourceId", {}).get("videoId"),
+                "title": sn.get("title", ""),
+                "published_at": cd.get("videoPublishedAt") or sn.get("publishedAt", ""),
+                "thumbnail_url": (sn.get("thumbnails") or {}).get("medium", {}).get("url", ""),
+            })
+            if len(items) >= max_results:
+                return items
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return items
+
+
+def get_videos_stats(video_ids: list[str]) -> dict[str, dict]:
+    """Batch get statistics для list video_ids. YT API позволяет до 50 за раз.
+
+    Returns: { video_id: {views, likes, comments, duration_iso} }
+    """
+    yt = get_yt_client()
+    out = {}
+    for i in range(0, len(video_ids), 50):
+        batch = video_ids[i:i + 50]
+        resp = yt.videos().list(
+            part="statistics,contentDetails",
+            id=",".join(batch),
+        ).execute()
+        for v in resp.get("items", []):
+            stats = v.get("statistics", {})
+            cd = v.get("contentDetails", {})
+            out[v["id"]] = {
+                "views": int(stats.get("viewCount", 0)),
+                "likes": int(stats.get("likeCount", 0)),
+                "comments": int(stats.get("commentCount", 0)),
+                "duration_iso": cd.get("duration", ""),
+            }
+    return out
+
+
 def update_video(
     video_id: str,
     title: str,

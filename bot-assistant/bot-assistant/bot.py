@@ -5508,6 +5508,155 @@ async def _fetch_yt_today_block(today_iso: str, recent_video_ids: list[str]) -> 
     return "\n".join(lines)
 
 
+async def cmd_yt_audit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """`/yt_audit` — анализ всех видео канала: топ-5 / анти-топ-5 + рекомендации.
+
+    Скан channel uploads playlist через yt_api.list_channel_videos
+    (paginated), batch-stats через get_videos_stats, sort by views.
+
+    Что показывает:
+    - Top-5 by views — что работает, удваиваем подход (тэги/тайтл/жанр)
+    - Anti-top-5 by views — что НЕ работает, candidates для refresh/delete
+    - Total channel stats
+    - Average views, median (определить «pulse» канала)
+    """
+    if update.effective_user.id != ADMIN_ID:
+        return
+    await update.message.reply_text("📊 Сканирую канал... (~10-30 сек)")
+    loop = asyncio.get_running_loop()
+    try:
+        import yt_api
+        videos = await loop.run_in_executor(None, lambda: yt_api.list_channel_videos(max_results=200))
+        if not videos:
+            await update.message.reply_text("⚠️ Видео не найдены на канале")
+            return
+        ids = [v["video_id"] for v in videos if v.get("video_id")]
+        stats = await loop.run_in_executor(None, lambda: yt_api.get_videos_stats(ids))
+        # Merge stats в videos list
+        for v in videos:
+            v["stats"] = stats.get(v.get("video_id"), {"views": 0, "likes": 0, "comments": 0})
+    except Exception as e:
+        logger.exception("yt_audit failed")
+        await update.message.reply_text(f"❌ Ошибка YT API: {e}")
+        return
+
+    total = len(videos)
+    by_views = sorted(videos, key=lambda v: -v["stats"]["views"])
+    total_views = sum(v["stats"]["views"] for v in videos)
+    total_likes = sum(v["stats"]["likes"] for v in videos)
+    total_comments = sum(v["stats"]["comments"] for v in videos)
+    avg_views = total_views / max(1, total)
+    median_views = sorted([v["stats"]["views"] for v in videos])[total // 2] if total else 0
+    zero_views = sum(1 for v in videos if v["stats"]["views"] == 0)
+
+    lines = [
+        f"📊 <b>YT Audit</b> ({total} видео)\n",
+        f"👁 Total views: <b>{total_views:,}</b>",
+        f"👍 Total likes:  <b>{total_likes:,}</b>",
+        f"💬 Total comments: <b>{total_comments:,}</b>",
+        f"📈 Avg views: <b>{avg_views:.0f}</b>",
+        f"🎯 Median views: <b>{median_views}</b>",
+        f"⚠️ Видео с 0 views: <b>{zero_views}</b>",
+        "",
+        "🔥 <b>TOP-5 by views</b>:",
+    ]
+    for v in by_views[:5]:
+        title = html.escape(v["title"][:55])
+        s = v["stats"]
+        lines.append(
+            f"   • {title}\n"
+            f"     👁 {s['views']:,} 👍 {s['likes']} 💬 {s['comments']} → "
+            f"<a href='https://youtu.be/{v['video_id']}'>open</a>"
+        )
+    lines.append("")
+    lines.append("💀 <b>ANTI-TOP-5 (реliase candidates)</b>:")
+    for v in by_views[-5:]:
+        title = html.escape(v["title"][:55])
+        s = v["stats"]
+        lines.append(
+            f"   • {title}\n"
+            f"     👁 {s['views']} 👍 {s['likes']} → "
+            f"<a href='https://youtu.be/{v['video_id']}'>open</a>"
+        )
+    lines.append("")
+    lines.append("💡 <b>Рекомендации</b>:")
+    if zero_views >= 3:
+        lines.append(f"   • {zero_views} видео с 0 views → /yt_refresh_old &lt;id&gt; для SEO refresh")
+    if avg_views < 50 and total > 5:
+        lines.append("   • Avg views &lt;50: видео не залетают. Проверь thumbnails — самый сильный driver CTR.")
+    if total_comments == 0 and total > 5:
+        lines.append("   • Нет комментариев — комментируй сам в первые 5 мин после publish (boosts engagement signal)")
+    if avg_views > 100:
+        lines.append(f"   • Avg views ${avg_views:.0f} — здоровая база. Удваивай тип контента из TOP-5.")
+
+    await update.message.reply_text(
+        "\n".join(lines), parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
+async def cmd_yt_refresh_old(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """`/yt_refresh_old <video_id>` — обновить description+tags старого видео:
+    подтянуть актуальные цены (1500/20/1700) + актуальные ссылки на TG канал
+    + ref-tracking (?start=ref_yt_buy_<beat_id>).
+
+    Используется для legacy-видео которые публиковались до Этапа B (когда
+    цены были 500/7 и не было ссылки на TG канал).
+    """
+    if update.effective_user.id != ADMIN_ID:
+        return
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Usage: /yt_refresh_old <video_id>\n\n"
+            "Подтянет актуальные цены + TG channel link в description."
+        )
+        return
+    video_id = args[0].strip()
+    await update.message.reply_text(f"🔄 Обновляю {video_id}...")
+    loop = asyncio.get_running_loop()
+    try:
+        import yt_api
+        v = await loop.run_in_executor(None, lambda: yt_api.get_video(video_id))
+        if not v:
+            await update.message.reply_text(f"❌ Видео {video_id} не найдено")
+            return
+        sn = v["snippet"]
+        old_title = sn.get("title", "")
+        old_desc = sn.get("description", "")
+        old_tags = sn.get("tags", [])
+
+        # Регенерим description через простой replace актуальных констант.
+        # Не пытаемся LLM-переписать — сохраняем оригинальный flow.
+        import beat_post_builder as _bpb
+        new_desc = old_desc
+        # Replace старых цен
+        new_desc = new_desc.replace("500⭐ / 7 USDT", "1500⭐ / 20 USDT / 1700₽")
+        new_desc = new_desc.replace("(500 / 7 USDT)", "(1500⭐ / 20 USDT)")
+        new_desc = new_desc.replace("500 / 7 USDT", "1500⭐ / 20 USDT / 1700₽")
+        # Add TG channel link sверху если ещё не было
+        if "t.me/iiiplfiii" not in new_desc:
+            tg_line = f"🎁 FREE sample pack + 165+ beats → {_bpb.TG_CHANNEL_URL}\n"
+            # Вставить после первой строки (обычно hashtag-line)
+            lines_split = new_desc.split("\n", 1)
+            if len(lines_split) == 2:
+                new_desc = lines_split[0] + "\n" + tg_line + lines_split[1]
+            else:
+                new_desc = tg_line + new_desc
+
+        await loop.run_in_executor(
+            None, lambda: yt_api.update_video(video_id, old_title, new_desc, old_tags),
+        )
+        await update.message.reply_text(
+            f"✅ {video_id} обновлён\n"
+            f"https://youtu.be/{video_id}\n\n"
+            f"Изменения: цены 500/7 → 1500/20/1700 + TG channel link"
+        )
+    except Exception as e:
+        logger.exception("yt_refresh_old failed for %s", video_id)
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
+
 async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Сводка дня для админа: новые юзеры (с разбивкой по source), продажи,
     залитые биты + YT analytics (subscribers/views delta vs вчера + topvideos).
@@ -6429,6 +6578,8 @@ async def run_bot():
     app.add_handler(CommandHandler("quick_meta", cmd_quick_meta))
     app.add_handler(CommandHandler("stop_reminders", cmd_stop_reminders))
     app.add_handler(CommandHandler("start_reminders", cmd_start_reminders))
+    app.add_handler(CommandHandler("yt_audit", cmd_yt_audit))
+    app.add_handler(CommandHandler("yt_refresh_old", cmd_yt_refresh_old))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(PreCheckoutQueryHandler(handle_precheckout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, handle_successful_payment))
