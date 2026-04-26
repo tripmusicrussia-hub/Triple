@@ -777,6 +777,13 @@ def kb_after_beat(beat_id, content_type="beat", user_id: int | None = None):
         ])
     rows.append([InlineKeyboardButton("❤️ В избранное", callback_data="fav_" + str(beat_id)),
                  InlineKeyboardButton("🎲 Случайный", callback_data="random_beat")])
+    # Admin-only: reclassify (beat/track/remix). Скрыта для обычных юзеров —
+    # они её не должны видеть. user_id is None → не показываем.
+    if user_id is not None and user_id == ADMIN_ID:
+        rows.append([InlineKeyboardButton(
+            f"🛠 Сменить тип (сейчас: {content_type})",
+            callback_data=f"admin_reclass_{beat_id}",
+        )])
     rows.append([InlineKeyboardButton("◀️ Меню", callback_data=back_map.get(content_type, "main_menu"))])
     return InlineKeyboardMarkup(rows)
 
@@ -3494,10 +3501,38 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _send_quick_meta_card(bot, query.message.chat_id, user_id)
         return
 
+    if data.startswith("qm_set_type:"):
+        # Меняем content_type — запись больше не выпадает в quick_meta-фильтре
+        # (он ловит только content_type='beat'/default). Поддержка типов:
+        # 'track' (готовый трек), 'remix' (ремикс существующего бита).
+        if user_id != ADMIN_ID:
+            await query.answer()
+            return
+        try:
+            _, bid_s, new_type = data.split(":", 2)
+            bid = int(bid_s)
+        except Exception:
+            await query.answer("⚠️ bad payload", show_alert=True)
+            return
+        if new_type not in ("track", "remix", "beat"):
+            await query.answer("⚠️ unknown type", show_alert=True)
+            return
+        for b in beats_db.BEATS_CACHE:
+            if b.get("id") == bid:
+                b["content_type"] = new_type
+                break
+        try:
+            beats_db.save_beats()
+        except Exception:
+            logger.exception("qm_set_type: save_beats failed")
+        labels = {"track": "🎤 трек", "remix": "🔀 ремикс", "beat": "🎹 бит"}
+        await query.answer(f"✅ помечен как {labels[new_type]}")
+        await _send_quick_meta_card(bot, query.message.chat_id, user_id)
+        return
+
+    # Backwards-compat: старая кнопка «qm_not_beat» (на старых сообщениях бота
+    # которые ещё в чате). Treat as 'track' — то же поведение что было.
     if data.startswith("qm_not_beat:"):
-        # Помечаем content_type='track' чтобы запись больше не выпадала в
-        # quick_meta-фильтре (он ловит только content_type='beat'/default).
-        # Используется когда юзер услышал что это финальный трек, а не type beat.
         if user_id != ADMIN_ID:
             await query.answer()
             return
@@ -3516,6 +3551,93 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.exception("qm_not_beat: save_beats failed")
         await query.answer("🚫 помечен как трек, больше не появится")
         await _send_quick_meta_card(bot, query.message.chat_id, user_id)
+        return
+
+    # Reclassify бита из обычной карточки (admin only). Открывает menu выбора
+    # нового типа: beat / track / remix.
+    if data.startswith("admin_reclass_"):
+        if user_id != ADMIN_ID:
+            await query.answer()
+            return
+        try:
+            bid = int(data[len("admin_reclass_"):])
+        except ValueError:
+            await query.answer()
+            return
+        beat = beats_db.get_beat_by_id(bid)
+        if not beat:
+            await query.answer("Не найден", show_alert=True)
+            return
+        cur = beat.get("content_type", "beat")
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                f"🎹 Бит {'(текущий)' if cur == 'beat' else ''}",
+                callback_data=f"admin_reclass_set_{bid}_beat",
+            )],
+            [InlineKeyboardButton(
+                f"🎤 Трек {'(текущий)' if cur == 'track' else ''}",
+                callback_data=f"admin_reclass_set_{bid}_track",
+            )],
+            [InlineKeyboardButton(
+                f"🔀 Ремикс {'(текущий)' if cur == 'remix' else ''}",
+                callback_data=f"admin_reclass_set_{bid}_remix",
+            )],
+            [InlineKeyboardButton("❌ Отмена", callback_data="admin_reclass_cancel")],
+        ])
+        try:
+            await bot.send_message(
+                user_id,
+                f"🛠 Reclassify <b>{html.escape(beat.get('name') or '?')}</b> "
+                f"(id={bid}, текущий тип: <code>{cur}</code>):",
+                parse_mode="HTML", reply_markup=kb,
+            )
+            await query.answer()
+        except TelegramError:
+            await query.answer("Ошибка UI", show_alert=True)
+        return
+
+    if data == "admin_reclass_cancel":
+        try:
+            await query.message.edit_text("❌ Reclassify отменён.")
+        except TelegramError:
+            pass
+        return
+
+    if data.startswith("admin_reclass_set_"):
+        if user_id != ADMIN_ID:
+            await query.answer()
+            return
+        try:
+            _, _, _, bid_s, new_type = data.split("_", 4)
+            bid = int(bid_s)
+        except Exception:
+            await query.answer("⚠️ bad payload", show_alert=True)
+            return
+        if new_type not in ("beat", "track", "remix"):
+            await query.answer("⚠️ unknown type", show_alert=True)
+            return
+        beat = beats_db.get_beat_by_id(bid)
+        if not beat:
+            await query.answer("Не найден", show_alert=True)
+            return
+        old_type = beat.get("content_type", "beat")
+        for b in beats_db.BEATS_CACHE:
+            if b.get("id") == bid:
+                b["content_type"] = new_type
+                break
+        try:
+            beats_db.save_beats()
+        except Exception:
+            logger.exception("admin_reclass_set: save_beats failed")
+        labels = {"beat": "🎹 бит", "track": "🎤 трек", "remix": "🔀 ремикс"}
+        try:
+            await query.message.edit_text(
+                f"✅ <b>{html.escape(beat.get('name') or '?')}</b> · "
+                f"<code>{old_type}</code> → <code>{new_type}</code> ({labels[new_type]})",
+                parse_mode="HTML",
+            )
+        except TelegramError:
+            pass
         return
 
     if data == "qm_stop":
@@ -5602,7 +5724,8 @@ def _kb_quick_meta_minor(beat_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("🛑 Stop", callback_data="qm_stop"),
     ])
     rows.append([
-        InlineKeyboardButton("🚫 Не бит (трек/ремикс)", callback_data=f"qm_not_beat:{beat_id}"),
+        InlineKeyboardButton("🎤 Это трек", callback_data=f"qm_set_type:{beat_id}:track"),
+        InlineKeyboardButton("🔀 Это ремикс", callback_data=f"qm_set_type:{beat_id}:remix"),
     ])
     return InlineKeyboardMarkup(rows)
 
@@ -5621,7 +5744,8 @@ def _kb_quick_meta_major(beat_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("🛑 Stop", callback_data="qm_stop"),
     ])
     rows.append([
-        InlineKeyboardButton("🚫 Не бит (трек/ремикс)", callback_data=f"qm_not_beat:{beat_id}"),
+        InlineKeyboardButton("🎤 Это трек", callback_data=f"qm_set_type:{beat_id}:track"),
+        InlineKeyboardButton("🔀 Это ремикс", callback_data=f"qm_set_type:{beat_id}:remix"),
     ])
     return InlineKeyboardMarkup(rows)
 
