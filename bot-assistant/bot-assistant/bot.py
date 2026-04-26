@@ -224,6 +224,14 @@ _yk_creating_payment: set[int] = set()
 # token'ы которые сейчас строятся; повторный клик отменяется alert'ом.
 _building_shorts: set[str] = set()
 
+# Bundle FSM state: user_id → {"anchor": int, "selected": list[int], "page": int}.
+# In-memory only — короткий FSM, потеря при redeploy = юзер кликает «🎁» снова.
+# anchor = бит из карточки которой юзер кликнул «🎁 3 бита». selected = ровно
+# 2 других бита для bundle. page — пагинация по каталогу (10 битов на страницу).
+bundle_selection: dict[int, dict] = {}
+BUNDLE_TOTAL = 3        # сколько битов в bundle (anchor + selected)
+BUNDLE_PAGE_SIZE = 10   # битов на странице picker'а
+
 # Lock на все mutation'ы pending / delivered / in_flight. Lazy-init потому что
 # asyncio.Lock() требует running loop (в старых Python). Создаётся в post_init.
 _yk_lock: asyncio.Lock | None = None
@@ -685,6 +693,108 @@ def kb_channel_beat_buy(beat_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💎 WAV / Unlimited / Exclusive", callback_data="excl_" + str(beat_id))],
     ]
     return InlineKeyboardMarkup(rows)
+
+
+# ── Bundle picker UI ─────────────────────────────────────────
+
+def _bundle_eligible_beats(exclude_ids: set[int]) -> list[dict]:
+    """Биты-кандидаты для bundle: только beat content_type, есть file_id, не из exclude_ids.
+
+    Сортировка по id desc — последние загруженные сверху (свежее = интереснее).
+    """
+    out = []
+    for b in beats_db.BEATS_CACHE:
+        if b.get("content_type", "beat") != "beat":
+            continue
+        if not b.get("file_id"):
+            continue
+        if int(b.get("id", 0)) in exclude_ids:
+            continue
+        out.append(b)
+    out.sort(key=lambda x: int(x.get("id", 0)), reverse=True)
+    return out
+
+
+def kb_bundle_picker(user_id: int) -> InlineKeyboardMarkup:
+    """Picker для выбора `BUNDLE_TOTAL - 1` дополнительных битов к anchor'у.
+
+    Каждый бит — кнопка с ✅/⬜ префиксом. Внизу: counter + Confirm/Cancel + nav.
+    """
+    state = bundle_selection.get(user_id) or {}
+    anchor_id = int(state.get("anchor", 0))
+    selected: list[int] = list(state.get("selected", []))
+    page: int = int(state.get("page", 0))
+    candidates = _bundle_eligible_beats(exclude_ids={anchor_id})
+
+    start = page * BUNDLE_PAGE_SIZE
+    end = start + BUNDLE_PAGE_SIZE
+    page_beats = candidates[start:end]
+
+    rows: list[list[InlineKeyboardButton]] = []
+    need_more = max(0, (BUNDLE_TOTAL - 1) - len(selected))
+
+    for b in page_beats:
+        bid = int(b["id"])
+        is_picked = bid in selected
+        marker = "✅" if is_picked else "⬜"
+        # Имя обрезаем до 36 символов чтобы кнопка влазила.
+        name = (b.get("name") or "?")[:36]
+        bpm = b.get("bpm") or "?"
+        label = f"{marker} {name} · {bpm}"
+        action = "bundle_unpick_" if is_picked else "bundle_pick_"
+        rows.append([InlineKeyboardButton(label, callback_data=action + str(bid))])
+
+    # Пагинация
+    nav_row: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("◀️ Назад", callback_data="bundle_page_" + str(page - 1)))
+    if end < len(candidates):
+        nav_row.append(InlineKeyboardButton("Ещё ▶️", callback_data="bundle_page_" + str(page + 1)))
+    if nav_row:
+        rows.append(nav_row)
+
+    # Footer: counter + confirm + cancel
+    counter_label = f"Выбрано {len(selected)}/{BUNDLE_TOTAL - 1}"
+    if need_more == 0:
+        rows.append([InlineKeyboardButton(
+            f"✅ Купить 3 бита · {licensing.PRICE_BUNDLE3_RUB}₽",
+            callback_data="bundle_confirm",
+        )])
+    else:
+        rows.append([InlineKeyboardButton(counter_label, callback_data="bundle_noop")])
+    rows.append([InlineKeyboardButton("❌ Отмена", callback_data="bundle_cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
+def kb_bundle_pay() -> InlineKeyboardMarkup:
+    """3 кнопки оплаты для подтверждённого bundle: Stars / USDT / RUB."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"⭐ {licensing.PRICE_BUNDLE3_STARS}", callback_data="bundle_pay_stars"),
+         InlineKeyboardButton(f"💵 {licensing.PRICE_BUNDLE3_USDT:g} USDT", callback_data="bundle_pay_usdt")],
+        [InlineKeyboardButton(f"💳 {licensing.PRICE_BUNDLE3_RUB}₽ (MIR/СБП)", callback_data="bundle_pay_rub")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="bundle_cancel")],
+    ])
+
+
+def _bundle_anchor_and_selected(user_id: int) -> tuple[dict, list[dict]] | None:
+    """Возвращает (anchor_beat, selected_beats[2]) или None если state невалидный."""
+    state = bundle_selection.get(user_id)
+    if not state:
+        return None
+    anchor_id = int(state.get("anchor", 0))
+    selected_ids = [int(x) for x in state.get("selected", [])]
+    if len(selected_ids) != BUNDLE_TOTAL - 1:
+        return None
+    anchor = beats_db.get_beat_by_id(anchor_id)
+    if not anchor:
+        return None
+    selected_beats = []
+    for bid in selected_ids:
+        b = beats_db.get_beat_by_id(bid)
+        if not b:
+            return None
+        selected_beats.append(b)
+    return anchor, selected_beats
 
 
 def kb_admin():
@@ -2803,6 +2913,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _send_quick_meta_card(bot, query.message.chat_id, user_id)
         return
 
+    if data.startswith("qm_not_beat:"):
+        # Помечаем content_type='track' чтобы запись больше не выпадала в
+        # quick_meta-фильтре (он ловит только content_type='beat'/default).
+        # Используется когда юзер услышал что это финальный трек, а не type beat.
+        if user_id != ADMIN_ID:
+            await query.answer()
+            return
+        try:
+            bid = int(data.split(":", 1)[1])
+        except Exception:
+            await query.answer("⚠️ bad payload", show_alert=True)
+            return
+        for b in beats_db.BEATS_CACHE:
+            if b.get("id") == bid:
+                b["content_type"] = "track"
+                break
+        try:
+            beats_db.save_beats()
+        except Exception:
+            logger.exception("qm_not_beat: save_beats failed")
+        await query.answer("🚫 помечен как трек, больше не появится")
+        await _send_quick_meta_card(bot, query.message.chat_id, user_id)
+        return
+
     if data == "qm_stop":
         if user_id != ADMIN_ID:
             await query.answer()
@@ -4698,6 +4832,9 @@ def _kb_quick_meta_minor(beat_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("⏭ Skip", callback_data=f"qm_skip:{beat_id}"),
         InlineKeyboardButton("🛑 Stop", callback_data="qm_stop"),
     ])
+    rows.append([
+        InlineKeyboardButton("🚫 Не бит (трек/ремикс)", callback_data=f"qm_not_beat:{beat_id}"),
+    ])
     return InlineKeyboardMarkup(rows)
 
 
@@ -4713,6 +4850,9 @@ def _kb_quick_meta_major(beat_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("← Минор", callback_data=f"qm_minor:{beat_id}"),
         InlineKeyboardButton("⏭ Skip", callback_data=f"qm_skip:{beat_id}"),
         InlineKeyboardButton("🛑 Stop", callback_data="qm_stop"),
+    ])
+    rows.append([
+        InlineKeyboardButton("🚫 Не бит (трек/ремикс)", callback_data=f"qm_not_beat:{beat_id}"),
     ])
     return InlineKeyboardMarkup(rows)
 
