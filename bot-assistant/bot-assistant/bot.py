@@ -743,12 +743,11 @@ def kb_main_menu(user_id: int | None = None):
         [InlineKeyboardButton(f"🎤 Треки ({tracks})", callback_data="menu_track"),
          InlineKeyboardButton(f"🔀 Ремиксы ({remixes})", callback_data="menu_remix")],
         [InlineKeyboardButton("📦 Kits & Packs", callback_data="menu_products")],
-        [InlineKeyboardButton("🎛 Сведение трека под ключ", callback_data="menu_mixing")],
+        [InlineKeyboardButton("ℹ️ Услуги и цены", callback_data="menu_services")],
         [InlineKeyboardButton(
             f"🎁 Пригласить друга → -{licensing.REFERRAL_PCT}% обоим",
             callback_data="invite_friend",
         )],
-        [InlineKeyboardButton("ℹ️ Услуги и цены", callback_data="menu_services")],
         [InlineKeyboardButton("❤️ Избранное", callback_data="my_favorites"),
          InlineKeyboardButton("🔍 Поиск", callback_data="search_prompt")],
     ])
@@ -4011,8 +4010,54 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _send_quick_meta_card(bot, query.message.chat_id, user_id)
         return
 
-    # Reclassify бита из обычной карточки (admin only). Открывает menu выбора
-    # нового типа: beat / track / remix.
+    # Reclassify бита из обычной карточки (admin only). Specific checks
+    # `admin_reclass_set_` и `admin_reclass_cancel` ОБЯЗАНЫ идти ДО общего
+    # `admin_reclass_<id>`, иначе общий проглотит и упадёт на ValueError при
+    # int("set_2983956_track"). Bug fix: bug был в commit 0eca193.
+    if data.startswith("admin_reclass_set_"):
+        if user_id != ADMIN_ID:
+            await query.answer()
+            return
+        try:
+            _, _, _, bid_s, new_type = data.split("_", 4)
+            bid = int(bid_s)
+        except Exception:
+            await query.answer("⚠️ bad payload", show_alert=True)
+            return
+        if new_type not in ("beat", "track", "remix"):
+            await query.answer("⚠️ unknown type", show_alert=True)
+            return
+        beat = beats_db.get_beat_by_id(bid)
+        if not beat:
+            await query.answer("Не найден", show_alert=True)
+            return
+        old_type = beat.get("content_type", "beat")
+        for b in beats_db.BEATS_CACHE:
+            if b.get("id") == bid:
+                b["content_type"] = new_type
+                break
+        try:
+            beats_db.save_beats()
+        except Exception:
+            logger.exception("admin_reclass_set: save_beats failed")
+        labels = {"beat": "🎹 бит", "track": "🎤 трек", "remix": "🔀 ремикс"}
+        try:
+            await query.message.edit_text(
+                f"✅ <b>{html.escape(beat.get('name') or '?')}</b> · "
+                f"<code>{old_type}</code> → <code>{new_type}</code> ({labels[new_type]})",
+                parse_mode="HTML",
+            )
+        except TelegramError:
+            pass
+        return
+
+    if data == "admin_reclass_cancel":
+        try:
+            await query.message.edit_text("❌ Reclassify отменён.")
+        except TelegramError:
+            pass
+        return
+
     if data.startswith("admin_reclass_"):
         if user_id != ADMIN_ID:
             await query.answer()
@@ -4052,50 +4097,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer()
         except TelegramError:
             await query.answer("Ошибка UI", show_alert=True)
-        return
-
-    if data == "admin_reclass_cancel":
-        try:
-            await query.message.edit_text("❌ Reclassify отменён.")
-        except TelegramError:
-            pass
-        return
-
-    if data.startswith("admin_reclass_set_"):
-        if user_id != ADMIN_ID:
-            await query.answer()
-            return
-        try:
-            _, _, _, bid_s, new_type = data.split("_", 4)
-            bid = int(bid_s)
-        except Exception:
-            await query.answer("⚠️ bad payload", show_alert=True)
-            return
-        if new_type not in ("beat", "track", "remix"):
-            await query.answer("⚠️ unknown type", show_alert=True)
-            return
-        beat = beats_db.get_beat_by_id(bid)
-        if not beat:
-            await query.answer("Не найден", show_alert=True)
-            return
-        old_type = beat.get("content_type", "beat")
-        for b in beats_db.BEATS_CACHE:
-            if b.get("id") == bid:
-                b["content_type"] = new_type
-                break
-        try:
-            beats_db.save_beats()
-        except Exception:
-            logger.exception("admin_reclass_set: save_beats failed")
-        labels = {"beat": "🎹 бит", "track": "🎤 трек", "remix": "🔀 ремикс"}
-        try:
-            await query.message.edit_text(
-                f"✅ <b>{html.escape(beat.get('name') or '?')}</b> · "
-                f"<code>{old_type}</code> → <code>{new_type}</code> ({labels[new_type]})",
-                parse_mode="HTML",
-            )
-        except TelegramError:
-            pass
         return
 
     if data == "qm_stop":
