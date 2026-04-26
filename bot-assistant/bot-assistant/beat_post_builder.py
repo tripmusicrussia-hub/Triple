@@ -800,9 +800,15 @@ def build_yt_post(
     beat_id: int | None = None,
     duration_sec: float | None = None,
 ) -> YTPost:
+    """Canonical YT post: title через `canonical_yt_title`, description с
+    добавленным non-profit disclaimer в начале (юзер approved 2026-04-26).
+    """
     return YTPost(
-        title=build_yt_title(beat),
-        description=build_yt_description(beat, beat_id=beat_id, duration_sec=duration_sec),
+        title=canonical_yt_title(beat),
+        description=(
+            canonical_yt_description_disclaimer(beat_id) + "\n\n"
+            + build_yt_description(beat, beat_id=beat_id, duration_sec=duration_sec)
+        ),
         tags=build_yt_tags(beat),
     )
 
