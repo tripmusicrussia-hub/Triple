@@ -671,11 +671,21 @@ def write_heartbeat():
         pass
 
 def add_to_history(user_id, beat_id):
+    """Запоминает каждый просмотренный бит per user (без лимита) для строгой
+    non-repeat логики. Set-like dedup. In-memory: при restart bot'a сбрасывается
+    (acceptable trade-off — autopush этого файла = cascade redeploy bug).
+    """
     if user_id not in user_history:
         user_history[user_id] = []
-    user_history[user_id].append(beat_id)
-    if len(user_history[user_id]) > 10:
-        user_history[user_id].pop(0)
+    if beat_id not in user_history[user_id]:
+        user_history[user_id].append(beat_id)
+
+
+def reset_user_history(user_id) -> int:
+    """Сбрасывает history юзера. Возвращает кол-во удалённых записей."""
+    n = len(user_history.get(user_id, []))
+    user_history.pop(user_id, None)
+    return n
 
 def get_history(user_id):
     return user_history.get(user_id, [])
@@ -838,79 +848,43 @@ _FILTER_TITLES = {
 
 async def do_quick_filter(bot, chat_id: int, user_id: int, filter_name: str,
                           page: int = 0, query=None):
-    """Гибрид: шлём `QUICK_FILTER_AUDIO_PAGE` (=5) audio-messages подряд
-    с buy-кнопками + footer-сообщение «Ещё 5 / Меню».
+    """Шлёт ОДИН случайный бит из выбранного фильтра (с anti-repeat history).
+    Повторный клик «🔥 Hard» = другой бит. Кончатся уникальные → fallback на любой.
 
-    Юзер сразу слушает биты, не ходит по text-list. Single-audio cleanup
-    как в send_beat — удаляем prev tracking.
+    `page` оставлен в сигнатуре для backwards-compat (старые callbacks `qfp_*`),
+    но игнорируется — один бит per клик.
     """
     results = _filter_beats(filter_name)
-    user_search_state[user_id] = {"filter": filter_name, "page": page}
     title = _FILTER_TITLES.get(filter_name, filter_name)
     if not results:
         text = f"{title}: пусто, попробуй другой фильтр"
         if query is not None:
-            await _nav_reply(query, text, reply_markup=kb_main_menu(user_id=user_id))
+            await _nav_reply(query, text, reply_markup=kb_beats_menu(user_id=user_id))
         else:
-            await bot.send_message(chat_id, text, reply_markup=kb_main_menu(user_id=user_id))
+            await bot.send_message(chat_id, text, reply_markup=kb_beats_menu(user_id=user_id))
         return
 
-    total_pages = max(1, (len(results) + QUICK_FILTER_AUDIO_PAGE - 1) // QUICK_FILTER_AUDIO_PAGE)
-    page = max(0, min(page, total_pages - 1))
-    start = page * QUICK_FILTER_AUDIO_PAGE
-    chunk = results[start:start + QUICK_FILTER_AUDIO_PAGE]
-
-    # Header: краткое сообщение перед лентой битов
-    header_text = (
-        f"{title} — <b>{len(results)}</b> битов\n"
-        f"Страница <b>{page + 1}/{total_pages}</b>"
-    )
-    if query is not None:
-        try:
-            await _nav_reply(query, header_text, parse_mode="HTML")
-        except Exception:
-            await bot.send_message(chat_id, header_text, parse_mode="HTML")
-    else:
-        await bot.send_message(chat_id, header_text, parse_mode="HTML")
-
-    # Шлём audio для каждого бита из chunk с buy-кнопками
-    for b in chunk:
-        try:
-            bid = int(b["id"])
-            bpm = b.get("bpm") or "?"
-            key = b.get("key") or "?"
-            tags_str = ", ".join((b.get("tags") or [])[:3])
-            caption = (
-                f"🎹 <b>{html.escape(b.get('name') or '?')}</b>\n"
-                f"⚡ {bpm} BPM · 🎹 {html.escape(str(key))}"
-                + (f" · #{html.escape(tags_str)}" if tags_str else "")
-            )
-            await bot.send_audio(
-                chat_id, audio=b["file_id"],
-                caption=caption, parse_mode="HTML",
-                reply_markup=kb_after_beat(bid, "beat", user_id=user_id),
-            )
-        except Exception:
-            logger.warning("qf audio send failed for beat %s", b.get("id"))
-
-    # Footer: navigation
-    nav_rows = []
-    nav_buttons = []
-    if page > 0:
-        nav_buttons.append(InlineKeyboardButton("◀️ Назад", callback_data=f"qfp_{filter_name}_{page-1}"))
-    if page < total_pages - 1:
-        nav_buttons.append(InlineKeyboardButton(f"➡️ Ещё {min(QUICK_FILTER_AUDIO_PAGE, len(results) - (page + 1) * QUICK_FILTER_AUDIO_PAGE)}",
-                                                callback_data=f"qfp_{filter_name}_{page+1}"))
-    if nav_buttons:
-        nav_rows.append(nav_buttons)
-    nav_rows.append([InlineKeyboardButton("🎲 Случайный из этих", callback_data=f"qfr_{filter_name}")])
-    nav_rows.append([InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")])
-    await bot.send_message(
-        chat_id,
-        f"<i>{title} · {page + 1}/{total_pages}</i>",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(nav_rows),
-    )
+    # Strict anti-repeat: если все биты в фильтре уже виделись — alert
+    # с кнопкой reset (НЕ повторяем).
+    history = set(get_history(user_id))
+    available = [b for b in results if b["id"] not in history]
+    if not available:
+        text = (
+            f"🎯 <b>Ты прослушал ВСЕ {len(results)} битов в «{title}»!</b>\n\n"
+            f"Чтобы пройтись заново — сбрось историю прослушиваний."
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Сбросить историю", callback_data="hist_reset")],
+            [InlineKeyboardButton("◀️ Раздел Биты", callback_data="menu_beat")],
+        ])
+        if query is not None:
+            await _nav_reply(query, text, parse_mode="HTML", reply_markup=kb)
+        else:
+            await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb)
+        return
+    chosen = random.choice(available)
+    user_search_state[user_id] = {"filter": filter_name, "page": page}
+    await send_beat(bot, chat_id, chosen, user_id)
 
 def kb_beats_menu(user_id: int | None = None):
     """Раздел «🎹 Биты»: Cart + Quick-filters + По артистам + Случайный.
@@ -2774,9 +2748,22 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not items:
             await query.answer("Пока пусто!", show_alert=True)
             return
-        history = get_history(user_id)
+        history = set(get_history(user_id))
         available = [b for b in items if b["id"] not in history]
-        beat = random.choice(available) if available else random.choice(items)
+        if not available:
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Сбросить историю", callback_data="hist_reset")],
+                [InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")],
+            ])
+            await query.answer()
+            await bot.send_message(
+                query.message.chat_id,
+                f"🎯 <b>Ты прослушал ВСЕ {len(items)} записей в категории!</b>\n\n"
+                "Сбрось историю чтобы начать заново.",
+                parse_mode="HTML", reply_markup=kb,
+            )
+            return
+        beat = random.choice(available)
         await send_beat(bot, query.message.chat_id, beat, user_id)
         return
 
@@ -2786,28 +2773,70 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not current:
             return
         content_type = current.get("content_type", "beat")
-        history = get_history(user_id)
+        history = set(get_history(user_id))
         similar = beats_db.get_similar_beats(current, exclude_ids=history)
         similar = [b for b in similar if b.get("content_type", "beat") == content_type]
-        if not similar:
-            items = [b for b in beats_db.BEATS_CACHE
-                     if b.get("content_type", "beat") == content_type and b["id"] not in history]
-            if not items:
-                items = [b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == content_type]
-            next_beat = random.choice(items) if items else None
-        else:
+        if similar:
             next_beat = random.choice(similar)
-        if not next_beat:
-            await query.answer("Больше нет!", show_alert=True)
-            return
+        else:
+            # Fallback: любой бит из категории НЕ из history. Если все видел —
+            # alert + reset кнопка (не повторяем).
+            items = [b for b in beats_db.BEATS_CACHE
+                     if b.get("content_type", "beat") == content_type
+                     and b["id"] not in history]
+            if not items:
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Сбросить историю", callback_data="hist_reset")],
+                    [InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")],
+                ])
+                await query.answer()
+                await bot.send_message(
+                    query.message.chat_id,
+                    f"🎯 <b>Ты прослушал ВСЕ записи в категории «{content_type}»!</b>\n\n"
+                    "Сбрось историю чтобы начать заново.",
+                    parse_mode="HTML", reply_markup=kb,
+                )
+                return
+            next_beat = random.choice(items)
         await send_beat(bot, query.message.chat_id, next_beat, user_id)
         return
 
     if data == "random_beat":
-        beat = beats_db.get_random_beat(exclude_ids=get_history(user_id))
-        if not beat:
+        history = set(get_history(user_id))
+        beats_only = [b for b in beats_db.BEATS_CACHE
+                      if b.get("content_type", "beat") == "beat"
+                      and b.get("file_id")
+                      and b["id"] not in history]
+        if not beats_only:
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Сбросить историю", callback_data="hist_reset")],
+                [InlineKeyboardButton("◀️ Раздел Биты", callback_data="menu_beat")],
+            ])
+            await query.answer()
+            await bot.send_message(
+                query.message.chat_id,
+                "🎯 <b>Ты прослушал ВСЕ биты в каталоге!</b>\n\n"
+                "Сбрось историю чтобы начать заново — или зайди в «🎤 Треки» / «🔀 Ремиксы».",
+                parse_mode="HTML", reply_markup=kb,
+            )
             return
+        beat = random.choice(beats_only)
         await send_beat(bot, query.message.chat_id, beat, user_id)
+        return
+
+    if data == "hist_reset":
+        n = reset_user_history(user_id)
+        await query.answer(f"🔄 Сброшено {n} записей. Можешь слушать заново.", show_alert=True)
+        try:
+            await query.message.edit_text(
+                f"🔄 Историю сброшено ({n} битов забыто).\n\n"
+                "Открой «🎹 Биты» в главном меню и слушай заново.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")],
+                ]),
+            )
+        except TelegramError:
+            pass
         return
 
     if data.startswith("fav_"):
@@ -3872,29 +3901,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await do_quick_filter(bot, query.message.chat_id, user_id, filter_name, page=0, query=query)
         return
 
-    # Quick-filter pagination (qfp_<filter>_<page>)
-    if data.startswith("qfp_"):
+    # Quick-filter legacy callbacks (qfp_/qfr_) — оставлены backwards-compat
+    # для старых сообщений в чате юзера. Все ведут на тот же do_quick_filter
+    # (один random бит per click).
+    if data.startswith("qfp_") or data.startswith("qfr_"):
         try:
-            _, filter_name, page_str = data.split("_", 2)
-            page = max(0, int(page_str))
+            filter_name = data.split("_", 2)[1]
         except Exception:
             await query.answer()
             return
-        await query.answer()
-        await do_quick_filter(bot, query.message.chat_id, user_id, filter_name, page=page, query=None)
-        return
-
-    # Quick-filter random (qfr_<filter>) — случайный бит из текущего фильтра
-    if data.startswith("qfr_"):
-        filter_name = data[4:]
-        results = _filter_beats(filter_name)
-        if not results:
-            await query.answer("Пусто, попробуй другой фильтр", show_alert=True)
-            return
-        import random as _rnd
-        beat = _rnd.choice(results)
-        await query.answer()
-        await send_beat(bot, query.message.chat_id, beat, user_id)
+        await do_quick_filter(bot, query.message.chat_id, user_id, filter_name, query=query)
         return
 
     # Search pagination: sp_<filter>_<page>
@@ -6844,6 +6860,18 @@ async def cmd_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_cart_view(context.bot, user_id, edit_message=None)
 
 
+async def cmd_reset_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """`/reset_history` — сбросить историю просмотренных битов.
+    После этого все биты в каталоге снова доступны через 🎲 / Hard / Memphis / etc.
+    """
+    user_id = update.effective_user.id
+    n = reset_user_history(user_id)
+    await update.message.reply_text(
+        f"🔄 Историю сброшено ({n} битов забыто).\n\n"
+        "Теперь все биты в каталоге снова случайны — серфи в «🎹 Биты»!",
+    )
+
+
 async def cmd_export_beats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """`/export_beats` — admin only. Шлёт текущий beats_data.json + admin_prefs.json
     в DM админу. Rescue-инструмент: если autopush не работает или Render redeploy
@@ -8418,6 +8446,7 @@ async def run_bot():
     app.add_handler(CommandHandler("yt_refresh_old", cmd_yt_refresh_old))
     app.add_handler(CommandHandler("yt_rename_one", cmd_yt_rename_one))
     app.add_handler(CommandHandler("cart", cmd_cart))
+    app.add_handler(CommandHandler("reset_history", cmd_reset_history))
     app.add_handler(CommandHandler("export_beats", cmd_export_beats))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(PreCheckoutQueryHandler(handle_precheckout))
