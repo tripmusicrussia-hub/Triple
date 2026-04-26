@@ -6578,6 +6578,149 @@ async def cmd_yt_audit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_yt_rename_one(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """`/yt_rename_one <video_id> [<beat_id>]` — переименовывает один YT-бит
+    по canonical шаблону `[FREE] {ARTIST} Type Beat 2026 - "{NAME}" | {SCENE} | {BPM} BPM {KEY}`
+    + переписывает description с disclaimer'ом + сохраняет old tags.
+
+    Pipeline:
+    1. Если beat_id указан → ищем в beats_data, строим BeatMeta через beat_record_to_meta
+    2. Иначе → ищем video_id в Supabase post_events, получаем beat_name/artist/bpm/key
+    3. canonical_yt_title + build_yt_post → yt_api.update_video
+
+    Use case: юзер видит legacy YT-видео со снейкэйс'ным title — запускает
+    /yt_rename_one <video_id> → готово.
+    """
+    if update.effective_user.id != ADMIN_ID:
+        return
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Usage: /yt_rename_one <video_id> [<beat_id>]\n\n"
+            "Переименовывает YT-видео по шаблону:\n"
+            "[FREE] {ARTIST} Type Beat 2026 - \"{NAME}\" | {SCENE} | {BPM} BPM {KEY}\n\n"
+            "Без beat_id ищет meta через Supabase post_events.\n"
+            "С beat_id берёт meta из beats_data."
+        )
+        return
+    video_id = args[0].strip()
+    explicit_beat_id = None
+    if len(args) >= 2:
+        try:
+            explicit_beat_id = int(args[1])
+        except ValueError:
+            await update.message.reply_text(f"❌ beat_id должен быть числом: {args[1]}")
+            return
+
+    await update.message.reply_text(f"🔄 Переименовываю {video_id}...")
+    loop = asyncio.get_running_loop()
+
+    # Resolve BeatMeta — либо из beats_data, либо из post_events
+    meta = None
+    beat_id_for_disclaimer = explicit_beat_id
+
+    try:
+        from beat_upload import beat_record_to_meta, BeatMeta
+        if explicit_beat_id:
+            beat = beats_db.get_beat_by_id(explicit_beat_id)
+            if not beat:
+                await update.message.reply_text(f"❌ beat_id={explicit_beat_id} не найден в каталоге")
+                return
+            meta = beat_record_to_meta(beat)
+            if meta is None:
+                await update.message.reply_text(
+                    f"❌ Бит {explicit_beat_id} есть в каталоге, но не валиден для type-beat title "
+                    "(нет BPM/key/artist-tag). Заполни через /quick_meta или передай meta вручную."
+                )
+                return
+        else:
+            # Resolve через Supabase post_events
+            import httpx
+            sb_url = os.getenv("SUPABASE_URL", "").strip()
+            sb_key = os.getenv("SUPABASE_KEY", "").strip()
+            if not sb_url or not sb_key:
+                await update.message.reply_text(
+                    "❌ Supabase не настроен — передай beat_id вручную:\n"
+                    f"/yt_rename_one {video_id} <beat_id>"
+                )
+                return
+            headers = {"apikey": sb_key, "Authorization": f"Bearer {sb_key}"}
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get(
+                    f"{sb_url}/rest/v1/post_events",
+                    params={
+                        "select": "beat_name,artist,bpm,key,style",
+                        "yt_video_id": f"eq.{video_id}",
+                        "limit": "1",
+                    },
+                    headers=headers,
+                )
+            if r.status_code != 200 or not r.json():
+                await update.message.reply_text(
+                    f"❌ Не нашёл video_id={video_id} в post_events. "
+                    f"Передай beat_id вручную: /yt_rename_one {video_id} <beat_id>"
+                )
+                return
+            row = r.json()[0]
+            artist_raw = (row.get("artist") or "").lower().strip()
+            # Простой casing: "kenny muney" → "Kenny Muney". Если artist
+            # требует override (NardoWick / GloRilla) — в caталоге уже
+            # хранится canonical artist_display, юзер передаст beat_id
+            # явно: /yt_rename_one <vid> <beat_id>.
+            artist_disp = (row.get("artist") or "").strip().title()
+            name = row.get("beat_name") or "?"
+            bpm = int(row.get("bpm") or 0)
+            key = (row.get("key") or "").strip()
+            # key_short heuristic: "A minor" → "Am"
+            key_short = key
+            if key:
+                k_low = key.lower()
+                if "minor" in k_low:
+                    note = key.split()[0]
+                    key_short = note + "m"
+                elif "major" in k_low:
+                    key_short = key.split()[0]
+            meta = BeatMeta(
+                artist_raw=artist_raw,
+                artist_display=artist_disp,
+                artist_line=f"{artist_disp} Type Beat",
+                name=name, bpm=bpm, key=key, key_short=key_short,
+            )
+
+        # Build canonical post
+        import beat_post_builder as bpb
+        new_title = bpb.canonical_yt_title(meta)
+        # Description: disclaimer + full description (FAQ etc)
+        # Используем build_yt_post — он уже комбинирует
+        new_post = bpb.build_yt_post(meta, beat_id=beat_id_for_disclaimer)
+
+        # Get old tags чтобы сохранить (если новые tags нужны — пусть user gen'ит через canonical)
+        import yt_api
+        v = await loop.run_in_executor(None, lambda: yt_api.get_video(video_id))
+        if not v:
+            await update.message.reply_text(f"❌ Видео {video_id} не найдено на YT")
+            return
+        old_tags = v["snippet"].get("tags", [])
+        # Берём union: новые canonical tags + старые (max 500 chars total tag-string)
+        new_tags = list(dict.fromkeys((new_post.tags or []) + old_tags))[:30]
+
+        await loop.run_in_executor(
+            None, lambda: yt_api.update_video(
+                video_id, new_title, new_post.description, new_tags,
+            ),
+        )
+        await update.message.reply_text(
+            f"✅ {video_id} переименован\n"
+            f"https://youtu.be/{video_id}\n\n"
+            f"Title:\n<code>{html.escape(new_title)}</code>\n\n"
+            f"Tags ({len(new_tags)}): {', '.join(new_tags[:6])}...",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.exception("yt_rename_one failed for %s", video_id)
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
+
 async def cmd_yt_refresh_old(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """`/yt_refresh_old <video_id>` — обновить description+tags старого видео:
     подтянуть актуальные цены (1500/20/1700) + актуальные ссылки на TG канал
@@ -7576,6 +7719,7 @@ async def run_bot():
     app.add_handler(CommandHandler("start_reminders", cmd_start_reminders))
     app.add_handler(CommandHandler("yt_audit", cmd_yt_audit))
     app.add_handler(CommandHandler("yt_refresh_old", cmd_yt_refresh_old))
+    app.add_handler(CommandHandler("yt_rename_one", cmd_yt_rename_one))
     app.add_handler(CommandHandler("cart", cmd_cart))
     app.add_handler(CommandHandler("export_beats", cmd_export_beats))
     app.add_handler(CallbackQueryHandler(handle_callback))
