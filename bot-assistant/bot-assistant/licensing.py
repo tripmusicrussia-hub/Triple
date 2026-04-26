@@ -21,6 +21,26 @@ PRICE_BUNDLE3_STARS = int(os.getenv("PRICE_BUNDLE3_STARS", "4000"))  # 4500₽ �
 PRICE_BUNDLE3_USDT = float(os.getenv("PRICE_BUNDLE3_USDT", "55.0"))  # 55 USDT (~$55) скидка с 60
 PRICE_BUNDLE3_RUB = int(os.getenv("PRICE_BUNDLE3_RUB", "4500"))      # 4500₽ vs 5100 single×3
 
+# Auto-discount: % off на single MP3 lease через персональный token из reminder.
+# Дефолт 20%. ENV-override на случай A/B-теста (10/15/25).
+DISCOUNT_PCT = int(os.getenv("DISCOUNT_PCT", "20"))
+
+
+def mp3_price_with_discount(pct: int, currency: str) -> int | float:
+    """Возвращает amount со скидкой `pct%` от соответствующего PRICE_MP3_*.
+
+    `currency` ∈ {"XTR", "USDT", "RUB"}. Округление: для XTR/RUB → int, USDT → float (1 знак).
+    """
+    if not (0 < pct < 100):
+        raise ValueError(f"discount pct must be 0..100, got {pct}")
+    if currency == "XTR":
+        return int(PRICE_MP3_STARS * (100 - pct) / 100)
+    if currency == "USDT":
+        return round(PRICE_MP3_USDT * (100 - pct) / 100, 1)
+    if currency == "RUB":
+        return int(PRICE_MP3_RUB * (100 - pct) / 100)
+    raise ValueError(f"unknown currency: {currency}")
+
 # Сведение треков «под ключ» (mixing + mastering). Клиент присылает стемы WAV
 # в DM @iiiplfiii после оплаты → 3-5 рабочих дней → готовый master-файл.
 PRICE_MIX_STARS = 4500  # ≈ $60 (~3× MP3 lease)

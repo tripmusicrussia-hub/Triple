@@ -105,6 +105,124 @@ def _save_optout() -> None:
         logger.exception("reminders: save optout failed")
 
 
+# Auto-discount tokens: персональная скидка на single MP3 lease после view-без-купа.
+# Создаются в remarketing_scheduler при отправке reminder. Используется через
+# callback `disc_buy_<token>` → 3 payment-кнопки с уменьшенной ценой.
+# Token format: `d<user_id>_<beat_id>_<8hex>` (короткий, влезает в 64-byte callback).
+# Persist в JSON чтобы переживать redeploy. Render free disk эфемерный — потеря
+# ≤24h tokens acceptable для MVP (если TTL пройдёт во время downtime — юзер
+# просто не купит со скидкой; reminder не повторяется).
+DISCOUNT_TTL_SEC = 24 * 3600
+active_discounts: dict[str, dict] = {}
+ACTIVE_DISCOUNTS_PATH = os.path.join(BASE_DIR, "active_discounts.json")
+
+
+def _save_discounts() -> None:
+    try:
+        with open(ACTIVE_DISCOUNTS_PATH, "w", encoding="utf-8") as f:
+            json.dump(active_discounts, f, ensure_ascii=False, indent=2)
+    except Exception:
+        logger.exception("discounts: save failed")
+
+
+def _load_discounts() -> None:
+    if os.path.exists(ACTIVE_DISCOUNTS_PATH):
+        try:
+            with open(ACTIVE_DISCOUNTS_PATH, encoding="utf-8") as f:
+                active_discounts.update(json.load(f))
+        except Exception:
+            logger.exception("discounts: load failed")
+
+
+def _make_discount_token(user_id: int, beat_id: int) -> str:
+    """Создаёт persistent token со скидкой licensing.DISCOUNT_PCT% для single MP3 lease.
+
+    Если token уже существует для (user, beat) и не истёк/использован — возвращает его
+    же (idempotent). Иначе создаёт новый.
+    """
+    import secrets
+    now = time.time()
+    # Idempotency: ищем активный token для этого user+beat
+    for tok, rec in active_discounts.items():
+        if (
+            rec.get("user_id") == user_id
+            and rec.get("beat_id") == beat_id
+            and not rec.get("used")
+            and rec.get("expires_at", 0) > now
+        ):
+            return tok
+    token = f"d{user_id}_{beat_id}_{secrets.token_hex(4)}"
+    active_discounts[token] = {
+        "user_id": user_id,
+        "beat_id": beat_id,
+        "pct": licensing.DISCOUNT_PCT,
+        "expires_at": now + DISCOUNT_TTL_SEC,
+        "used": False,
+    }
+    _save_discounts()
+    return token
+
+
+def _validate_discount_token(token: str, user_id: int) -> dict | None:
+    """Возвращает dict {beat_id, pct, expires_at} если token валиден для user_id.
+
+    Иначе None. Не помечает used — это делает caller после успешной оплаты.
+    """
+    rec = active_discounts.get(token)
+    if not rec:
+        return None
+    if rec.get("user_id") != user_id:
+        return None
+    if rec.get("used"):
+        return None
+    if rec.get("expires_at", 0) < time.time():
+        return None
+    return rec
+
+
+def _consume_discount_token(token: str) -> None:
+    """Помечает token как used + persist. Вызывается после успешной delivery."""
+    rec = active_discounts.get(token)
+    if rec:
+        rec["used"] = True
+        _save_discounts()
+
+
+def _invalidate_discount_for_user_beat(user_id: int, beat_id: int) -> None:
+    """Юзер купил бит без скидки — все его tokens на этот бит можно дропнуть.
+
+    Mark used (а не delete) чтобы pending invoice по этому token'у при оплате
+    отскочил с alert (вместо двойной доставки).
+    """
+    for tok, rec in active_discounts.items():
+        if (
+            rec.get("user_id") == user_id
+            and rec.get("beat_id") == beat_id
+            and not rec.get("used")
+        ):
+            rec["used"] = True
+    _save_discounts()
+
+
+def _cleanup_expired_discounts() -> int:
+    """Удаляет expired/used старше 7 дней. Возвращает кол-во удалённых."""
+    now = time.time()
+    cutoff = now - 7 * 24 * 3600  # держим used 7 дней для аналитики, потом дроп
+    to_drop = []
+    for tok, rec in active_discounts.items():
+        # Active expired (TTL прошёл, не использован) → дроп сразу
+        if not rec.get("used") and rec.get("expires_at", 0) < now:
+            to_drop.append(tok)
+        # Used старше 7 дней → дроп
+        elif rec.get("used") and rec.get("expires_at", 0) < cutoff:
+            to_drop.append(tok)
+    for tok in to_drop:
+        active_discounts.pop(tok, None)
+    if to_drop:
+        _save_discounts()
+    return len(to_drop)
+
+
 def track_bit_view(user_id: int, beat: dict) -> None:
     """Юзер посмотрел preview бита — записываем для re-marketing.
     Вызывается из send_beat / deep-link buy_/prod_ handlers.
@@ -128,11 +246,13 @@ def track_bit_view(user_id: int, beat: dict) -> None:
 
 def mark_bit_purchased(user_id: int, beat_id: int) -> None:
     """Юзер купил бит — удаляем из pending (reminder уже не нужен) +
+    invalidate discount-токены этого юзера на этот бит (anti-double-discount) +
     убираем из корзины (если был — куплен, нет смысла держать)."""
     key = _reminder_key(user_id, beat_id)
     if key in pending_reminders:
         pending_reminders.pop(key, None)
         _save_reminders()
+    _invalidate_discount_for_user_beat(user_id, beat_id)
     _cart_remove(user_id, beat_id)
 
 # (Автопостинг текстовых рубрик удалён 2026-04-20 — автор сам пишет посты.
@@ -2925,6 +3045,210 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _yk_creating_payment.discard(user_id)
         return
 
+    # ── Auto-discount (персональный token из reminder) ─────────
+    if data.startswith("disc_buy_"):
+        token = data[len("disc_buy_"):]
+        rec = _validate_discount_token(token, user_id)
+        if not rec:
+            await query.answer(
+                "Скидка истекла или уже использована.",
+                show_alert=True,
+            )
+            return
+        beat_id = int(rec["beat_id"])
+        beat = beats_db.get_beat_by_id(beat_id)
+        if not beat:
+            await query.answer("Бит больше недоступен.", show_alert=True)
+            return
+        pct = int(rec["pct"])
+        stars_p = licensing.mp3_price_with_discount(pct, "XTR")
+        usdt_p = licensing.mp3_price_with_discount(pct, "USDT")
+        rub_p = licensing.mp3_price_with_discount(pct, "RUB")
+        bpm = beat.get("bpm") or "?"
+        key_short = beat.get("key") or ""
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"⭐ {stars_p}", callback_data=f"disc_pay_stars_{token}"),
+             InlineKeyboardButton(f"💵 {usdt_p:g} USDT", callback_data=f"disc_pay_usdt_{token}")],
+            [InlineKeyboardButton(f"💳 {rub_p}₽ (MIR/СБП)", callback_data=f"disc_pay_rub_{token}")],
+        ])
+        try:
+            await query.message.edit_text(
+                (
+                    f"🎁 <b>Скидка -{pct}% на «{html.escape(beat.get('name') or '?')}»</b>\n"
+                    f"⚡ {bpm} BPM · 🎹 {html.escape(str(key_short))}\n\n"
+                    f"<s>{licensing.PRICE_MP3_STARS}⭐ / {licensing.PRICE_MP3_USDT:g} USDT / {licensing.PRICE_MP3_RUB}₽</s>\n"
+                    f"<b>{stars_p}⭐ / {usdt_p:g} USDT / {rub_p}₽</b>\n\n"
+                    f"Выбери способ оплаты:"
+                ),
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
+        except TelegramError:
+            await bot.send_message(
+                user_id,
+                (
+                    f"🎁 <b>Скидка -{pct}%</b>\n"
+                    f"<b>{stars_p}⭐ / {usdt_p:g} USDT / {rub_p}₽</b>"
+                ),
+                parse_mode="HTML", reply_markup=kb,
+            )
+        return
+
+    if data.startswith("disc_pay_stars_"):
+        token = data[len("disc_pay_stars_"):]
+        rec = _validate_discount_token(token, user_id)
+        if not rec:
+            await query.answer("Скидка истекла или уже использована.", show_alert=True)
+            return
+        beat = beats_db.get_beat_by_id(int(rec["beat_id"]))
+        if not beat:
+            await query.answer("Бит больше недоступен.", show_alert=True)
+            return
+        pct = int(rec["pct"])
+        amount = licensing.mp3_price_with_discount(pct, "XTR")
+        title = f"MP3 -{pct}% — {beat['name']}"[:32]
+        description = (
+            f"MP3 Lease на «{beat['name']}» со скидкой {pct}%. "
+            "Non-exclusive: до 100k стримов, до 2000 копий, 1 music video. "
+            "Credit: prod. by TRIPLE FILL."
+        )[:255]
+        try:
+            await bot.send_invoice(
+                chat_id=user_id,
+                title=title,
+                description=description,
+                payload=f"mp3_disc:{token}",
+                provider_token="",
+                currency="XTR",
+                prices=[LabeledPrice(label="MP3 Lease (-discount)", amount=int(amount))],
+            )
+            if query.message.chat_id != user_id:
+                await query.answer("💰 Счёт отправил в ЛС бота", show_alert=False)
+        except TelegramError as e:
+            logger.warning("send disc Stars invoice failed: %s", e)
+            await query.answer("Не удалось отправить счёт. Напиши /start боту.", show_alert=True)
+        return
+
+    if data.startswith("disc_pay_usdt_"):
+        token = data[len("disc_pay_usdt_"):]
+        rec = _validate_discount_token(token, user_id)
+        if not rec:
+            await query.answer("Скидка истекла или уже использована.", show_alert=True)
+            return
+        beat_id = int(rec["beat_id"])
+        beat = beats_db.get_beat_by_id(beat_id)
+        if not beat:
+            await query.answer("Бит больше недоступен.", show_alert=True)
+            return
+        pct = int(rec["pct"])
+        amount = licensing.mp3_price_with_discount(pct, "USDT")
+        try:
+            inv = await cryptobot.create_invoice(
+                amount=amount,
+                asset="USDT",
+                description=f"MP3 -{pct}% «{beat['name']}»",
+                payload=f"mp3_disc:{token}:{user_id}",
+            )
+        except Exception:
+            logger.exception("cryptobot.create_invoice failed (disc)")
+            await query.answer(_user_error_msg("оплата"), show_alert=True)
+            return
+        pay_url = inv.get("pay_url") or inv.get("mini_app_invoice_url") or inv.get("bot_invoice_url")
+        invoice_id = int(inv.get("invoice_id"))
+        pending_usdt_invoices[invoice_id] = {
+            "user_id": user_id,
+            "kind": "disc",
+            "token": token,
+            "beat_id": beat_id,
+        }
+        try:
+            await bot.send_message(
+                user_id,
+                (
+                    f"💵 Счёт на {amount:g} USDT — «{beat['name']}» (-{pct}%)\n\n"
+                    "Жми кнопку — откроется CryptoBot.\n"
+                    "После оплаты автоматом придёт mp3 + лицензия.\n\n"
+                    "⏱ Счёт активен 30 минут."
+                ),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💳 Оплатить в CryptoBot", url=pay_url)]]),
+            )
+            if query.message.chat_id != user_id:
+                await query.answer("💵 Счёт отправил в ЛС бота", show_alert=False)
+        except TelegramError as e:
+            logger.warning("send disc USDT invoice msg failed: %s", e)
+            await query.answer("Сначала напиши /start боту в ЛС.", show_alert=True)
+            return
+        asyncio.create_task(poll_usdt_invoice(bot, invoice_id, user_id, beat_id, kind="disc"))
+        return
+
+    if data.startswith("disc_pay_rub_"):
+        import yookassa_api
+        if not yookassa_api.is_configured():
+            await query.answer(
+                "RUB-оплата пока не подключена. Используй ⭐ Stars или 💵 USDT.",
+                show_alert=True,
+            )
+            return
+        token = data[len("disc_pay_rub_"):]
+        rec = _validate_discount_token(token, user_id)
+        if not rec:
+            await query.answer("Скидка истекла или уже использована.", show_alert=True)
+            return
+        beat_id = int(rec["beat_id"])
+        beat = beats_db.get_beat_by_id(beat_id)
+        if not beat:
+            await query.answer("Бит больше недоступен.", show_alert=True)
+            return
+        pct = int(rec["pct"])
+        amount_rub = int(licensing.mp3_price_with_discount(pct, "RUB"))
+        if user_id in _yk_creating_payment:
+            await query.answer("⏳ Уже создаю платёж, подожди...", show_alert=False)
+            return
+        _yk_creating_payment.add(user_id)
+        try:
+            payment = await yookassa_api.create_payment(
+                amount_rub=amount_rub,
+                description=f"MP3 -{pct}% «{beat['name']}»",
+                metadata={
+                    "type": "mp3_disc",
+                    "user_id": str(user_id),
+                    "username": update.effective_user.username or "",
+                    "beat_id": str(beat_id),
+                    "token": token,
+                },
+                return_url=f"https://t.me/{beat_post_builder.BOT_USERNAME}",
+            )
+            await _save_yk_pending(payment["id"], {
+                "type": "mp3_disc",
+                "user_id": user_id,
+                "username": update.effective_user.username or "",
+                "beat_id": beat_id,
+                "token": token,
+                "amount_rub": amount_rub,
+                "created_at": datetime.now(ZoneInfo("Europe/Moscow")).isoformat(),
+            })
+            pay_url = payment["confirmation"]["confirmation_url"]
+            await bot.send_message(
+                user_id,
+                (
+                    f"🎁 <b>MP3 -{pct}% «{beat['name']}» — {amount_rub}₽</b>\n\n"
+                    "Нажми кнопку → выбери способ оплаты → подтверди.\n\n"
+                    "После оплаты — mp3 + лицензия в этот чат."
+                ),
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"💳 Оплатить {amount_rub}₽", url=pay_url)],
+                ]),
+            )
+            if query.message.chat_id != user_id:
+                await query.answer("💰 Счёт отправил в ЛС бота", show_alert=False)
+        except Exception:
+            logger.exception("YK create_payment (disc) failed")
+            await query.answer(_user_error_msg("оплата"), show_alert=True)
+        finally:
+            _yk_creating_payment.discard(user_id)
+        return
+
     # ── Cart (накопительная корзина для bundle) ────────────────
     if data.startswith("cart_add_"):
         try:
@@ -4518,8 +4842,13 @@ async def handle_assistant(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Доставка бита + лицензии (общая для Stars и USDT) ────────
 
 async def _deliver_mp3_lease(bot, user, beat: dict, *, payment_charge_id: str,
-                             amount: int | float, currency: str) -> None:
-    """Отправляет mp3 + txt-лицензию покупателю, логирует продажу, уведомляет админа."""
+                             amount: int | float, currency: str,
+                             license_type: str = "mp3_lease") -> None:
+    """Отправляет mp3 + txt-лицензию покупателю, логирует продажу, уведомляет админа.
+
+    `license_type` по умолчанию `mp3_lease`. Для discount'а — caller передаёт
+    `mp3_lease_disc<pct>` (например `mp3_lease_disc20`) для аналитики.
+    """
     # Юзер купил → удалить из pending re-marketing reminders.
     try:
         mark_bit_purchased(user.id, beat["id"])
@@ -4566,7 +4895,7 @@ async def _deliver_mp3_lease(bot, user, beat: dict, *, payment_charge_id: str,
             buyer_name=buyer_name,
             beat_id=beat["id"],
             beat_name=beat["name"],
-            license_type="mp3_lease",
+            license_type=license_type,
             stars_amount=int(amount) if currency == "XTR" else 0,
             fiat_amount_minor=int(amount) if currency != "XTR" else 0,
             currency=currency,
@@ -4979,6 +5308,34 @@ async def _deliver_yk_payment(bot, payment_id: str) -> bool:
                     amount=amount_kopecks,
                     currency="RUB",
                 )
+            elif ptype == "mp3_disc":
+                token = pending.get("token") or ""
+                rec = active_discounts.get(token)
+                bid = int(pending.get("beat_id") or 0)
+                beat = beats_db.get_beat_by_id(bid) if bid else None
+                if not beat:
+                    await bot.send_message(
+                        user_id,
+                        "⚠️ Бит пропал. Пиши @iiiplfiii — разберёмся.",
+                    )
+                    return False
+                pct = int(rec.get("pct", licensing.DISCOUNT_PCT)) if rec else licensing.DISCOUNT_PCT
+                await _deliver_mp3_lease(
+                    bot, user, beat,
+                    payment_charge_id=charge_id,
+                    amount=amount_kopecks,
+                    currency="RUB",
+                    license_type=f"mp3_lease_disc{pct}",
+                )
+                if token:
+                    _consume_discount_token(token)
+                try:
+                    await bot.send_message(
+                        ADMIN_ID,
+                        f"🎁 YK Discount used (-{pct}%) by {user_id} on beat #{bid}",
+                    )
+                except Exception:
+                    pass
             elif ptype == "bundle":
                 beat_ids = pending.get("beat_ids") or []
                 beats = [beats_db.get_beat_by_id(int(bid)) for bid in beat_ids]
@@ -5105,6 +5462,21 @@ async def handle_precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 if not beats_db.get_beat_by_id(bid):
                     await pcq.answer(ok=False, error_message="Один из битов бандла недоступен")
                     return
+        elif payload.startswith("mp3_disc:"):
+            token = payload.split(":", 1)[1]
+            rec = active_discounts.get(token)
+            if not rec:
+                await pcq.answer(ok=False, error_message="Скидка не найдена или истекла")
+                return
+            if rec.get("used"):
+                await pcq.answer(ok=False, error_message="Скидка уже использована")
+                return
+            if rec.get("expires_at", 0) < time.time():
+                await pcq.answer(ok=False, error_message="Скидка истекла")
+                return
+            if not beats_db.get_beat_by_id(int(rec.get("beat_id", 0))):
+                await pcq.answer(ok=False, error_message="Бит больше недоступен")
+                return
         else:
             await pcq.answer(ok=False, error_message="Неизвестный тип покупки")
             return
@@ -5199,6 +5571,40 @@ async def handle_successful_payment(update: Update, context: ContextTypes.DEFAUL
                 amount=sp.total_amount,
                 currency=sp.currency or "XTR",
             )
+            return
+
+        if payload.startswith("mp3_disc:"):
+            token = payload.split(":", 1)[1]
+            rec = active_discounts.get(token)
+            if not rec:
+                await msg.reply_text("⚠️ Не нашёл этот токен скидки. Напишу автору @iiiplfiii.")
+                await bot.send_message(
+                    ADMIN_ID,
+                    f"🚨 Stars-disc оплата без token {token}!\n"
+                    f"User: {user.id} @{user.username}\ncharge: {sp.telegram_payment_charge_id}",
+                )
+                return
+            beat_id = int(rec.get("beat_id", 0))
+            beat = beats_db.get_beat_by_id(beat_id)
+            if not beat:
+                await msg.reply_text("⚠️ Бит пропал из каталога. Напишу автору: @iiiplfiii")
+                return
+            pct = int(rec.get("pct", licensing.DISCOUNT_PCT))
+            await _deliver_mp3_lease(
+                bot, user, beat,
+                payment_charge_id=sp.telegram_payment_charge_id,
+                amount=sp.total_amount,
+                currency=sp.currency or "XTR",
+                license_type=f"mp3_lease_disc{pct}",
+            )
+            _consume_discount_token(token)
+            try:
+                await bot.send_message(
+                    ADMIN_ID,
+                    f"🎁 Discount used (-{pct}%) by {user.id} @{user.username} on beat #{beat_id}",
+                )
+            except Exception:
+                pass
             return
 
         logger.warning("successful_payment: unknown payload %s", payload)
@@ -5330,6 +5736,38 @@ async def poll_usdt_invoice(bot, invoice_id: int, user_id: int, item_id: int,
                         bot, user, beats,
                         payment_charge_id=charge, amount=amount, currency=currency,
                     )
+                    return
+
+                if kind == "disc":
+                    pending = pending_usdt_invoices.get(invoice_id) or {}
+                    token = pending.get("token") or ""
+                    rec = active_discounts.get(token)
+                    bid = int(pending.get("beat_id") or item_id or 0)
+                    beat = beats_db.get_beat_by_id(bid) if bid else None
+                    if not beat:
+                        try:
+                            await bot.send_message(
+                                user_id,
+                                "⚠️ Бит пропал. Пиши @iiiplfiii — разберёмся.",
+                            )
+                        except Exception:
+                            pass
+                        return
+                    pct = int(rec.get("pct", licensing.DISCOUNT_PCT)) if rec else licensing.DISCOUNT_PCT
+                    await _deliver_mp3_lease(
+                        bot, user, beat,
+                        payment_charge_id=charge, amount=amount, currency=currency,
+                        license_type=f"mp3_lease_disc{pct}",
+                    )
+                    if token:
+                        _consume_discount_token(token)
+                    try:
+                        await bot.send_message(
+                            ADMIN_ID,
+                            f"🎁 USDT Discount used (-{pct}%) by {user_id} on beat #{bid}",
+                        )
+                    except Exception:
+                        pass
                     return
 
                 item = beats_db.get_beat_by_id(item_id)
@@ -6076,6 +6514,11 @@ async def remarketing_scheduler(bot):
     while True:
         try:
             await asyncio.sleep(60 * 60)  # каждый час
+            # Cleanup expired discount tokens (TTL 24h, кроме недавно used)
+            try:
+                _cleanup_expired_discounts()
+            except Exception:
+                logger.exception("discounts cleanup failed (non-fatal)")
             now = time.time()
             to_drop = []
             to_remind = []
@@ -6109,28 +6552,39 @@ async def remarketing_scheduler(bot):
                     to_drop.append(key)
                     continue
 
-                # Сообщение с deep-link `?start=ref_remind_buy_<id>` —
-                # ref tracking покажет в /today сколько конверсий из reminders.
-                buy_url = (
-                    f"https://t.me/{beat_post_builder.BOT_USERNAME}"
-                    f"?start=ref_remind_buy_{beat_id}"
-                )
+                # Создаём персональный discount-token (TTL 24h) — даёт юзеру
+                # -DISCOUNT_PCT% на этот бит. Кнопка ведёт на 3-payment-picker.
+                # Если token уже есть (idempotent — повторный reminder не
+                # ожидается, но защищаемся) — переиспользуем.
+                disc_token = _make_discount_token(user_id, beat_id)
+                pct = licensing.DISCOUNT_PCT
+                disc_rub = licensing.mp3_price_with_discount(pct, "RUB")
                 bpm = beat.get("bpm") or "?"
                 key_short = beat.get("key") or ""
                 rec_name = rec.get("name") or beat.get("name") or "бит"
                 text = (
                     f"🎧 Помнишь <b>«{html.escape(str(rec_name))}»</b>?\n"
                     f"⚡ {bpm} BPM · 🎹 {html.escape(str(key_short))}\n\n"
-                    f"Бит ещё на месте — <b>1500⭐ / 20 USDT / 1700₽</b>\n"
-                    f"Купи: {buy_url}\n\n"
+                    f"🎁 <b>Только тебе скидка -{pct}% на 24 часа</b>\n"
+                    f"<s>{licensing.PRICE_MP3_RUB}₽</s> → <b>{disc_rub}₽</b>\n\n"
                     f"<i>Не интересно? /stop_reminders — больше не напишу.</i>"
                 )
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        f"🎁 Купить со скидкой -{pct}%",
+                        callback_data=f"disc_buy_{disc_token}",
+                    )],
+                ])
                 try:
-                    await bot.send_message(user_id, text, parse_mode="HTML",
-                                           disable_web_page_preview=True)
+                    await bot.send_message(
+                        user_id, text, parse_mode="HTML",
+                        disable_web_page_preview=True, reply_markup=kb,
+                    )
                     rec["reminded"] = True
-                    logger.info("remarketing: sent reminder user=%d beat=%d",
-                                user_id, beat_id)
+                    logger.info(
+                        "remarketing: sent discount reminder user=%d beat=%d token=%s",
+                        user_id, beat_id, disc_token,
+                    )
                 except Exception as e:
                     err_s = str(e).lower()
                     if "forbidden" in err_s or "blocked" in err_s or "deactivated" in err_s:
@@ -7000,6 +7454,16 @@ async def post_init(application):
         logger.info("bundle_cart: loaded %d users with non-empty carts", len(bundle_cart))
     except Exception:
         logger.exception("bundle_cart load failed")
+    # Discount tokens — load from disk + cleanup expired/old-used
+    try:
+        _load_discounts()
+        n_dropped = _cleanup_expired_discounts()
+        logger.info(
+            "discounts: loaded %d active, dropped %d expired/stale",
+            len(active_discounts), n_dropped,
+        )
+    except Exception:
+        logger.exception("discounts load failed")
     asyncio.create_task(scheduled_publish_loop(application.bot))
     asyncio.create_task(heartbeat_scheduler())
     asyncio.create_task(content_reminder_scheduler(application.bot))
