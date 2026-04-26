@@ -669,6 +669,12 @@ def kb_after_beat(beat_id, content_type="beat"):
             ),
         ])
         rows.append([
+            InlineKeyboardButton(
+                f"🎁 3 бита {licensing.PRICE_BUNDLE3_RUB}₽ (выгода 600₽)",
+                callback_data="bundle_start_" + str(beat_id),
+            ),
+        ])
+        rows.append([
             InlineKeyboardButton("💎 Exclusive ($500+)", callback_data="excl_" + str(beat_id)),
         ])
     rows.append([InlineKeyboardButton("❤️ В избранное", callback_data="fav_" + str(beat_id)),
@@ -689,6 +695,10 @@ def kb_channel_beat_buy(beat_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(
             f"💳 MP3 · {licensing.PRICE_MP3_RUB}₽ (MIR/СБП)",
             callback_data="buy_rub_" + str(beat_id),
+        )],
+        [InlineKeyboardButton(
+            f"🎁 3 бита {licensing.PRICE_BUNDLE3_RUB}₽ (выгода 600₽)",
+            callback_data="bundle_start_" + str(beat_id),
         )],
         [InlineKeyboardButton("💎 WAV / Unlimited / Exclusive", callback_data="excl_" + str(beat_id))],
     ]
@@ -2731,6 +2741,274 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _yk_creating_payment.discard(user_id)
         return
 
+    # ── Bundle deals (3 бита одной транзакцией) ────────────────
+    if data.startswith("bundle_start_"):
+        try:
+            anchor_id = int(data[len("bundle_start_"):])
+        except ValueError:
+            await query.answer()
+            return
+        anchor = beats_db.get_beat_by_id(anchor_id)
+        if not anchor or anchor.get("content_type", "beat") != "beat":
+            await query.answer("Бит не найден", show_alert=True)
+            return
+        eligible_n = len(_bundle_eligible_beats(exclude_ids={anchor_id}))
+        if eligible_n < BUNDLE_TOTAL - 1:
+            await query.answer(
+                f"В каталоге слишком мало битов для бандла (нужно ≥{BUNDLE_TOTAL}).",
+                show_alert=True,
+            )
+            return
+        bundle_selection[user_id] = {"anchor": anchor_id, "selected": [], "page": 0}
+        anchor_name = anchor.get("name") or "?"
+        anchor_bpm = anchor.get("bpm") or "?"
+        try:
+            await bot.send_message(
+                user_id,
+                (
+                    f"🎁 <b>Bundle 3 бита — {licensing.PRICE_BUNDLE3_RUB}₽</b>\n"
+                    f"(вместо 3×{licensing.PRICE_MP3_RUB} = {3 * licensing.PRICE_MP3_RUB}₽, экономия "
+                    f"{3 * licensing.PRICE_MP3_RUB - licensing.PRICE_BUNDLE3_RUB}₽)\n\n"
+                    f"<b>Anchor:</b> {anchor_name} ({anchor_bpm} BPM)\n\n"
+                    f"Выбери ещё {BUNDLE_TOTAL - 1} бита из каталога:"
+                ),
+                parse_mode="HTML",
+                reply_markup=kb_bundle_picker(user_id),
+            )
+            if query.message.chat_id != user_id:
+                await query.answer("📨 Picker отправил в ЛС бота", show_alert=False)
+        except TelegramError:
+            await query.answer("Сначала напиши /start боту в ЛС.", show_alert=True)
+            bundle_selection.pop(user_id, None)
+        return
+
+    if data.startswith("bundle_pick_") or data.startswith("bundle_unpick_"):
+        is_pick = data.startswith("bundle_pick_")
+        prefix_len = len("bundle_pick_") if is_pick else len("bundle_unpick_")
+        try:
+            bid = int(data[prefix_len:])
+        except ValueError:
+            await query.answer()
+            return
+        state = bundle_selection.get(user_id)
+        if not state:
+            await query.answer("Сессия устарела, нажми «🎁 3 бита» заново.", show_alert=True)
+            return
+        selected = list(state.get("selected", []))
+        if is_pick:
+            if bid in selected:
+                pass
+            elif len(selected) >= BUNDLE_TOTAL - 1:
+                await query.answer(
+                    f"Уже выбрано {BUNDLE_TOTAL - 1}, дальше — ✅ Купить.",
+                    show_alert=False,
+                )
+                return
+            elif bid == int(state.get("anchor", 0)):
+                await query.answer("Этот бит уже якорь bundle.", show_alert=False)
+                return
+            else:
+                selected.append(bid)
+        else:
+            selected = [x for x in selected if x != bid]
+        state["selected"] = selected
+        bundle_selection[user_id] = state
+        try:
+            await query.message.edit_reply_markup(reply_markup=kb_bundle_picker(user_id))
+        except TelegramError:
+            pass
+        return
+
+    if data.startswith("bundle_page_"):
+        try:
+            page = max(0, int(data[len("bundle_page_"):]))
+        except ValueError:
+            await query.answer()
+            return
+        state = bundle_selection.get(user_id)
+        if not state:
+            await query.answer("Сессия устарела, нажми «🎁 3 бита» заново.", show_alert=True)
+            return
+        state["page"] = page
+        bundle_selection[user_id] = state
+        try:
+            await query.message.edit_reply_markup(reply_markup=kb_bundle_picker(user_id))
+        except TelegramError:
+            pass
+        return
+
+    if data == "bundle_noop":
+        return  # query.answer() уже сделан в начале handle_callback
+
+    if data == "bundle_cancel":
+        bundle_selection.pop(user_id, None)
+        try:
+            await query.message.edit_text("❌ Bundle отменён.")
+        except TelegramError:
+            pass
+        return
+
+    if data == "bundle_confirm":
+        resolved = _bundle_anchor_and_selected(user_id)
+        if not resolved:
+            await query.answer(
+                f"Сначала выбери {BUNDLE_TOTAL - 1} бита.", show_alert=True,
+            )
+            return
+        anchor, selected_beats = resolved
+        names_block = (
+            f"• {anchor['name']}\n" + "\n".join(f"• {b['name']}" for b in selected_beats)
+        )
+        try:
+            await query.message.edit_text(
+                (
+                    f"🎁 <b>Bundle готов — {licensing.PRICE_BUNDLE3_RUB}₽</b>\n\n"
+                    f"<b>3 бита:</b>\n{names_block}\n\n"
+                    "Выбери способ оплаты:"
+                ),
+                parse_mode="HTML",
+                reply_markup=kb_bundle_pay(),
+            )
+        except TelegramError:
+            pass
+        return
+
+    if data == "bundle_pay_stars":
+        resolved = _bundle_anchor_and_selected(user_id)
+        if not resolved:
+            await query.answer("Сессия устарела, начни заново через «🎁 3 бита».", show_alert=True)
+            return
+        anchor, selected_beats = resolved
+        ids_csv = ",".join(str(b["id"]) for b in [anchor, *selected_beats])
+        title = "Bundle 3 бита"
+        description = (
+            f"3 MP3 Lease beats: {anchor['name']} + " +
+            ", ".join(b["name"] for b in selected_beats)
+        )[:255]
+        try:
+            await bot.send_invoice(
+                chat_id=user_id,
+                title=title[:32],
+                description=description,
+                payload=f"bundle:{ids_csv}",
+                provider_token="",
+                currency="XTR",
+                prices=[LabeledPrice(label="Bundle 3 бита", amount=licensing.PRICE_BUNDLE3_STARS)],
+            )
+            if query.message.chat_id != user_id:
+                await query.answer("💰 Счёт отправил в ЛС бота", show_alert=False)
+        except TelegramError as e:
+            logger.warning("send bundle Stars invoice failed: %s", e)
+            await query.answer("Не удалось отправить счёт. Напиши /start боту.", show_alert=True)
+        return
+
+    if data == "bundle_pay_usdt":
+        resolved = _bundle_anchor_and_selected(user_id)
+        if not resolved:
+            await query.answer("Сессия устарела, начни заново через «🎁 3 бита».", show_alert=True)
+            return
+        anchor, selected_beats = resolved
+        ids_csv = ",".join(str(b["id"]) for b in [anchor, *selected_beats])
+        beats_for_invoice = [anchor, *selected_beats]
+        try:
+            inv = await cryptobot.create_invoice(
+                amount=licensing.PRICE_BUNDLE3_USDT,
+                asset="USDT",
+                description=f"Bundle 3 бита: {anchor['name']} + 2",
+                payload=f"bundle:{ids_csv}:{user_id}",
+            )
+        except Exception:
+            logger.exception("cryptobot.create_invoice failed (bundle)")
+            await query.answer(_user_error_msg("оплата"), show_alert=True)
+            return
+        pay_url = inv.get("pay_url") or inv.get("mini_app_invoice_url") or inv.get("bot_invoice_url")
+        invoice_id = int(inv.get("invoice_id"))
+        pending_usdt_invoices[invoice_id] = {
+            "user_id": user_id,
+            "kind": "bundle",
+            "beat_ids": [int(b["id"]) for b in beats_for_invoice],
+        }
+        try:
+            await bot.send_message(
+                user_id,
+                (
+                    f"💵 Счёт на {licensing.PRICE_BUNDLE3_USDT:g} USDT — bundle 3 бита\n\n"
+                    "Жми кнопку ниже — откроется CryptoBot, оплати из @wallet.\n"
+                    "После оплаты автоматом придут 3 mp3 + общая лицензия.\n\n"
+                    "⏱ Счёт активен 30 минут."
+                ),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💳 Оплатить в CryptoBot", url=pay_url)]]),
+            )
+            if query.message.chat_id != user_id:
+                await query.answer("💵 Счёт отправил в ЛС бота", show_alert=False)
+        except TelegramError as e:
+            logger.warning("send bundle USDT invoice msg failed: %s", e)
+            await query.answer("Сначала напиши /start боту в ЛС.", show_alert=True)
+            return
+        asyncio.create_task(poll_usdt_invoice(bot, invoice_id, user_id, 0, kind="bundle"))
+        return
+
+    if data == "bundle_pay_rub":
+        import yookassa_api
+        if not yookassa_api.is_configured():
+            await query.answer(
+                "RUB-оплата пока не подключена. Используй ⭐ Stars или 💵 USDT.",
+                show_alert=True,
+            )
+            return
+        resolved = _bundle_anchor_and_selected(user_id)
+        if not resolved:
+            await query.answer("Сессия устарела, начни заново через «🎁 3 бита».", show_alert=True)
+            return
+        anchor, selected_beats = resolved
+        ids_csv = ",".join(str(b["id"]) for b in [anchor, *selected_beats])
+        if user_id in _yk_creating_payment:
+            await query.answer("⏳ Уже создаю платёж, подожди...", show_alert=False)
+            return
+        _yk_creating_payment.add(user_id)
+        try:
+            payment = await yookassa_api.create_payment(
+                amount_rub=licensing.PRICE_BUNDLE3_RUB,
+                description=f"Bundle 3 бита: {anchor['name']} + 2",
+                metadata={
+                    "type": "bundle",
+                    "user_id": str(user_id),
+                    "username": update.effective_user.username or "",
+                    "beat_ids": ids_csv,
+                },
+                return_url=f"https://t.me/{beat_post_builder.BOT_USERNAME}",
+            )
+            await _save_yk_pending(payment["id"], {
+                "type": "bundle",
+                "user_id": user_id,
+                "username": update.effective_user.username or "",
+                "beat_ids": [int(b["id"]) for b in [anchor, *selected_beats]],
+                "amount_rub": licensing.PRICE_BUNDLE3_RUB,
+                "created_at": datetime.now(ZoneInfo("Europe/Moscow")).isoformat(),
+            })
+            pay_url = payment["confirmation"]["confirmation_url"]
+            await bot.send_message(
+                user_id,
+                (
+                    f"🎁 <b>Bundle 3 бита — {licensing.PRICE_BUNDLE3_RUB}₽</b>\n\n"
+                    "Нажми кнопку → выбери способ оплаты (карта, СБП, T-Pay, "
+                    "SberPay, ЮMoney) → подтверди.\n\n"
+                    "После оплаты автоматом придут 3 mp3 + общая лицензия в этот чат."
+                ),
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"💳 Оплатить {licensing.PRICE_BUNDLE3_RUB}₽", url=pay_url)],
+                ]),
+            )
+            if query.message.chat_id != user_id:
+                await query.answer("💰 Счёт отправил в ЛС бота", show_alert=False)
+        except Exception:
+            logger.exception("YK create_payment (bundle) failed")
+            await query.answer(_user_error_msg("оплата"), show_alert=True)
+        finally:
+            _yk_creating_payment.discard(user_id)
+        return
+
     if data.startswith("buy_rub_"):
         # MP3 Lease оплата через YooKassa REST API (все методы RU).
         import yookassa_api
@@ -3994,6 +4272,106 @@ async def _deliver_mp3_lease(bot, user, beat: dict, *, payment_charge_id: str,
         pass
 
 
+async def _deliver_bundle(bot, user, beats: list[dict], *, payment_charge_id: str,
+                          amount: int | float, currency: str) -> None:
+    """Delivery для bundle: N audio + одна общая лицензия. Логирует sales row
+    per beat (license_type='bundle_3', meta.beat_ids=[...]).
+
+    Failure handling: если конкретный send_audio упал — продолжаем с остальными,
+    в конце шлём admin alert с failed списком.
+    """
+    buyer_name = (user.full_name or user.username or str(user.id)).strip()
+    failed_beats: list[dict] = []
+    for b in beats:
+        try:
+            mark_bit_purchased(user.id, b["id"])
+        except Exception:
+            pass
+        try:
+            await bot.send_audio(
+                user.id,
+                audio=b["file_id"],
+                caption=f"🎹 {b['name']}\n\n(bundle 3 бита — следующий ниже)",
+            )
+        except Exception:
+            logger.exception("bundle: send_audio failed for beat %s", b.get("id"))
+            failed_beats.append(b)
+
+    license_text = licensing.bundled_mp3_lease_text(
+        buyer_name=buyer_name,
+        buyer_tg_id=user.id,
+        beats=beats,
+        payment_charge_id=payment_charge_id,
+    )
+    try:
+        license_bytes = io.BytesIO(license_text.encode("utf-8"))
+        license_bytes.name = f"LICENSE_BUNDLE_{user.id}.txt"
+        await bot.send_document(
+            user.id,
+            document=InputFile(license_bytes, filename=license_bytes.name),
+            caption="📄 Лицензия на все 3 бита — сохрани этот файл.",
+        )
+    except Exception:
+        logger.exception("bundle: license send failed")
+        failed_beats.append({"name": "license"})
+
+    if failed_beats:
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                "🚨 Bundle delivery частично сломалась:\n"
+                f"User: {user.id} @{user.username}\n"
+                f"Failed: {[b.get('name') for b in failed_beats]}\n"
+                f"charge: {payment_charge_id}",
+            )
+        except Exception:
+            pass
+
+    # sales: одна row per beat. Все ряды идут с одним payment_charge_id —
+    # этого хватит чтобы группировать bundle через `GROUP BY payment_charge_id`
+    # (UNIQUE constraint защитит от двойной записи на retry: первый INSERT
+    # пройдёт, второй будет no-op для остальных битов из-за того же charge_id).
+    # Чтобы избежать UNIQUE-конфликта — суффиксуем charge_id для остальных битов.
+    for idx, b in enumerate(beats):
+        sub_charge = payment_charge_id if idx == 0 else f"{payment_charge_id}#b{idx}"
+        try:
+            sales.log_sale(
+                buyer_tg_id=user.id,
+                buyer_username=user.username,
+                buyer_name=buyer_name,
+                beat_id=b["id"],
+                beat_name=b["name"],
+                license_type="bundle_3",
+                stars_amount=int(amount) if currency == "XTR" else 0,
+                fiat_amount_minor=int(amount) if currency != "XTR" else 0,
+                currency=currency,
+                payment_charge_id=sub_charge,
+                provider_charge_id=None,
+                status="completed",
+            )
+        except Exception:
+            logger.exception("sales.log_sale (bundle, beat %s) failed", b.get("id"))
+
+    try:
+        if currency == "XTR":
+            amount_disp = f"{amount}⭐"
+        elif currency == "RUB":
+            amount_disp = f"{amount/100:g}₽"
+        else:
+            amount_disp = f"{amount} {currency}"
+        names = ", ".join(b.get("name", "?") for b in beats)
+        await bot.send_message(
+            ADMIN_ID,
+            f"🎁 Продажа BUNDLE 3 бита\n"
+            f"Биты: {names}\n"
+            f"Покупатель: {buyer_name} (@{user.username or '—'}, id={user.id})\n"
+            f"Сумма: {amount_disp}\n"
+            f"charge: {payment_charge_id}",
+        )
+    except Exception:
+        pass
+
+
 async def _deliver_product(bot, user, product: dict, *, payment_charge_id: str,
                             amount: int | float, currency: str) -> None:
     """Отправляет zip-архив + txt-лицензию покупателю для drum kit / sample
@@ -4272,6 +4650,27 @@ async def _deliver_yk_payment(bot, payment_id: str) -> bool:
                     amount=amount_kopecks,
                     currency="RUB",
                 )
+            elif ptype == "bundle":
+                beat_ids = pending.get("beat_ids") or []
+                beats = [beats_db.get_beat_by_id(int(bid)) for bid in beat_ids]
+                beats = [b for b in beats if b]
+                if len(beats) != BUNDLE_TOTAL:
+                    await bot.send_message(
+                        user_id,
+                        "⚠️ Часть битов из бандла пропала. Пиши @iiiplfiii — разберёмся.",
+                    )
+                    await bot.send_message(
+                        ADMIN_ID,
+                        f"🚨 YooKassa bundle оплата прошла, но {BUNDLE_TOTAL - len(beats)} бит(ов) недоступн(ы).\n"
+                        f"payment={payment_id}, user={user_id}, beat_ids={beat_ids}",
+                    )
+                    return False
+                await _deliver_bundle(
+                    bot, user, beats,
+                    payment_charge_id=charge_id,
+                    amount=amount_kopecks,
+                    currency="RUB",
+                )
             else:
                 logger.warning("yk: unknown type=%s payment=%s", ptype, payment_id)
                 return False
@@ -4366,6 +4765,17 @@ async def handle_precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE)
             # Mixing service — ничего дополнительно валидировать не нужно,
             # услуга всегда доступна. Stars/USDT/RUB — все варианты ok.
             pass
+        elif payload.startswith("bundle:"):
+            # bundle:<id1>,<id2>,<id3> — все 3 бита должны существовать.
+            ids_csv = payload.split(":", 1)[1]
+            beat_ids = [int(x) for x in ids_csv.split(",") if x.strip()]
+            if len(beat_ids) != BUNDLE_TOTAL:
+                await pcq.answer(ok=False, error_message="Bundle некорректен")
+                return
+            for bid in beat_ids:
+                if not beats_db.get_beat_by_id(bid):
+                    await pcq.answer(ok=False, error_message="Один из битов бандла недоступен")
+                    return
         else:
             await pcq.answer(ok=False, error_message="Неизвестный тип покупки")
             return
@@ -4430,6 +4840,32 @@ async def handle_successful_payment(update: Update, context: ContextTypes.DEFAUL
             # с deadline reminder через 3-5 рабочих дней.
             await _deliver_mixing_service(
                 bot, user,
+                payment_charge_id=sp.telegram_payment_charge_id,
+                amount=sp.total_amount,
+                currency=sp.currency or "XTR",
+            )
+            return
+
+        if payload.startswith("bundle:"):
+            ids_csv = payload.split(":", 1)[1]
+            try:
+                beat_ids = [int(x) for x in ids_csv.split(",") if x.strip()]
+            except ValueError:
+                beat_ids = []
+            beats = [beats_db.get_beat_by_id(bid) for bid in beat_ids]
+            beats = [b for b in beats if b]
+            if len(beats) != BUNDLE_TOTAL:
+                await msg.reply_text("⚠️ Часть битов из бандла пропала. Напишу автору: @iiiplfiii")
+                await bot.send_message(
+                    ADMIN_ID,
+                    f"🚨 Stars-bundle оплата прошла, но {BUNDLE_TOTAL - len(beats)} бит(ов) недоступн(ы).\n"
+                    f"User: {user.id} @{user.username}\n"
+                    f"Requested ids: {beat_ids}\n"
+                    f"charge: {sp.telegram_payment_charge_id}",
+                )
+                return
+            await _deliver_bundle(
+                bot, user, beats,
                 payment_charge_id=sp.telegram_payment_charge_id,
                 amount=sp.total_amount,
                 currency=sp.currency or "XTR",
@@ -4503,9 +4939,11 @@ pending_usdt_invoices: dict[int, dict] = {}
 
 async def poll_usdt_invoice(bot, invoice_id: int, user_id: int, item_id: int,
                             kind: str = "beat", timeout_sec: int = 1800):
-    """Пуллит инвойс до оплаты/expiry. Доставляет бит или продукт при paid.
+    """Пуллит инвойс до оплаты/expiry. Доставляет бит/продукт/mixing/bundle при paid.
 
-    kind="beat" → _deliver_mp3_lease, kind="product" → _deliver_product.
+    kind="beat" → _deliver_mp3_lease, kind="product" → _deliver_product,
+    kind="mixing" → _deliver_mixing_service, kind="bundle" → _deliver_bundle
+    (item_id игнорируется — beat_ids читаются из pending_usdt_invoices[invoice_id]).
 
     try/finally гарантирует очистку записи в pending_usdt_invoices даже
     при exception — защита от утечки памяти при долгом uptime.
@@ -4541,6 +4979,26 @@ async def poll_usdt_invoice(bot, invoice_id: int, user_id: int, item_id: int,
                 if kind == "mixing":
                     await _deliver_mixing_service(
                         bot, user,
+                        payment_charge_id=charge, amount=amount, currency=currency,
+                    )
+                    return
+
+                if kind == "bundle":
+                    pending = pending_usdt_invoices.get(invoice_id) or {}
+                    beat_ids = pending.get("beat_ids") or []
+                    beats = [beats_db.get_beat_by_id(int(bid)) for bid in beat_ids]
+                    beats = [b for b in beats if b]
+                    if len(beats) != BUNDLE_TOTAL:
+                        try:
+                            await bot.send_message(
+                                user_id,
+                                "⚠️ Часть битов из бандла пропала. Напишу автору: @iiiplfiii",
+                            )
+                        except Exception:
+                            pass
+                        return
+                    await _deliver_bundle(
+                        bot, user, beats,
                         payment_charge_id=charge, amount=amount, currency=currency,
                     )
                     return
