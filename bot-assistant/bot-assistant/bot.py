@@ -864,26 +864,31 @@ async def do_quick_filter(bot, chat_id: int, user_id: int, filter_name: str,
             await bot.send_message(chat_id, text, reply_markup=kb_beats_menu(user_id=user_id))
         return
 
-    # Strict anti-repeat: если все биты в фильтре уже виделись — alert
-    # с кнопкой reset (НЕ повторяем).
+    # Strict anti-repeat с auto-reset: исчерпаны → удаляем биты ЭТОГО фильтра
+    # из history (other категории не трогаем) и шлём один заново. Юзер видит
+    # subtle alert «🔄 Прошёл круг» в caption — без manual reset кнопки.
     history = set(get_history(user_id))
     available = [b for b in results if b["id"] not in history]
+    cycled = False
     if not available:
-        text = (
-            f"🎯 <b>Ты прослушал ВСЕ {len(results)} битов в «{title}»!</b>\n\n"
-            f"Чтобы пройтись заново — сбрось историю прослушиваний."
-        )
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Сбросить историю", callback_data="hist_reset")],
-            [InlineKeyboardButton("◀️ Раздел Биты", callback_data="menu_beat")],
-        ])
-        if query is not None:
-            await _nav_reply(query, text, parse_mode="HTML", reply_markup=kb)
-        else:
-            await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb)
-        return
+        # Per-category reset: удаляем из user_history только beat_ids этого filter
+        filter_ids = {b["id"] for b in results}
+        if user_id in user_history:
+            user_history[user_id] = [
+                bid for bid in user_history[user_id] if bid not in filter_ids
+            ]
+        available = results
+        cycled = True
     chosen = random.choice(available)
     user_search_state[user_id] = {"filter": filter_name, "page": page}
+    if cycled:
+        try:
+            await query.answer(
+                f"🔄 Прошёл круг по «{title}» ({len(results)}) — начинаем заново!",
+                show_alert=False,
+            ) if query else None
+        except Exception:
+            pass
     await send_beat(bot, chat_id, chosen, user_id)
 
 def kb_beats_menu(user_id: int | None = None):
@@ -2751,18 +2756,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         history = set(get_history(user_id))
         available = [b for b in items if b["id"] not in history]
         if not available:
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 Сбросить историю", callback_data="hist_reset")],
-                [InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")],
-            ])
-            await query.answer()
-            await bot.send_message(
-                query.message.chat_id,
-                f"🎯 <b>Ты прослушал ВСЕ {len(items)} записей в категории!</b>\n\n"
-                "Сбрось историю чтобы начать заново.",
-                parse_mode="HTML", reply_markup=kb,
-            )
-            return
+            # Auto-reset per category: удаляем из user_history только bids
+            # этой категории (не трогаем другие)
+            cat_ids = {b["id"] for b in items}
+            if user_id in user_history:
+                user_history[user_id] = [
+                    bid for bid in user_history[user_id] if bid not in cat_ids
+                ]
+            available = items
+            try:
+                await query.answer(
+                    f"🔄 Прошёл круг по категории ({len(items)}) — начинаем заново!",
+                    show_alert=False,
+                )
+            except Exception:
+                pass
         beat = random.choice(available)
         await send_beat(bot, query.message.chat_id, beat, user_id)
         return
@@ -2779,23 +2787,28 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if similar:
             next_beat = random.choice(similar)
         else:
-            # Fallback: любой бит из категории НЕ из history. Если все видел —
-            # alert + reset кнопка (не повторяем).
-            items = [b for b in beats_db.BEATS_CACHE
-                     if b.get("content_type", "beat") == content_type
-                     and b["id"] not in history]
+            # Fallback: любой бит из категории НЕ из history. Если все
+            # категории видел — auto-reset per content_type и шлём заново.
+            items_all = [b for b in beats_db.BEATS_CACHE
+                         if b.get("content_type", "beat") == content_type]
+            items = [b for b in items_all if b["id"] not in history]
             if not items:
-                kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 Сбросить историю", callback_data="hist_reset")],
-                    [InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")],
-                ])
-                await query.answer()
-                await bot.send_message(
-                    query.message.chat_id,
-                    f"🎯 <b>Ты прослушал ВСЕ записи в категории «{content_type}»!</b>\n\n"
-                    "Сбрось историю чтобы начать заново.",
-                    parse_mode="HTML", reply_markup=kb,
-                )
+                # Auto-reset only this category
+                cat_ids = {b["id"] for b in items_all}
+                if user_id in user_history:
+                    user_history[user_id] = [
+                        bid for bid in user_history[user_id] if bid not in cat_ids
+                    ]
+                items = items_all
+                try:
+                    await query.answer(
+                        f"🔄 Прошёл круг ({len(items_all)}) — начинаем заново!",
+                        show_alert=False,
+                    )
+                except Exception:
+                    pass
+            if not items:
+                await query.answer("Пусто!", show_alert=True)
                 return
             next_beat = random.choice(items)
         await send_beat(bot, query.message.chat_id, next_beat, user_id)
@@ -2803,27 +2816,34 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "random_beat":
         history = set(get_history(user_id))
-        beats_only = [b for b in beats_db.BEATS_CACHE
-                      if b.get("content_type", "beat") == "beat"
-                      and b.get("file_id")
-                      and b["id"] not in history]
+        all_beats = [b for b in beats_db.BEATS_CACHE
+                     if b.get("content_type", "beat") == "beat" and b.get("file_id")]
+        beats_only = [b for b in all_beats if b["id"] not in history]
         if not beats_only:
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 Сбросить историю", callback_data="hist_reset")],
-                [InlineKeyboardButton("◀️ Раздел Биты", callback_data="menu_beat")],
-            ])
-            await query.answer()
-            await bot.send_message(
-                query.message.chat_id,
-                "🎯 <b>Ты прослушал ВСЕ биты в каталоге!</b>\n\n"
-                "Сбрось историю чтобы начать заново — или зайди в «🎤 Треки» / «🔀 Ремиксы».",
-                parse_mode="HTML", reply_markup=kb,
-            )
+            # Auto-reset биты-категории
+            cat_ids = {b["id"] for b in all_beats}
+            if user_id in user_history:
+                user_history[user_id] = [
+                    bid for bid in user_history[user_id] if bid not in cat_ids
+                ]
+            beats_only = all_beats
+            try:
+                await query.answer(
+                    f"🔄 Прошёл круг по битам ({len(all_beats)}) — начинаем заново!",
+                    show_alert=False,
+                )
+            except Exception:
+                pass
+        if not beats_only:
+            await query.answer("Каталог пуст!", show_alert=True)
             return
         beat = random.choice(beats_only)
         await send_beat(bot, query.message.chat_id, beat, user_id)
         return
 
+    # Legacy hist_reset callback (для старых сообщений в чате с кнопкой
+    # «🔄 Сбросить историю» — full reset как раньше). Команда /reset_history
+    # остаётся для manual override.
     if data == "hist_reset":
         n = reset_user_history(user_id)
         await query.answer(f"🔄 Сброшено {n} записей. Можешь слушать заново.", show_alert=True)
