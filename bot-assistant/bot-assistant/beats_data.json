@@ -614,11 +614,11 @@
     ],
     "post_url": "https://t.me/iiiplfiii/96",
     "bpm": 108,
-    "key": "F#m",
+    "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADYGnTCeTGspFgVXKDzkWJXpTO8kZ3AAIfUAACAlcJSEu-6fwL3cGKOwQ",
     "content_type": "beat",
     "file_unique_id": "AgADH1AAAgJXCUg",
-    "classification_confidence": 0.95
+    "classification_confidence": 0.7
   },
   {
     "id": 2686017,
@@ -629,11 +629,11 @@
     ],
     "post_url": "https://t.me/iiiplfiii/98",
     "bpm": 166,
-    "key": "Fm",
+    "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADYmnTCeUlQppcZnoafgABRS2zRtWu3wACekgAAu-gOEhSJZHtrSQiLDsE",
     "content_type": "beat",
     "file_unique_id": "AgADekgAAu-gOEg",
-    "classification_confidence": 0.95
+    "classification_confidence": 0.7
   },
   {
     "id": 2364337,
@@ -644,11 +644,11 @@
     ],
     "post_url": "https://t.me/iiiplfiii/99",
     "bpm": 144,
-    "key": "Bm",
+    "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADY2nTCeUbT2OrBgV3v0tB5tCNzNPIAAIaSgAC4xBRSJ9ic3atJO55OwQ",
     "content_type": "beat",
     "file_unique_id": "AgADGkoAAuMQUUg",
-    "classification_confidence": 0.95
+    "classification_confidence": 0.7
   },
   {
     "id": 6369302,
@@ -1190,11 +1190,11 @@
     ],
     "post_url": "https://t.me/iiiplfiii/141",
     "bpm": 136,
-    "key": "Fm",
+    "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADjWnTCfydSye3Ej_LtWvD2deHpApqAAJNSQACzoaxSQezSX5dhJ6qOwQ",
     "content_type": "beat",
     "file_unique_id": "AgADTUkAAs6GsUk",
-    "classification_confidence": 0.95
+    "classification_confidence": 0.7
   },
   {
     "id": 9755527,
@@ -1263,11 +1263,11 @@
     ],
     "post_url": "https://t.me/iiiplfiii/148",
     "bpm": 152,
-    "key": "C#m",
+    "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADlGnTCf-Y42ijOFOivwf30szbfW3nAALISgACttj4SYABJIo2HxkoOwQ",
     "content_type": "beat",
     "file_unique_id": "AgADyEoAArbY-Ek",
-    "classification_confidence": 0.95
+    "classification_confidence": 0.7
   },
   {
     "id": 3624512,
@@ -1629,11 +1629,11 @@
     ],
     "post_url": "https://t.me/iiiplfiii/175",
     "bpm": 161,
-    "key": "-",
+    "key": "C#m",
     "file_id": "CQACAgIAAx0Cb_cPkAADr2nTCg3S_UmhQDOfOetID8K2-4DfAAKoTwACPj9QS1fhqE_4B2OSOwQ",
     "content_type": "beat",
     "file_unique_id": "AgADqE8AAj4_UEs",
-    "classification_confidence": 0.7
+    "classification_confidence": 0.95
   },
   {
     "id": 8455336,
@@ -1837,11 +1837,11 @@
     ],
     "post_url": "https://t.me/iiiplfiii/195",
     "bpm": 172,
-    "key": "G#m",
+    "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADw2nTChexJL_vKvMFgUEPBGrneq5zAAK8cAACY9oRSMFPl0U8hWVzOwQ",
     "content_type": "beat",
     "file_unique_id": "AgADvHAAAmPaEUg",
-    "classification_confidence": 0.95
+    "classification_confidence": 1.0
   },
   {
     "id": 5954698,
@@ -2109,11 +2109,11 @@
     ],
     "post_url": "https://t.me/iiiplfiii/216",
     "bpm": 172,
-    "key": "Cm",
+    "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAAD2GnTCiEMuwXakQhOm5z-bn03dJdpAAI4WgACqI-RSb_DmPsgN53MOwQ",
     "content_type": "beat",
     "file_unique_id": "AgADOFoAAqiPkUk",
-    "classification_confidence": 0.95
+    "classification_confidence": 1.0
   },
   {
     "id": 2803780,
@@ -2523,7 +2523,7 @@
     ],
     "post_url": "https://t.me/iiiplfiii/253",
     "bpm": 127,
-    "key": "A#m",
+    "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAAD_WnTCjKXcf27eX976U8pdMJyL0bVAAL3XAAC5aV4SyvFuFSc0QyWOwQ",
     "content_type": "beat",
     "file_unique_id": "AgAD91wAAuWleEs",
@@ -2937,7 +2937,7 @@
     "bpm": 152,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAACARpp0wpAi1pwpninKQJbOdvl2mj5HwACN20AAr5X-UoXQiVQFA5XuzsE",
-    "content_type": "track",
+    "content_type": "beat",
     "file_unique_id": "AgADN20AAr5X-Uo",
     "classification_confidence": 1.0
   },
@@ -3213,11 +3213,11 @@
     ],
     "post_url": "https://t.me/iiiplfiii/305",
     "bpm": 96,
-    "key": "Bm",
+    "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAACATFp0wpLzcWoXTZ0FLhqfrLGvnkfBQACkXYAAmy2EEvRFfr8FG__nTsE",
     "content_type": "beat",
     "file_unique_id": "AgADkXYAAmy2EEs",
-    "classification_confidence": 0.95
+    "classification_confidence": 0.7
   },
   {
     "id": 2084973,
@@ -3952,11 +3952,11 @@
     "tags": [],
     "post_url": "https://t.me/iiiplfiii/362",
     "bpm": 136,
-    "key": "Gm",
+    "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAACAWpp0wppAAHpO1eUohnT2Z6aymnHFG4AAtaUAAITmehKIzNXQDjg7WA7BA",
     "content_type": "beat",
     "file_unique_id": "AgAD1pQAAhOZ6Eo",
-    "classification_confidence": 0.95
+    "classification_confidence": 1.0
   },
   {
     "id": 2693077,
