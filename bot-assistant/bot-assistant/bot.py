@@ -561,11 +561,12 @@ def kb_main_menu(user_id: int | None = None):
     tracks = len([b for b in beats_db.BEATS_CACHE if b.get("content_type") == "track"])
     remixes = len([b for b in beats_db.BEATS_CACHE if b.get("content_type") == "remix"])
     cart_n = len(_cart_get(user_id)) if user_id is not None else 0
-    cart_label = (
-        f"🛒 Корзина · {cart_n} ({licensing.PRICE_BUNDLE3_RUB}₽ за 3)"
-        if cart_n else
-        "🛒 Корзина (пусто)"
-    )
+    if cart_n >= BUNDLE_TOTAL:
+        cart_label = f"🎁 Набор готов · {cart_n}/{BUNDLE_TOTAL} → купить за {licensing.PRICE_BUNDLE3_RUB}₽"
+    elif cart_n:
+        cart_label = f"🎁 Набор «3 за {licensing.PRICE_BUNDLE3_RUB}₽» · {cart_n}/{BUNDLE_TOTAL}"
+    else:
+        cart_label = f"🎁 Собрать набор «3 бита за {licensing.PRICE_BUNDLE3_RUB}₽» (-600₽)"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"🎹 Биты ({beats})", callback_data="menu_beat")],
         [InlineKeyboardButton(f"🎤 Треки ({tracks})", callback_data="menu_track"),
@@ -751,16 +752,18 @@ def kb_after_beat(beat_id, content_type="beat", user_id: int | None = None):
             ),
         ])
         # Cart-кнопка: статус зависит от текущей корзины юзера.
+        # Брендим как «Набор 3 за 4500₽ (-600₽)» вместо generic «корзины» —
+        # юзеру важно сразу видеть что это акция со скидкой, а не просто store.
         if user_id is not None:
             cart = _cart_get(user_id)
             if beat_id in cart:
-                cart_label = f"✅ В корзине ({len(cart)}/{BUNDLE_TOTAL}) → /cart"
+                cart_label = f"✅ В наборе ({len(cart)}/{BUNDLE_TOTAL}) → /cart"
                 cart_cb = "cart_show"
             elif len(cart) >= BUNDLE_TOTAL:
-                cart_label = f"🛒 Корзина полная ({len(cart)}) → /cart"
+                cart_label = f"🎁 Набор готов ({len(cart)}/{BUNDLE_TOTAL}) → купить!"
                 cart_cb = "cart_show"
             else:
-                cart_label = f"🛒 + В корзину ({len(cart)}/{BUNDLE_TOTAL})"
+                cart_label = f"🎁 В набор «3 за {licensing.PRICE_BUNDLE3_RUB}₽» ({len(cart)}/{BUNDLE_TOTAL})"
                 cart_cb = f"cart_add_{beat_id}"
             rows.append([InlineKeyboardButton(cart_label, callback_data=cart_cb)])
         rows.append([
@@ -793,12 +796,13 @@ def kb_channel_beat_buy(beat_id: int) -> InlineKeyboardMarkup:
         )],
         # В канале не знаем user_id заранее — кнопка просто пробует add. Handler
         # покажет alert если в корзине / уже там / переполнена.
+        # Бренд «Набор 3 за 4500₽ (-600₽)» вместо generic корзины.
         [InlineKeyboardButton(
-            f"🛒 + В корзину (3 за {licensing.PRICE_BUNDLE3_RUB}₽)",
+            f"🎁 В набор «3 за {licensing.PRICE_BUNDLE3_RUB}₽» (-600₽)",
             callback_data="cart_add_" + str(beat_id),
         )],
         [InlineKeyboardButton(
-            f"🎁 3 бита {licensing.PRICE_BUNDLE3_RUB}₽ (выгода 600₽)",
+            f"🎁 Купить 3 разом · {licensing.PRICE_BUNDLE3_RUB}₽ (выгода 600₽)",
             callback_data="bundle_start_" + str(beat_id),
         )],
         [InlineKeyboardButton("💎 WAV / Unlimited / Exclusive", callback_data="excl_" + str(beat_id))],
@@ -888,7 +892,7 @@ def kb_bundle_pay() -> InlineKeyboardMarkup:
 
 
 def kb_cart(user_id: int) -> InlineKeyboardMarkup:
-    """UI корзины: список битов с ❌ удалить + footer (купить/добавить ещё/очистить)."""
+    """UI набора: список битов с ❌ удалить + footer (купить/добавить ещё/очистить)."""
     cart = _cart_get(user_id)
     rows: list[list[InlineKeyboardButton]] = []
     for bid in cart:
@@ -900,11 +904,11 @@ def kb_cart(user_id: int) -> InlineKeyboardMarkup:
         ])
     if not cart:
         rows.append([InlineKeyboardButton(
-            "🎲 Найти биты для bundle", callback_data="random_beat",
+            "🎲 Найти биты для набора", callback_data="random_beat",
         )])
     elif len(cart) >= BUNDLE_TOTAL:
         rows.append([InlineKeyboardButton(
-            f"✅ Купить {BUNDLE_TOTAL} бит(ов) за {licensing.PRICE_BUNDLE3_RUB}₽",
+            f"✅ Купить набор · {licensing.PRICE_BUNDLE3_RUB}₽ (выгода 600₽)",
             callback_data="cart_buy",
         )])
         rows.append([InlineKeyboardButton(
@@ -913,10 +917,10 @@ def kb_cart(user_id: int) -> InlineKeyboardMarkup:
     else:
         need = BUNDLE_TOTAL - len(cart)
         rows.append([InlineKeyboardButton(
-            f"➕ Добавь ещё {need} → bundle 4500₽", callback_data="random_beat",
+            f"➕ Добавь ещё {need} → скидка 600₽", callback_data="random_beat",
         )])
     if cart:
-        rows.append([InlineKeyboardButton("🗑 Очистить корзину", callback_data="cart_clear")])
+        rows.append([InlineKeyboardButton("🗑 Очистить набор", callback_data="cart_clear")])
     rows.append([InlineKeyboardButton("◀️ Меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(rows)
 
@@ -926,13 +930,15 @@ async def _send_cart_view(bot, user_id: int, edit_message=None) -> None:
     edit (для callback `cart_show` из main_menu); иначе reply_text.
     """
     cart = _cart_get(user_id)
+    full_single = BUNDLE_TOTAL * licensing.PRICE_MP3_RUB
+    saving = full_single - licensing.PRICE_BUNDLE3_RUB
     if not cart:
         text = (
-            "🛒 <b>Корзина пуста</b>\n\n"
-            f"Добавь любой бит через кнопку «🛒 + В корзину» → когда наберётся "
-            f"{BUNDLE_TOTAL}, купишь все за <b>{licensing.PRICE_BUNDLE3_RUB}₽</b>\n"
-            f"(вместо {BUNDLE_TOTAL * licensing.PRICE_MP3_RUB}₽ по одному, "
-            f"экономия {BUNDLE_TOTAL * licensing.PRICE_MP3_RUB - licensing.PRICE_BUNDLE3_RUB}₽)"
+            f"🎁 <b>Набор «{BUNDLE_TOTAL} бита за {licensing.PRICE_BUNDLE3_RUB}₽»</b>\n"
+            f"<i>Скидка {saving}₽ при покупке трёх битов одной транзакцией</i>\n\n"
+            f"📭 Пока пусто. Добавляй биты через кнопку <b>«🎁 В набор»</b> "
+            f"в карточке любого бита — когда наберётся {BUNDLE_TOTAL}, купишь всё за "
+            f"<b>{licensing.PRICE_BUNDLE3_RUB}₽</b> (вместо {full_single}₽ поодиночке)."
         )
     else:
         names = []
@@ -945,16 +951,19 @@ async def _send_cart_view(bot, user_id: int, edit_message=None) -> None:
                 names.append(f"• id={bid} (бит пропал из каталога)")
         names_block = "\n".join(names)
         if len(cart) >= BUNDLE_TOTAL:
-            total_single = len(cart) * licensing.PRICE_MP3_RUB
             tail = (
-                f"\n\n💰 <b>Купить {BUNDLE_TOTAL} = {licensing.PRICE_BUNDLE3_RUB}₽</b>\n"
-                f"(по одному это {total_single}₽ за {len(cart)} штук)"
+                f"\n\n💰 <b>Готово! Купи 3 за {licensing.PRICE_BUNDLE3_RUB}₽</b> "
+                f"(вместо {full_single}₽ — экономия {saving}₽)"
             )
         else:
             need = BUNDLE_TOTAL - len(cart)
-            tail = f"\n\n👇 Добавь ещё <b>{need} бит(ов)</b> → bundle {licensing.PRICE_BUNDLE3_RUB}₽"
+            tail = (
+                f"\n\n👇 Добавь ещё <b>{need} бит(ов)</b> → купишь "
+                f"3 за <b>{licensing.PRICE_BUNDLE3_RUB}₽</b> (-{saving}₽)"
+            )
         text = (
-            f"🛒 <b>Корзина · {len(cart)}/{BUNDLE_TOTAL}</b>\n\n"
+            f"🎁 <b>Набор «3 бита за {licensing.PRICE_BUNDLE3_RUB}₽» · {len(cart)}/{BUNDLE_TOTAL}</b>\n"
+            f"<i>Скидка {saving}₽ при покупке трёх битов</i>\n\n"
             f"{names_block}{tail}"
         )
     kb = kb_cart(user_id)
@@ -2940,16 +2949,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer(msg, show_alert=False)
             return
         cart = _cart_get(user_id)
-        # Показываем alert + если в корзине достигли BUNDLE_TOTAL — приглашаем купить
+        # Показываем alert + если набор полный — приглашаем купить
         if len(cart) >= BUNDLE_TOTAL:
             await query.answer(
-                f"🎁 В корзине {len(cart)} бит(ов)! Открой /cart чтобы купить.",
+                f"🎁 Набор готов ({len(cart)}/{BUNDLE_TOTAL})! "
+                f"Открой /cart → купить за {licensing.PRICE_BUNDLE3_RUB}₽ (вместо "
+                f"{BUNDLE_TOTAL * licensing.PRICE_MP3_RUB}₽).",
                 show_alert=True,
             )
         else:
             need = BUNDLE_TOTAL - len(cart)
             await query.answer(
-                f"✅ Добавлен в корзину ({len(cart)}/{BUNDLE_TOTAL}). Ещё {need} → bundle.",
+                f"🎁 В наборе ({len(cart)}/{BUNDLE_TOTAL}). Ещё {need} → "
+                f"купишь 3 за {licensing.PRICE_BUNDLE3_RUB}₽ (-600₽).",
                 show_alert=False,
             )
         # Обновляем карточку — кнопка должна стать «✅ В корзине»
@@ -3011,10 +3023,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "page": 0,
         }
         names_block = "\n".join(f"• {b['name']}" for b in chosen_beats)
+        full_single = BUNDLE_TOTAL * licensing.PRICE_MP3_RUB
+        saving = full_single - licensing.PRICE_BUNDLE3_RUB
         try:
             await query.message.edit_text(
                 (
-                    f"🎁 <b>Bundle из корзины — {licensing.PRICE_BUNDLE3_RUB}₽</b>\n\n"
+                    f"🎁 <b>Набор «3 бита за {licensing.PRICE_BUNDLE3_RUB}₽»</b>\n"
+                    f"<i>Скидка {saving}₽ vs {full_single}₽ поодиночке</i>\n\n"
                     f"<b>3 бита:</b>\n{names_block}\n\n"
                     "Выбери способ оплаты:"
                 ),
@@ -3050,11 +3065,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await bot.send_message(
                 user_id,
                 (
-                    f"🎁 <b>Bundle 3 бита — {licensing.PRICE_BUNDLE3_RUB}₽</b>\n"
-                    f"(вместо 3×{licensing.PRICE_MP3_RUB} = {3 * licensing.PRICE_MP3_RUB}₽, экономия "
-                    f"{3 * licensing.PRICE_MP3_RUB - licensing.PRICE_BUNDLE3_RUB}₽)\n\n"
-                    f"<b>Anchor:</b> {anchor_name} ({anchor_bpm} BPM)\n\n"
-                    f"Выбери ещё {BUNDLE_TOTAL - 1} бита из каталога:"
+                    f"🎁 <b>Набор «3 бита за {licensing.PRICE_BUNDLE3_RUB}₽»</b>\n"
+                    f"<i>Вместо {3 * licensing.PRICE_MP3_RUB}₽ поодиночке — "
+                    f"экономия {3 * licensing.PRICE_MP3_RUB - licensing.PRICE_BUNDLE3_RUB}₽</i>\n\n"
+                    f"<b>Первый бит:</b> {anchor_name} ({anchor_bpm} BPM)\n\n"
+                    f"👇 Выбери ещё {BUNDLE_TOTAL - 1} бита из каталога:"
                 ),
                 parse_mode="HTML",
                 reply_markup=kb_bundle_picker(user_id),
