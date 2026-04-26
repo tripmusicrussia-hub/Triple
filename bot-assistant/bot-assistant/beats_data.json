@@ -1030,7 +1030,7 @@
     "bpm": 136,
     "key": "-",
     "file_id": "CQACAgIAAx0Cb_cPkAADf2nTCfWl1gIeqTg3QELslLH4kVXVAAIdTwACRrdhSTIWKDOvDA6zOwQ",
-    "content_type": "beat",
+    "content_type": "remix",
     "file_unique_id": "AgADHU8AAka3YUk",
     "classification_confidence": 0.7
   },
@@ -1409,11 +1409,11 @@
     ],
     "post_url": "https://t.me/iiiplfiii/159",
     "bpm": 103,
-    "key": "-",
+    "key": "Fm",
     "file_id": "CQACAgIAAx0Cb_cPkAADn2nTCgRWKnF0ufo5pxvWlbFEsJ_kAAJhTQACdOeZSoe_6eKK3mx7OwQ",
     "content_type": "beat",
     "file_unique_id": "AgADYU0AAnTnmUo",
-    "classification_confidence": 0.7
+    "classification_confidence": 0.95
   },
   {
     "id": 9653931,
@@ -1439,11 +1439,11 @@
     ],
     "post_url": "https://t.me/iiiplfiii/161",
     "bpm": 140,
-    "key": "-",
+    "key": "D",
     "file_id": "CQACAgIAAx0Cb_cPkAADoWnTCgb7-xQrGAABOLg2ectIWizVQQACV1IAAtNiqEoj5eQGvCNv6zsE",
     "content_type": "beat",
     "file_unique_id": "AgADV1IAAtNiqEo",
-    "classification_confidence": 1.0
+    "classification_confidence": 0.95
   },
   {
     "id": 3076564,
@@ -1570,11 +1570,11 @@
     ],
     "post_url": "https://t.me/iiiplfiii/170",
     "bpm": 140,
-    "key": "-",
+    "key": "Fm",
     "file_id": "CQACAgIAAx0Cb_cPkAADqmnTCgpWsQxlygL2XcfPP_vgIEBHAAIzVgACJOwISxxt7xc5_JWQOwQ",
     "content_type": "beat",
     "file_unique_id": "AgADM1YAAiTsCEs",
-    "classification_confidence": 0.7
+    "classification_confidence": 0.95
   },
   {
     "id": 5888356,
@@ -1962,11 +1962,11 @@
     ],
     "post_url": "https://t.me/iiiplfiii/203",
     "bpm": 99,
-    "key": "-",
+    "key": "Cm",
     "file_id": "CQACAgIAAx0Cb_cPkAADy2nTChtJ0j6B1zXOMTf6jVELjSZ9AAKkSAACfNfJSLDTFMuncCxYOwQ",
     "content_type": "beat",
     "file_unique_id": "AgADpEgAAnzXyUg",
-    "classification_confidence": 1.0
+    "classification_confidence": 0.95
   },
   {
     "id": 3234592,
@@ -2270,11 +2270,11 @@
     ],
     "post_url": "https://t.me/iiiplfiii/228",
     "bpm": 152,
-    "key": "-",
+    "key": "Bm",
     "file_id": "CQACAgIAAx0Cb_cPkAAD5GnTCifV8N_Hm842nzKhgYP8dKoXAALbVgACe64pSlHlxNaUg29lOwQ",
     "content_type": "beat",
     "file_unique_id": "AgAD21YAAnuuKUo",
-    "classification_confidence": 0.7
+    "classification_confidence": 0.95
   },
   {
     "id": 7918550,
