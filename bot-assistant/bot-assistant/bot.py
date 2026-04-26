@@ -2694,7 +2694,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• Присылаешь: стемы WAV (24-bit, отдельные дорожки) + референс\n"
             "• Получаешь: master -9 dBTP, готовый под Spotify/Apple/YouTube\n"
             "• До 3 ревизий правок включено в цену\n"
-            "• Постоянным клиентам — каждое 4-е сведение со скидкой 30%\n"
             "Заказать: кнопка «🎛 Сведение треков» в главном меню.\n\n"
 
             "<b>Как купить</b>\n"
@@ -2718,9 +2717,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "menu_mixing":
         # Mixing service: отдельный товар (не бит). Покупка через Stars/USDT/RUB,
         # после оплаты — клиент высылает стемы в DM @iiiplfiii.
-        # Тон: «свой человек, делаю для души» — клиентов мало, нужно завлечь,
-        # никаких лимитов на правки, явный «pre-mix listen» (бесплатное
-        # прослушивание стемов до оплаты).
+        # Чистый profi-style: цена + что делаю + что от клиента + срок.
+        # Никаких «4-е сведение со скидкой» — это cookie-cutter тон фрилансера,
+        # серьёзный engineer не раздаёт скидки, продаёт качеством.
         text = (
             "<b>🎛 Сведение треков · mix + master под ключ</b>\n\n"
             f"<b>{licensing.PRICE_MIX_STARS}⭐ / {licensing.PRICE_MIX_USDT:g} USDT / "
@@ -2737,8 +2736,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• 2 строки ТЗ: жанр, mood, что важно\n\n"
 
             "<b>⏱ Срок:</b> 3-5 рабочих дней с момента получения стемов.\n\n"
-
-            "<b>🎁 Постоянным клиентам:</b> каждое 4-е сведение со скидкой 30%\n\n"
 
             "<i>Вопросы — @iiiplfiii. Делаю как для себя.</i>"
         )
