@@ -223,6 +223,62 @@ def _cleanup_expired_discounts() -> int:
     return len(to_drop)
 
 
+# ── Referral discount tokens (universal, beat_id=None) ─────────────
+# Создаются при /start с deep-link `?start=ref_<friend_tg_id>`. Универсальные:
+# валидны на ЛЮБОЙ бит (юзер при покупке выбирает который apply'нет).
+# Schema same as remarketing tokens, но `beat_id=None` + `source="ref_<friend_id>"`.
+
+REFERRAL_TTL_SEC = 30 * 24 * 3600  # 30 дней — referral окно дольше чем remarketing
+
+
+def _get_active_universal_discount(user_id: int) -> str | None:
+    """Возвращает token universal-discount (beat_id=None) для юзера если есть.
+    Используется чтобы показать кнопку «купить со скидкой» на ЛЮБОМ бите.
+    """
+    now = time.time()
+    for tok, rec in active_discounts.items():
+        if (
+            rec.get("user_id") == user_id
+            and rec.get("beat_id") is None
+            and not rec.get("used")
+            and rec.get("expires_at", 0) > now
+        ):
+            return tok
+    return None
+
+
+def _make_referral_discount_token(user_id: int, friend_id: int, pct: int) -> str:
+    """Создаёт universal token (beat_id=None) для referral pair.
+
+    Idempotent на (user_id, source=ref_<friend_id>) — повторный /start с тем же
+    ref-link не плодит tokens.
+    """
+    import secrets
+    now = time.time()
+    src_marker = f"ref_{friend_id}"
+    # Idempotency: ищем активный universal token от того же friend
+    for tok, rec in active_discounts.items():
+        if (
+            rec.get("user_id") == user_id
+            and rec.get("beat_id") is None
+            and rec.get("source") == src_marker
+            and not rec.get("used")
+            and rec.get("expires_at", 0) > now
+        ):
+            return tok
+    token = f"r{user_id}_{friend_id}_{secrets.token_hex(4)}"
+    active_discounts[token] = {
+        "user_id": user_id,
+        "beat_id": None,  # universal
+        "pct": pct,
+        "expires_at": now + REFERRAL_TTL_SEC,
+        "used": False,
+        "source": src_marker,
+    }
+    _save_discounts()
+    return token
+
+
 def track_bit_view(user_id: int, beat: dict) -> None:
     """Юзер посмотрел preview бита — записываем для re-marketing.
     Вызывается из send_beat / deep-link buy_/prod_ handlers.
@@ -695,6 +751,10 @@ def kb_main_menu(user_id: int | None = None):
         [InlineKeyboardButton("📦 Kits & Packs", callback_data="menu_products")],
         [InlineKeyboardButton(f"🎛 Сведение трека под ключ — {licensing.PRICE_MIX_RUB}₽", callback_data="menu_mixing")],
         [InlineKeyboardButton(cart_label, callback_data=cart_cb)],
+        [InlineKeyboardButton(
+            f"🎁 Пригласить друга → -{licensing.REFERRAL_PCT}% обоим",
+            callback_data="invite_friend",
+        )],
         [InlineKeyboardButton("ℹ️ Услуги и цены", callback_data="menu_services")],
         # Quick-filter chips — быстрый доступ к популярным сценам / mood
         [InlineKeyboardButton("🔥 Hard", callback_data="qf_hard"),
@@ -932,6 +992,17 @@ def kb_after_beat(beat_id, content_type="beat", user_id: int | None = None):
                 callback_data="buy_rub_" + str(beat_id),
             ),
         ])
+        # Universal discount (referral) — если у юзера активный token,
+        # показываем выделенную кнопку «купить со скидкой» на любой бит.
+        if user_id is not None:
+            uni_tok = _get_active_universal_discount(user_id)
+            if uni_tok:
+                pct = int(active_discounts[uni_tok].get("pct", licensing.REFERRAL_PCT))
+                disc_rub = licensing.mp3_price_with_discount(pct, "RUB")
+                rows.append([InlineKeyboardButton(
+                    f"🎁 Купить со скидкой -{pct}% ({disc_rub}₽)",
+                    callback_data=f"disc_apply_{beat_id}",
+                )])
         # Cart-кнопка: 3 состояния — собираем / готов / уже в наборе.
         # При len(cart) >= BUNDLE_TOTAL кнопка ведёт ПРЯМО в payment menu
         # (cart_buy), без захода в /cart — убираем лишний экран.
@@ -1339,13 +1410,16 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Deep-link payload parsing. Поддерживаемые форматы:
     #   ref_<src>                     → только source (лендинг / био)
+    #   ref_<friend_tg_id>            → referral от друга (даёт -10% обоим)
     #   buy_<id>                      → только покупка бита
     #   prod_<id>                     → только покупка продукта
     #   ref_<src>_buy_<id>            → combo source+бит (YT description)
     #   ref_<src>_prod_<id>           → combo source+продукт
+    #   ref_<friend_tg_id>_buy_<id>   → referral + конкретный бит
     # Source (из ref_) — first-touch, записывается один раз при INSERT.
     # Target (buy_/prod_) — триггерит carding screen ниже после upsert.
     ref_source = None
+    referral_friend_id: int | None = None
     effective_arg = context.args[0] if context.args else ""
     if effective_arg.startswith("ref_"):
         rest = effective_arg[4:]  # после "ref_"
@@ -1359,8 +1433,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             src_part = rest
             effective_arg = ""  # standalone ref_, нет target
         raw_src = src_part.lower().strip()
-        _REF_WHITELIST = {"yt", "ytshorts", "insta", "tg", "tiktok", "soundcloud", "landing", "ads", "collab"}
-        ref_source = raw_src if raw_src in _REF_WHITELIST else "other"
+        # Если src — чистые цифры → это TG ID друга (referral mechanic).
+        # Иначе — named source (yt/insta/etc).
+        if raw_src.isdigit() and 1 <= len(raw_src) <= 15:  # TG IDs 32-bit/64-bit
+            referral_friend_id = int(raw_src)
+            ref_source = f"ref_{referral_friend_id}"
+        else:
+            _REF_WHITELIST = {"yt", "ytshorts", "insta", "tg", "tiktok",
+                              "soundcloud", "landing", "ads", "collab", "remind"}
+            ref_source = raw_src if raw_src in _REF_WHITELIST else "other"
 
     # is_new определяется через Supabase (source of truth между Render
     # redeploy'ями). Fallback — in-memory all_users (свежий процесс).
@@ -1385,6 +1466,66 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception:
             pass
+
+    # ── Referral mechanic: ref_<friend_tg_id> → -10% обоим ────────────
+    # Anti-self-refer (нельзя пригласить себя). Друг должен быть ≠ user_id.
+    # Token выдаётся ТОЛЬКО при первом /start с ref-link (is_new=True) — иначе
+    # любой existing юзер мог бы fishить себе скидки через свой ref.
+    if (
+        is_new
+        and referral_friend_id is not None
+        and referral_friend_id != user_id
+    ):
+        try:
+            pct = licensing.REFERRAL_PCT
+            # Token для нового юзера (без проверки что он зарегистрирован — он
+            # только что прошёл upsert)
+            new_user_tok = _make_referral_discount_token(user_id, referral_friend_id, pct)
+            logger.info(
+                "referral: new user %d invited by %d, token=%s",
+                user_id, referral_friend_id, new_user_tok,
+            )
+            # Token для friend'а (только если он зарегистрирован в боте)
+            friend_registered = await asyncio.to_thread(
+                users_db.is_user_registered, referral_friend_id,
+            ) if hasattr(users_db, "is_user_registered") else (
+                referral_friend_id in all_users
+            )
+            if friend_registered:
+                friend_tok = _make_referral_discount_token(
+                    referral_friend_id, user_id, pct,
+                )
+                # Notify friend about new referral + his token
+                try:
+                    new_user_uname = (
+                        "@" + user.username if user.username else user.full_name
+                    )
+                    await bot.send_message(
+                        referral_friend_id,
+                        f"🎁 <b>{html.escape(str(new_user_uname))} пришёл по твоей ссылке!</b>\n\n"
+                        f"Тебе бонус: <b>скидка -{pct}%</b> на любой бит из каталога "
+                        "(действует 30 дней).\n\n"
+                        "Открой любой бит — кнопка «🎁 Купить со скидкой» появится автоматом.",
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    # Friend мог заблокировать бота / удалить аккаунт — не критично
+                    logger.info("referral: friend %d notify failed", referral_friend_id)
+            # Notify new user
+            try:
+                await bot.send_message(
+                    user_id,
+                    f"🎁 <b>Скидка -{pct}% от друга!</b>\n\n"
+                    f"Тебе и тому кто тебя пригласил — по <b>-{pct}%</b> на любой бит "
+                    "(действует 30 дней).\n\n"
+                    "Слушай биты в каталоге — кнопка «🎁 Купить со скидкой» появится "
+                    "на каждой карточке.",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+        except Exception:
+            logger.exception("referral: token issuance failed")
 
     # Deep-link из канала на карточку продукта: /start prod_<product_id>
     # (или /start ref_<src>_prod_<product_id> — effective_arg уже нормализован выше)
@@ -3247,6 +3388,82 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer(_user_error_msg("оплата"), show_alert=True)
         finally:
             _yk_creating_payment.discard(user_id)
+        return
+
+    # ── Referral: «🎁 Пригласить друга» ─────────────────────────
+    if data == "invite_friend":
+        ref_link = f"https://t.me/{beat_post_builder.BOT_USERNAME}?start=ref_{user_id}"
+        pct = licensing.REFERRAL_PCT
+        text = (
+            f"🎁 <b>Пригласи друга → -{pct}% обоим</b>\n\n"
+            f"Поделись своей ссылкой:\n"
+            f"<code>{ref_link}</code>\n\n"
+            f"Когда друг откроет бот через эту ссылку:\n"
+            f"• Он получит <b>-{pct}%</b> на любой бит (на 30 дней)\n"
+            f"• Ты тоже получишь <b>-{pct}%</b> на любой бит\n\n"
+            f"<i>Скидка применяется автоматом — увидишь кнопку "
+            f"«🎁 Купить со скидкой» на каждой карточке бита.</i>"
+        )
+        try:
+            await query.message.reply_text(
+                text, parse_mode="HTML", disable_web_page_preview=True,
+            )
+            await query.answer()
+        except TelegramError:
+            await query.answer("Не удалось отправить ссылку", show_alert=True)
+        return
+
+    # ── Universal discount apply (referral token на конкретный бит) ──
+    if data.startswith("disc_apply_"):
+        # disc_apply_<beat_id> — юзер кликает на универсальный token (referral)
+        # на конкретном бите. Bind token к beat_id и показываем payment menu.
+        try:
+            beat_id = int(data[len("disc_apply_"):])
+        except ValueError:
+            await query.answer()
+            return
+        token = _get_active_universal_discount(user_id)
+        if not token:
+            await query.answer(
+                "Скидка истекла или уже использована.", show_alert=True,
+            )
+            return
+        beat = beats_db.get_beat_by_id(beat_id)
+        if not beat:
+            await query.answer("Бит не найден", show_alert=True)
+            return
+        # Bind universal → конкретный beat_id (для analytics + чтобы payment
+        # routes корректно работали как для bound discount)
+        active_discounts[token]["beat_id"] = beat_id
+        _save_discounts()
+        # Показываем payment menu (re-use disc_buy_<token> логика)
+        rec = active_discounts[token]
+        pct = int(rec["pct"])
+        stars_p = licensing.mp3_price_with_discount(pct, "XTR")
+        usdt_p = licensing.mp3_price_with_discount(pct, "USDT")
+        rub_p = licensing.mp3_price_with_discount(pct, "RUB")
+        bpm = beat.get("bpm") or "?"
+        key_short = beat.get("key") or ""
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"⭐ {stars_p}", callback_data=f"disc_pay_stars_{token}"),
+             InlineKeyboardButton(f"💵 {usdt_p:g} USDT", callback_data=f"disc_pay_usdt_{token}")],
+            [InlineKeyboardButton(f"💳 {rub_p}₽ (MIR/СБП)", callback_data=f"disc_pay_rub_{token}")],
+        ])
+        try:
+            await bot.send_message(
+                user_id,
+                (
+                    f"🎁 <b>Скидка -{pct}% на «{html.escape(beat.get('name') or '?')}»</b>\n"
+                    f"⚡ {bpm} BPM · 🎹 {html.escape(str(key_short))}\n\n"
+                    f"<s>{licensing.PRICE_MP3_STARS}⭐ / {licensing.PRICE_MP3_USDT:g} USDT / {licensing.PRICE_MP3_RUB}₽</s>\n"
+                    f"<b>{stars_p}⭐ / {usdt_p:g} USDT / {rub_p}₽</b>\n\n"
+                    f"Выбери способ оплаты:"
+                ),
+                parse_mode="HTML", reply_markup=kb,
+            )
+            await query.answer()
+        except TelegramError:
+            await query.answer("Сначала напиши /start боту в ЛС.", show_alert=True)
         return
 
     # ── Cart (накопительная корзина для bundle) ────────────────

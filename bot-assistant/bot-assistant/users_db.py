@@ -77,6 +77,22 @@ def _get_supabase():
 
 # ─── Writes ──────────────────────────────────────────────────────────────────
 
+def is_user_registered(tg_id: int) -> bool:
+    """True если tg_id есть в bot_users. Для referral validation: проверяем что
+    приглашающий друг — реальный юзер (не fake ID). Если Supabase недоступен —
+    возвращаем False (consérvée — лучше не выдать token чем выдать fake).
+    """
+    client = _get_supabase()
+    if client is None:
+        return False
+    try:
+        res = client.table(_TABLE).select("tg_id").eq("tg_id", tg_id).limit(1).execute()
+        return bool(res.data)
+    except Exception:
+        logger.exception("users_db.is_user_registered failed for tg_id=%s", tg_id)
+        return False
+
+
 def upsert_user(tg_id: int, full_name: str, username: str | None, source: str | None = None) -> bool:
     """Upsert юзера. Возвращает True если раньше не было (is_new).
 

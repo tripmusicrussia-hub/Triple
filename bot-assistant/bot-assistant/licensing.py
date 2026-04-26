@@ -25,6 +25,12 @@ PRICE_BUNDLE3_RUB = int(os.getenv("PRICE_BUNDLE3_RUB", "4500"))      # 4500₽ v
 # Дефолт 20%. ENV-override на случай A/B-теста (10/15/25).
 DISCOUNT_PCT = int(os.getenv("DISCOUNT_PCT", "20"))
 
+# Referral: % off обоим (новому юзеру + приглашающему другу) после первого
+# /start с deep-link `?start=ref_<friend_tg_id>`. Меньше чем remarketing
+# discount (20%), потому что к ref-link идут «холодные» юзеры — pricing
+# softer чтобы не разориться на бесплатной аудитории.
+REFERRAL_PCT = int(os.getenv("REFERRAL_PCT", "10"))
+
 
 def mp3_price_with_discount(pct: int, currency: str) -> int | float:
     """Возвращает amount со скидкой `pct%` от соответствующего PRICE_MP3_*.
