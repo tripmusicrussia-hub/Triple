@@ -732,40 +732,23 @@ def kb_subscribe():
     ]])
 
 def kb_main_menu(user_id: int | None = None):
+    """Main menu — только разделы. Цены, фильтры, набор, случайный — внутри
+    разделов (преимущественно «🎹 Биты»). Главное меню = roadmap, не shop.
+    """
     beats = len([b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == "beat"])
     tracks = len([b for b in beats_db.BEATS_CACHE if b.get("content_type") == "track"])
     remixes = len([b for b in beats_db.BEATS_CACHE if b.get("content_type") == "remix"])
-    cart_n = len(_cart_get(user_id)) if user_id is not None else 0
-    if cart_n >= BUNDLE_TOTAL:
-        # Главная кнопка — прямо к оплате (не /cart view)
-        cart_label = f"✅ Купить набор · {licensing.PRICE_BUNDLE3_RUB}₽ ({cart_n}/{BUNDLE_TOTAL})"
-    elif cart_n:
-        cart_label = f"🎁 Набор «3 за {licensing.PRICE_BUNDLE3_RUB}₽» · {cart_n}/{BUNDLE_TOTAL}"
-    else:
-        cart_label = f"🎁 Собрать набор «3 бита за {licensing.PRICE_BUNDLE3_RUB}₽» (-600₽)"
-    cart_cb = "cart_buy" if cart_n >= BUNDLE_TOTAL else "cart_show"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"🎹 Биты ({beats})", callback_data="menu_beat")],
         [InlineKeyboardButton(f"🎤 Треки ({tracks})", callback_data="menu_track"),
          InlineKeyboardButton(f"🔀 Ремиксы ({remixes})", callback_data="menu_remix")],
         [InlineKeyboardButton("📦 Kits & Packs", callback_data="menu_products")],
-        [InlineKeyboardButton(f"🎛 Сведение трека под ключ — {licensing.PRICE_MIX_RUB}₽", callback_data="menu_mixing")],
-        [InlineKeyboardButton(cart_label, callback_data=cart_cb)],
+        [InlineKeyboardButton("🎛 Сведение трека под ключ", callback_data="menu_mixing")],
         [InlineKeyboardButton(
             f"🎁 Пригласить друга → -{licensing.REFERRAL_PCT}% обоим",
             callback_data="invite_friend",
         )],
         [InlineKeyboardButton("ℹ️ Услуги и цены", callback_data="menu_services")],
-        # Quick-filter chips — быстрый доступ к популярным сценам / mood
-        [InlineKeyboardButton("🔥 Hard", callback_data="qf_hard"),
-         InlineKeyboardButton("🌃 Memphis", callback_data="qf_memphis"),
-         InlineKeyboardButton("🏙 Detroit", callback_data="qf_detroit"),
-         InlineKeyboardButton("🇷🇺 RU", callback_data="qf_ru")],
-        [InlineKeyboardButton("⚡ 130+", callback_data="qf_bpm130"),
-         InlineKeyboardButton("⚡ 140+", callback_data="qf_bpm140"),
-         InlineKeyboardButton("⚡ 150+", callback_data="qf_bpm150"),
-         InlineKeyboardButton("⚡ 160+", callback_data="qf_bpm160")],
-        [InlineKeyboardButton("🎲 Случайный", callback_data="random_beat")],
         [InlineKeyboardButton("❤️ Избранное", callback_data="my_favorites"),
          InlineKeyboardButton("🔍 Поиск", callback_data="search_prompt")],
     ])
@@ -930,13 +913,45 @@ async def do_quick_filter(bot, chat_id: int, user_id: int, filter_name: str,
         reply_markup=InlineKeyboardMarkup(nav_rows),
     )
 
-def kb_beats_menu():
+def kb_beats_menu(user_id: int | None = None):
+    """Раздел «🎹 Биты»: Cart + Quick-filters + По артистам + Случайный.
+    Цены раскрываются в карточке конкретного бита, не в меню.
+    """
     beats = len([b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == "beat"])
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎤 По артистам", callback_data="beats_by_artist")],
-        [InlineKeyboardButton("🎲 Случайный (" + str(beats) + " всего)", callback_data="randcat_beat")],
-        [InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")],
+    rows = []
+    # Cart-кнопка (адаптивная по статусу)
+    cart_n = len(_cart_get(user_id)) if user_id is not None else 0
+    if cart_n >= BUNDLE_TOTAL:
+        cart_label = f"✅ Купить набор · {licensing.PRICE_BUNDLE3_RUB}₽ ({cart_n}/{BUNDLE_TOTAL})"
+        cart_cb = "cart_buy"
+    elif cart_n:
+        cart_label = f"🎁 Набор «3 за {licensing.PRICE_BUNDLE3_RUB}₽» · {cart_n}/{BUNDLE_TOTAL}"
+        cart_cb = "cart_show"
+    else:
+        cart_label = f"🎁 Собрать набор «3 за {licensing.PRICE_BUNDLE3_RUB}₽» (-600₽)"
+        cart_cb = "cart_show"
+    rows.append([InlineKeyboardButton(cart_label, callback_data=cart_cb)])
+    # По артистам
+    rows.append([InlineKeyboardButton("🎤 По артистам", callback_data="beats_by_artist")])
+    # Quick-filter chips: scenes
+    rows.append([
+        InlineKeyboardButton("🔥 Hard", callback_data="qf_hard"),
+        InlineKeyboardButton("🌃 Memphis", callback_data="qf_memphis"),
+        InlineKeyboardButton("🏙 Detroit", callback_data="qf_detroit"),
+        InlineKeyboardButton("🇷🇺 RU", callback_data="qf_ru"),
     ])
+    # Quick-filter chips: BPM
+    rows.append([
+        InlineKeyboardButton("⚡ 130+", callback_data="qf_bpm130"),
+        InlineKeyboardButton("⚡ 140+", callback_data="qf_bpm140"),
+        InlineKeyboardButton("⚡ 150+", callback_data="qf_bpm150"),
+        InlineKeyboardButton("⚡ 160+", callback_data="qf_bpm160"),
+    ])
+    rows.append([InlineKeyboardButton(
+        f"🎲 Случайный ({beats} всего)", callback_data="randcat_beat",
+    )])
+    rows.append([InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")])
+    return InlineKeyboardMarkup(rows)
 
 def kb_artists():
     items = [b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == "beat"]
@@ -2598,7 +2613,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "menu_beat":
         beats = len([b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == "beat"])
-        await _nav_reply(query, "🎹 Целых " + str(beats) + " битов! Ищешь что-то конкретное или просто серфишь?", reply_markup=kb_beats_menu())
+        await _nav_reply(query, "🎹 Целых " + str(beats) + " битов! Ищешь что-то конкретное или просто серфишь?", reply_markup=kb_beats_menu(user_id=user_id))
         return
 
     if data == "menu_products":
@@ -3007,7 +3022,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• Указать credit: <i>prod. by TRIPLE FILL</i>\n"
             "• Non-exclusive (бит может быть куплен и другими)\n\n"
 
-            "💎 <b>WAV / Unlimited / Exclusive — от $150 до $1500</b>\n"
+            "💎 <b>WAV / Unlimited / Exclusive — от $50 до $1500</b>\n"
             "WAV + стемы, снятие лимитов по стримам/копиям, или полная эксклюзивность "
             "(бит снимается с продажи). Обсуждается в ЛС @iiiplfiii.\n\n"
 
