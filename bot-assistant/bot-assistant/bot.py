@@ -604,28 +604,34 @@ HARD_TAGS = {"hard", "dark", "aggressive", "evil", "mean", "street"}
 
 # In-memory state для pagination между callback'ами
 user_search_state: dict[int, dict] = {}  # user_id → {'filter': str, 'page': int, 'results_ids': list[int]}
-SEARCH_PAGE_SIZE = 8
+SEARCH_PAGE_SIZE = 8        # legacy text-list pagination (search results)
+QUICK_FILTER_AUDIO_PAGE = 5 # сколько audio-messages на одну страницу qf-фильтра
 
 
 def _filter_beats(filter_name: str) -> list[dict]:
-    """Возвращает отфильтрованный список битов под quick-filter."""
-    audio_only = [b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") != "non_audio"]
+    """Возвращает отфильтрованный список БИТОВ (только content_type='beat'
+    с file_id) под quick-filter. Треки/ремиксы/non_audio исключены —
+    юзер искал «биты», не контент-микс."""
+    beats_only = [
+        b for b in beats_db.BEATS_CACHE
+        if b.get("content_type", "beat") == "beat" and b.get("file_id")
+    ]
     if filter_name == "hard":
-        return [b for b in audio_only
+        return [b for b in beats_only
                 if any(t.lower() in HARD_TAGS for t in b.get("tags", []))
                 or any(h in b["name"].lower() for h in HARD_TAGS)]
     if filter_name in SCENE_TAGS:
         scene_set = SCENE_TAGS[filter_name]
-        return [b for b in audio_only
+        return [b for b in beats_only
                 if any(t.lower() in scene_set for t in b.get("tags", []))]
     if filter_name == "bpm130":
-        return [b for b in audio_only if (b.get("bpm") or 0) >= 130]
+        return [b for b in beats_only if (b.get("bpm") or 0) >= 130]
     if filter_name == "bpm140":
-        return [b for b in audio_only if (b.get("bpm") or 0) >= 140]
+        return [b for b in beats_only if (b.get("bpm") or 0) >= 140]
     if filter_name == "bpm150":
-        return [b for b in audio_only if (b.get("bpm") or 0) >= 150]
+        return [b for b in beats_only if (b.get("bpm") or 0) >= 150]
     if filter_name == "bpm160":
-        return [b for b in audio_only if (b.get("bpm") or 0) >= 160]
+        return [b for b in beats_only if (b.get("bpm") or 0) >= 160]
     return []
 
 
@@ -656,39 +662,93 @@ def _kb_search_results(results: list[dict], filter_name: str, page: int) -> Inli
     return InlineKeyboardMarkup(rows)
 
 
+_FILTER_TITLES = {
+    "hard": "🔥 Hard",
+    "memphis": "🌃 Memphis",
+    "detroit": "🏙 Detroit",
+    "ru": "🇷🇺 RU сцена",
+    "bpm130": "⚡ 130+ BPM",
+    "bpm140": "⚡ 140+ BPM",
+    "bpm150": "⚡ 150+ BPM",
+    "bpm160": "⚡ 160+ BPM",
+}
+
+
 async def do_quick_filter(bot, chat_id: int, user_id: int, filter_name: str,
                           page: int = 0, query=None):
-    """Выполняет quick-filter поиск + показ paginated результатов.
+    """Гибрид: шлём `QUICK_FILTER_AUDIO_PAGE` (=5) audio-messages подряд
+    с buy-кнопками + footer-сообщение «Ещё 5 / Меню».
 
-    Если передан `query` (callback) — редактирует текущее сообщение через
-    _nav_reply (чтоб чат не засорялся). Если нет (вызов из /команды) —
-    отправляет новое сообщение.
+    Юзер сразу слушает биты, не ходит по text-list. Single-audio cleanup
+    как в send_beat — удаляем prev tracking.
     """
     results = _filter_beats(filter_name)
     user_search_state[user_id] = {"filter": filter_name, "page": page}
-    title = {
-        "hard": "🔥 Hard",
-        "memphis": "🌃 Memphis",
-        "detroit": "🏙 Detroit",
-        "ru": "🇷🇺 RU сцена",
-        "bpm130": "⚡ 130+ BPM",
-        "bpm140": "⚡ 140+ BPM",
-        "bpm150": "⚡ 150+ BPM",
-        "bpm160": "⚡ 160+ BPM",
-    }.get(filter_name, filter_name)
+    title = _FILTER_TITLES.get(filter_name, filter_name)
     if not results:
         text = f"{title}: пусто, попробуй другой фильтр"
         if query is not None:
-            await _nav_reply(query, text, reply_markup=kb_main_menu())
+            await _nav_reply(query, text, reply_markup=kb_main_menu(user_id=user_id))
         else:
-            await bot.send_message(chat_id, text, reply_markup=kb_main_menu())
+            await bot.send_message(chat_id, text, reply_markup=kb_main_menu(user_id=user_id))
         return
-    text = f"{title} — нашёл {len(results)} треков:"
-    kb = _kb_search_results(results, filter_name, page)
+
+    total_pages = max(1, (len(results) + QUICK_FILTER_AUDIO_PAGE - 1) // QUICK_FILTER_AUDIO_PAGE)
+    page = max(0, min(page, total_pages - 1))
+    start = page * QUICK_FILTER_AUDIO_PAGE
+    chunk = results[start:start + QUICK_FILTER_AUDIO_PAGE]
+
+    # Header: краткое сообщение перед лентой битов
+    header_text = (
+        f"{title} — <b>{len(results)}</b> битов\n"
+        f"Страница <b>{page + 1}/{total_pages}</b>"
+    )
     if query is not None:
-        await _nav_reply(query, text, reply_markup=kb)
+        try:
+            await _nav_reply(query, header_text, parse_mode="HTML")
+        except Exception:
+            await bot.send_message(chat_id, header_text, parse_mode="HTML")
     else:
-        await bot.send_message(chat_id, text, reply_markup=kb)
+        await bot.send_message(chat_id, header_text, parse_mode="HTML")
+
+    # Шлём audio для каждого бита из chunk с buy-кнопками
+    for b in chunk:
+        try:
+            bid = int(b["id"])
+            bpm = b.get("bpm") or "?"
+            key = b.get("key") or "?"
+            tags_str = ", ".join((b.get("tags") or [])[:3])
+            caption = (
+                f"🎹 <b>{html.escape(b.get('name') or '?')}</b>\n"
+                f"⚡ {bpm} BPM · 🎹 {html.escape(str(key))}"
+                + (f" · #{html.escape(tags_str)}" if tags_str else "")
+            )
+            await bot.send_audio(
+                chat_id, audio=b["file_id"],
+                caption=caption, parse_mode="HTML",
+                reply_markup=kb_after_beat(bid, "beat", user_id=user_id),
+            )
+        except Exception:
+            logger.warning("qf audio send failed for beat %s", b.get("id"))
+
+    # Footer: navigation
+    nav_rows = []
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("◀️ Назад", callback_data=f"qfp_{filter_name}_{page-1}"))
+    if page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton(f"➡️ Ещё {min(QUICK_FILTER_AUDIO_PAGE, len(results) - (page + 1) * QUICK_FILTER_AUDIO_PAGE)}",
+                                                callback_data=f"qfp_{filter_name}_{page+1}"))
+    if nav_buttons:
+        nav_rows.append(nav_buttons)
+    nav_rows.append([InlineKeyboardButton("🎲 Случайный из этих", callback_data=f"qfr_{filter_name}")])
+    nav_rows.append([InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")])
+    await bot.send_message(
+        chat_id,
+        f"<i>{title} · {page + 1}/{total_pages}</i>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(nav_rows),
+    )
 
 def kb_beats_menu():
     beats = len([b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == "beat"])
@@ -3255,6 +3315,31 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("qf_"):
         filter_name = data[3:]
         await do_quick_filter(bot, query.message.chat_id, user_id, filter_name, page=0, query=query)
+        return
+
+    # Quick-filter pagination (qfp_<filter>_<page>)
+    if data.startswith("qfp_"):
+        try:
+            _, filter_name, page_str = data.split("_", 2)
+            page = max(0, int(page_str))
+        except Exception:
+            await query.answer()
+            return
+        await query.answer()
+        await do_quick_filter(bot, query.message.chat_id, user_id, filter_name, page=page, query=None)
+        return
+
+    # Quick-filter random (qfr_<filter>) — случайный бит из текущего фильтра
+    if data.startswith("qfr_"):
+        filter_name = data[4:]
+        results = _filter_beats(filter_name)
+        if not results:
+            await query.answer("Пусто, попробуй другой фильтр", show_alert=True)
+            return
+        import random as _rnd
+        beat = _rnd.choice(results)
+        await query.answer()
+        await send_beat(bot, query.message.chat_id, beat, user_id)
         return
 
     # Search pagination: sp_<filter>_<page>
