@@ -7742,6 +7742,10 @@ async def heartbeat_scheduler():
 
 
 async def post_init(application):
+    global _POST_INIT_DONE
+    if _POST_INIT_DONE:
+        return  # idempotency: PTB hook + manual call → второй раз no-op
+    _POST_INIT_DONE = True
     try:
         await application.bot.delete_webhook(drop_pending_updates=True)
         logger.info("post_init: webhook cleared, pending updates dropped")
@@ -8572,8 +8576,15 @@ def run_health_server():
     server.serve_forever()
 
 
+_POST_INIT_DONE = False  # idempotency guard — post_init может быть вызван
+                          # дважды (PTB hook + manual call). Reuse — no-op.
+
+
 async def run_bot():
-    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
+    # ApplicationBuilder.post_init(post_init) убран — manual `await post_init(app)`
+    # после initialize() остаётся (см. комментарий ниже про критический баг).
+    # Idempotency через _POST_INIT_DONE — повторный вызов безопасен.
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("admin", cmd_admin))
     app.add_handler(CommandHandler("diag", cmd_diag))
@@ -8611,13 +8622,51 @@ async def run_bot():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_assistant))
     app.add_handler(MessageHandler(filters.ALL, handle_message))
     logger.info("Starting bot...")
+
+    # SIGTERM handler — graceful shutdown за <2 сек вместо ожидания Telegram
+    # polling-timeout (55-60 сек). Без этого Render rolling deploy создавал
+    # zombie-loop: новый instance стартовал пока старый держал getUpdates,
+    # оба бились за Conflict. С graceful — старый отпускает polling сам
+    # при SIGTERM от Render → новый сразу подхватывает чисто.
+    import signal as _signal
+    _shutdown_event = asyncio.Event()
+    _loop = asyncio.get_running_loop()
+
+    async def _graceful_shutdown():
+        try:
+            logger.info("graceful_shutdown: stopping updater...")
+            if app.updater and app.updater.running:
+                await app.updater.stop()
+            logger.info("graceful_shutdown: stopping app...")
+            if app.running:
+                await app.stop()
+            await app.shutdown()
+            logger.info("graceful_shutdown: complete")
+        except Exception:
+            logger.exception("graceful_shutdown error")
+        finally:
+            _shutdown_event.set()
+
+    def _on_sigterm():
+        logger.info("SIGTERM/SIGINT received, scheduling graceful shutdown")
+        _loop.create_task(_graceful_shutdown())
+
+    try:
+        _loop.add_signal_handler(_signal.SIGTERM, _on_sigterm)
+        _loop.add_signal_handler(_signal.SIGINT, _on_sigterm)
+    except (NotImplementedError, RuntimeError):
+        # Windows local dev — add_signal_handler не поддерживается. На
+        # Render (Linux) работает.
+        logger.info("signal handlers not registered (likely Windows local dev)")
+
     await app.initialize()
     # КРИТИЧНО: post_init hook НЕ вызывается автоматически когда мы
     # используем manual app.initialize()+start()+updater.start_polling()
     # вместо app.run_polling(). Без этого вызова scheduled_publish_loop,
     # heartbeat_scheduler, content_reminder_scheduler, load_queue —
     # никогда не запускались. Это был корневой баг почему scheduled
-    # publications не работали никогда.
+    # publications не работали никогда. Idempotency guard внутри post_init
+    # делает повторный вызов безопасным (если PTB всё-таки тоже вызовет).
     await post_init(app)
     await app.start()
     # allowed_updates включает "chat_member" — без этого ChatMemberHandler
@@ -8627,7 +8676,7 @@ async def run_bot():
         drop_pending_updates=True,
         allowed_updates=Update.ALL_TYPES,
     )
-    await asyncio.Event().wait()
+    await _shutdown_event.wait()
 
 
 def main():

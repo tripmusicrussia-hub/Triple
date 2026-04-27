@@ -297,11 +297,27 @@ def _canonical_scene(beat: BeatMeta) -> str:
     """Возвращает scene-label для title: 'Memphis' / 'Detroit' / 'NOLA' /
     'FL Hard' / 'Atlanta' / 'RU Hard' / 'Hard Trap' (default).
 
-    RU artists override любой scene из ARTIST_PROFILE.
+    RU artists override любой scene из ARTIST_PROFILE. Если artist_raw —
+    сам по себе scene-tag (после fallback в beat_record_to_meta), возвращаем
+    canonical scene name (Memphis → "Memphis"). canonical_yt_title тогда
+    скипнет дублирующую scene-секцию.
     """
     raw = (beat.artist_raw or "").split(" x ")[0].strip().lower()
     if raw in _RU_ARTIST_KEYS:
         return "RU Hard"
+    # Scene-as-artist fallback (artist_raw из beat_record_to_meta = "memphis"/
+    # "detroit"/"atlanta"/"florida"/"nola"/"hard trap")
+    direct_scene_map = {
+        "memphis": "Memphis",
+        "detroit": "Detroit",
+        "atlanta": "Atlanta",
+        "florida": "FL Hard",
+        "nola": "NOLA",
+        "neworleans": "NOLA",
+        "hard trap": "Hard Trap",
+    }
+    if raw in direct_scene_map:
+        return direct_scene_map[raw]
     prof = _get_profile(raw)
     return _SCENE_TITLE_MAP.get(prof.get("scene", ""), "Hard Trap")
 
@@ -337,6 +353,10 @@ def canonical_yt_title(beat: BeatMeta) -> str:
     Защита от длины: если результат >YT_TITLE_MAX_LEN — обрезаем хвост
     (сначала KEY, потом BPM, потом SCENE) пока не уложится. Брендирующая
     часть `[FREE] {ARTIST} Type Beat YEAR - "{NAME}"` не режется.
+
+    Anti-duplicate scene: если artist == scene (например после
+    `beat_record_to_meta` fallback'а — artist="Memphis" / "Hard Trap") —
+    scene не показываем (избегаем `Memphis Type Beat | Memphis | ...`).
     """
     artist = _canonical_artist(beat)
     name_disp = _canonical_name(beat.name)
@@ -346,7 +366,15 @@ def canonical_yt_title(beat: BeatMeta) -> str:
 
     base = f'[FREE] {artist} Type Beat {YEAR} - "{name_disp}"'
     parts: list[str] = []
-    if scene:
+    # Скип scene если он повторяет artist phrase (fallback case или generic
+    # «Hard Trap» дважды).
+    artist_low = artist.lower()
+    scene_low = scene.lower()
+    if scene and not (
+        scene_low == artist_low
+        or scene_low in artist_low
+        or artist_low in scene_low
+    ):
         parts.append(scene)
     if bpm:
         if key_short:
