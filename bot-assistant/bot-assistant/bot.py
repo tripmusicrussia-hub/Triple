@@ -1039,24 +1039,31 @@ def kb_after_beat(beat_id, content_type="beat", user_id: int | None = None):
         # Cart-кнопка: 3 состояния — собираем / готов / уже в наборе.
         # При len(cart) >= BUNDLE_TOTAL кнопка ведёт ПРЯМО в payment menu
         # (cart_buy), без захода в /cart — убираем лишний экран.
+        # i18n: button labels автоматически по языку юзера.
         if user_id is not None:
             cart = _cart_get(user_id)
+            import i18n as _i
+            _lang = _i.get_user_lang(user_id)
+            _price = licensing.PRICE_BUNDLE3_RUB
             if len(cart) >= BUNDLE_TOTAL:
-                # Набор готов — главная кнопка сразу к оплате
-                cart_label = f"✅ Купить набор · {licensing.PRICE_BUNDLE3_RUB}₽"
-                rows.append([InlineKeyboardButton(cart_label, callback_data="cart_buy")])
-                # Дополнительная компактная row — изменить состав набора
                 rows.append([InlineKeyboardButton(
-                    f"🛒 Изменить набор ({len(cart)})", callback_data="cart_show",
+                    _i.t("cart_btn_ready_buy", _lang, price=_price),
+                    callback_data="cart_buy",
+                )])
+                rows.append([InlineKeyboardButton(
+                    _i.t("cart_btn_change", _lang, n=len(cart)),
+                    callback_data="cart_show",
                 )])
             elif beat_id in cart:
-                # бит уже в корзине — основная кнопка «Купить набор» уже выше,
-                # эта вторичная компактная — открыть /cart изменить состав
-                cart_label = f"✅ В наборе ({len(cart)}/{BUNDLE_TOTAL})"
-                rows.append([InlineKeyboardButton(cart_label, callback_data="cart_show")])
+                rows.append([InlineKeyboardButton(
+                    _i.t("cart_btn_in", _lang, n=len(cart), total=BUNDLE_TOTAL),
+                    callback_data="cart_show",
+                )])
             else:
-                cart_label = f"🎁 В набор «3 за {licensing.PRICE_BUNDLE3_RUB}₽» ({len(cart)}/{BUNDLE_TOTAL})"
-                rows.append([InlineKeyboardButton(cart_label, callback_data=f"cart_add_{beat_id}")])
+                rows.append([InlineKeyboardButton(
+                    _i.t("cart_btn_add", _lang, price=_price, n=len(cart), total=BUNDLE_TOTAL),
+                    callback_data=f"cart_add_{beat_id}",
+                )])
         rows.append([
             InlineKeyboardButton("💎 Exclusive ($500+)", callback_data="excl_" + str(beat_id)),
         ])
@@ -3659,33 +3666,32 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer(msg, show_alert=False)
             return
         cart = _cart_get(user_id)
+        import i18n as _i
+        _lang = _i.get_user_lang(user_id)
+        _price = licensing.PRICE_BUNDLE3_RUB
+        full_single = BUNDLE_TOTAL * licensing.PRICE_MP3_RUB
+        saving = full_single - _price
         if len(cart) >= BUNDLE_TOTAL:
-            # Набор готов — короткий toast alert + сразу шлём payment menu
-            # в чат. Юзеру не надо никуда переходить — payment buttons рядом.
             await query.answer(
-                f"🎁 Набор готов ({len(cart)}/{BUNDLE_TOTAL})!",
+                _i.t("cart_alert_ready", _lang, n=len(cart), total=BUNDLE_TOTAL),
                 show_alert=False,
             )
             chosen_beats = [beats_db.get_beat_by_id(bid) for bid in cart[:BUNDLE_TOTAL]]
             chosen_beats = [b for b in chosen_beats if b]
             if len(chosen_beats) == BUNDLE_TOTAL:
-                # Заранее кладём в bundle_selection — bundle_pay_* возьмёт оттуда
                 bundle_selection[user_id] = {
                     "anchor": int(chosen_beats[0]["id"]),
                     "selected": [int(b["id"]) for b in chosen_beats[1:]],
                     "page": 0,
                 }
                 names_block = "\n".join(f"• {b['name']}" for b in chosen_beats)
-                full_single = BUNDLE_TOTAL * licensing.PRICE_MP3_RUB
-                saving = full_single - licensing.PRICE_BUNDLE3_RUB
                 try:
                     await bot.send_message(
                         user_id,
                         (
-                            f"🎁 <b>Набор готов · {licensing.PRICE_BUNDLE3_RUB}₽</b>\n"
-                            f"<i>Скидка {saving}₽ vs {full_single}₽ поодиночке</i>\n\n"
-                            f"<b>3 бита:</b>\n{names_block}\n\n"
-                            "Выбери способ оплаты:"
+                            f"{_i.t('bundle_ready_title', _lang, price=_price, saving=saving, full=full_single)}\n\n"
+                            f"<b>3 beats / 3 бита:</b>\n{names_block}\n\n"
+                            f"{_i.t('bundle_ready_pick_pay', _lang)}"
                         ),
                         parse_mode="HTML",
                         reply_markup=kb_bundle_pay(),
@@ -3695,8 +3701,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             need = BUNDLE_TOTAL - len(cart)
             await query.answer(
-                f"🎁 В наборе ({len(cart)}/{BUNDLE_TOTAL}). Ещё {need} → "
-                f"купишь 3 за {licensing.PRICE_BUNDLE3_RUB}₽ (-600₽).",
+                _i.t("cart_alert_added", _lang,
+                     n=len(cart), total=BUNDLE_TOTAL, need=need,
+                     price=_price, saving=saving),
                 show_alert=False,
             )
         # Обновляем карточку — кнопка должна стать «✅ В наборе» / «✅ Купить набор»
