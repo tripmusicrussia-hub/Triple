@@ -1,16 +1,18 @@
 [
   {
     "id": 2761877,
-    "msg_id": 19,
-    "name": "WAW.mp3",
+    "msg_id": 731,
+    "name": "WAW",
     "tags": [],
-    "post_url": "https://t.me/iiiplfiii/19",
+    "post_url": "https://t.me/iiiplfiii/731",
     "bpm": 136,
     "key": "Cm",
     "file_id": "CQACAgIAAx0Cb_cPkAADE2nTCcJLi2hWIKZcWd0aYlSyHUKBAAIqKAACBfM5SFNlVNrUY4-yOwQ",
     "content_type": "beat",
     "file_unique_id": "AgADKigAAgXzOUg",
-    "classification_confidence": 0.95
+    "classification_confidence": 0.95,
+    "last_reposted_at": "2026-04-27T18:13:10",
+    "last_posted_at": "2026-04-27T18:13:10"
   },
   {
     "id": 1270552,
