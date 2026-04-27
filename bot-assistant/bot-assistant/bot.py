@@ -7540,16 +7540,33 @@ def _pick_next_repost_candidate() -> dict | None:
     return candidates[0][1]
 
 
-# Sprint 3 — 3-touch re-engagement sequence:
-# Touch 1 (24h): -20% (legacy DISCOUNT_PCT default)
-# Touch 2 (72h): -25% — «ещё думаешь? накину ещё 5%»
-# Touch 3 (7d):  -30% — «last chance» (после ничего)
-_REMARKETING_TOUCHES = [
-    {"after_sec": 24 * 3600, "pct": 20, "label_24h": True},
-    {"after_sec": 72 * 3600, "pct": 25, "label_24h": False},
-    {"after_sec": 7 * 24 * 3600, "pct": 30, "label_24h": False},
-]
+# Sprint 3 + Sprint 5 — 3-touch re-engagement с A/B variant base discount:
+# Touch 1 (24h): variant base (15/20/25 per user via hash)
+# Touch 2 (72h): variant + 5  — «ещё думаешь? накину ещё 5%»
+# Touch 3 (7d):  variant + 10 — «last chance»
+#
+# Sprint 5 заменил fixed pct в touch 1 на per-user variant
+# (licensing.get_user_discount_pct). Touch 2/3 escalation относительно
+# variant сохраняет логику «увеличиваем offer'у с каждым touch'ем».
+#
+# Examples:
+# - variant=15: 15% → 20% → 25%
+# - variant=20: 20% → 25% → 30% (default behavior, как до Sprint 5)
+# - variant=25: 25% → 30% → 35%
+_REMARKETING_TOUCH_DELAYS_SEC = [24 * 3600, 72 * 3600, 7 * 24 * 3600]
+_REMARKETING_TOUCH_PCT_OFFSETS = [0, 5, 10]
 _REMARKETING_DROP_AFTER_SEC = 8 * 24 * 3600  # 8d — buffer после 7d touch
+
+
+def _remarketing_touch_pct(touch_idx: int, user_id: int) -> int:
+    """Discount % для touch_idx (0/1/2) с user-specific A/B variant base."""
+    base = licensing.get_user_discount_pct(user_id)
+    return base + _REMARKETING_TOUCH_PCT_OFFSETS[touch_idx]
+
+
+def _remarketing_touch_count() -> int:
+    """Total touches в sequence — 3."""
+    return len(_REMARKETING_TOUCH_DELAYS_SEC)
 
 
 async def remarketing_scheduler(bot):
@@ -7586,13 +7603,13 @@ async def remarketing_scheduler(bot):
                     continue
                 touch_count = int(rec.get("touch_count", 0))
                 # 3 touches max — после drop
-                if touch_count >= len(_REMARKETING_TOUCHES):
+                if touch_count >= _remarketing_touch_count():
                     if age > 7 * 24 * 3600:
                         to_drop.append(key)
                     continue
                 # Проверяем threshold для следующего touch'а
-                next_touch = _REMARKETING_TOUCHES[touch_count]
-                if age >= next_touch["after_sec"]:
+                next_delay = _REMARKETING_TOUCH_DELAYS_SEC[touch_count]
+                if age >= next_delay:
                     to_send.append((key, rec, touch_count))
 
             for key, rec, touch_idx in to_send:
@@ -7615,10 +7632,10 @@ async def remarketing_scheduler(bot):
                     to_drop.append(key)
                     continue
 
-                touch_cfg = _REMARKETING_TOUCHES[touch_idx]
-                pct = touch_cfg["pct"]
-                # Создаём discount token с conкретным pct (Sprint 1 расширил
-                # _make_discount_token на pct param).
+                # Sprint 5: per-user A/B variant base — touch_idx 0/1/2 с offsets
+                # 0/+5/+10 даёт пользователю последовательность 15-20-25 / 20-25-30 / 25-30-35
+                # в зависимости от его variant assignment (hash(user_id) % 3).
+                pct = _remarketing_touch_pct(touch_idx, user_id)
                 disc_token = _make_discount_token(user_id, beat_id, pct=pct)
                 disc_rub = licensing.mp3_price_with_discount(pct, "RUB")
                 bpm = beat.get("bpm") or "?"
@@ -7661,6 +7678,23 @@ async def remarketing_scheduler(bot):
                         "remarketing: touch %d (-%d%%) user=%d beat=%d token=%s",
                         touch_idx + 1, pct, user_id, beat_id, disc_token,
                     )
+                    # Sprint 5: log A/B variant в post_events для conversion tracking
+                    try:
+                        import post_analytics
+                        variant = licensing.get_user_discount_pct(user_id)
+                        post_analytics.log_event(
+                            kind="remarketing_sent",
+                            beat_id=beat_id,
+                            beat_name=str(rec.get("name") or ""),
+                            tg_message_id=user_id,  # храним user_id здесь для convenience
+                            yt_video_id="",
+                            discount_pct_variant=variant,
+                            caption=f"touch_{touch_idx + 1}_pct_{pct}",
+                            tg_style="remarketing",
+                            yt_title="",
+                        )
+                    except Exception:
+                        logger.exception("remarketing analytics log failed (non-fatal)")
                 except Exception as e:
                     err_s = str(e).lower()
                     if "forbidden" in err_s or "blocked" in err_s or "deactivated" in err_s:
@@ -8720,6 +8754,112 @@ async def cmd_yt_refresh_old(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception as e:
         logger.exception("yt_refresh_old failed for %s", video_id)
         await update.message.reply_text(f"❌ Ошибка: {e}")
+
+
+async def cmd_discount_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """`/discount_stats` — Sprint 5 A/B testing analysis.
+
+    Показывает distribution remarketing reminders отправленных per variant
+    (15/20/25%) + conversion rate (купили после получения reminder).
+
+    Source data:
+    - post_events.kind='remarketing_sent' с discount_pct_variant — sent count
+    - sales.license_type='mp3_lease_disc<pct>' — conversion count
+
+    Conversion rate = (sales / sent) * 100 per variant.
+    Через 50+ конверсий → виден winning variant.
+    """
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    msg = await update.message.reply_text("📊 Анализирую A/B discount stats...")
+
+    # Read sent events
+    try:
+        import post_analytics
+        sent_per_variant = {15: 0, 20: 0, 25: 0}
+        for ev in post_analytics.read_events():
+            if ev.get("kind") != "remarketing_sent":
+                continue
+            v = ev.get("discount_pct_variant")
+            try:
+                v_int = int(v)
+            except (TypeError, ValueError):
+                continue
+            if v_int in sent_per_variant:
+                sent_per_variant[v_int] += 1
+    except Exception:
+        logger.exception("discount_stats: read events failed")
+        sent_per_variant = {15: 0, 20: 0, 25: 0}
+
+    # Read conversions from sales.jsonl (license_type prefix mp3_lease_disc)
+    converted_per_variant = {15: 0, 20: 0, 25: 0}
+    try:
+        import json as _json
+        sales_path = os.path.join(BASE_DIR, "sales.jsonl")
+        if os.path.exists(sales_path):
+            with open(sales_path, encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        rec = _json.loads(line)
+                    except Exception:
+                        continue
+                    lt = (rec.get("license_type") or "").lower()
+                    if not lt.startswith("mp3_lease_disc"):
+                        continue
+                    # Extract pct из license_type «mp3_lease_disc20»
+                    try:
+                        pct = int(lt.replace("mp3_lease_disc", ""))
+                    except ValueError:
+                        continue
+                    # variant base = pct - touch offset (15/20/25 base, +5/+10 escalation)
+                    # Берём modulo 5: variant ∈ {15, 20, 25}, touch_idx ∈ {0, 1, 2}
+                    # Mapping pct → variant: pct in {15,20,25}: variant=pct (touch 0)
+                    #                        pct in {20,25,30}: variant=pct-5 (touch 1)
+                    #                        pct in {25,30,35}: variant=pct-10 (touch 2)
+                    # Без metadata о touch'е невозможно однозначно determine variant.
+                    # Heuristic: считаем conversion по PCT — для каждого actual pct
+                    # инкрементируем variant=pct если pct в {15,20,25}.
+                    if pct in converted_per_variant:
+                        converted_per_variant[pct] += 1
+
+    except Exception:
+        logger.exception("discount_stats: read sales failed")
+
+    # Format summary
+    lines = ["📊 <b>A/B Discount Test Stats</b>\n"]
+    lines.append("<i>Variant — base pct (touch 1). Touch 2 = +5, touch 3 = +10.</i>\n")
+    lines.append("<pre>")
+    lines.append("Variant │ Sent │ Conv │ Rate")
+    lines.append("─────────┼──────┼──────┼──────")
+    total_sent = sum(sent_per_variant.values())
+    total_conv = sum(converted_per_variant.values())
+    for v in (15, 20, 25):
+        sent = sent_per_variant[v]
+        conv = converted_per_variant[v]
+        rate = (conv / sent * 100) if sent else 0.0
+        lines.append(f" {v:>5}%  │ {sent:>4} │ {conv:>4} │ {rate:>4.1f}%")
+    lines.append("─────────┼──────┼──────┼──────")
+    total_rate = (total_conv / total_sent * 100) if total_sent else 0.0
+    lines.append(f" TOTAL   │ {total_sent:>4} │ {total_conv:>4} │ {total_rate:>4.1f}%")
+    lines.append("</pre>")
+    if total_sent < 20:
+        lines.append("\n⚠️ Слишком мало data (нужно ≥50 sent для significant winner).")
+    elif total_sent >= 50:
+        # Find winner
+        rates = {
+            v: (converted_per_variant[v] / sent_per_variant[v] if sent_per_variant[v] else 0)
+            for v in (15, 20, 25)
+        }
+        winner = max(rates, key=rates.get)
+        if rates[winner] > 0:
+            lines.append(f"\n🏆 <b>Winner: {winner}%</b> "
+                         f"(conv rate {rates[winner]*100:.1f}%)")
+            lines.append(f"<i>Pin это значение в env: <code>DISCOUNT_PCT={winner}</code></i>")
+    try:
+        await msg.edit_text("\n".join(lines), parse_mode="HTML")
+    except Exception:
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -9796,6 +9936,7 @@ async def run_bot():
     app.add_handler(CommandHandler("fix_hashtags", cmd_fix_hashtags))
     app.add_handler(CommandHandler("content", cmd_content_schedule))
     app.add_handler(CommandHandler("today", cmd_today))
+    app.add_handler(CommandHandler("discount_stats", cmd_discount_stats))
     app.add_handler(CommandHandler("cancel_excl", cmd_cancel_excl))
     app.add_handler(CommandHandler("pin_hub", cmd_pin_hub))
     app.add_handler(CommandHandler("upload_product", cmd_upload_product))

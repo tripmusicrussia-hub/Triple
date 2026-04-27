@@ -25,6 +25,29 @@ PRICE_BUNDLE3_RUB = int(os.getenv("PRICE_BUNDLE3_RUB", "4500"))      # 4500₽ v
 # Дефолт 20%. ENV-override на случай A/B-теста (10/15/25).
 DISCOUNT_PCT = int(os.getenv("DISCOUNT_PCT", "20"))
 
+# Sprint 5: A/B discount testing
+# 3 variants — 15% / 20% / 25%. Assignment deterministic by hash(user_id)
+# → один user всегда получает один variant (повторные покупки не путаются).
+# Через 50+ conversions → /discount_stats показывает winning %.
+DISCOUNT_VARIANTS = [15, 20, 25]
+
+
+def get_user_discount_pct(user_id: int) -> int:
+    """Deterministic A/B variant assignment по hash(user_id) % 3.
+
+    Returns 15 / 20 / 25. Один user стабильно получает один variant:
+    повторные покупки не путают — variant локкается на user_id.
+
+    Used in remarketing_scheduler (Sprint 3) для touch 1 base discount.
+    Touch 2 = variant + 5, touch 3 = variant + 10 (escalation сохраняется).
+    """
+    if user_id is None:
+        return DISCOUNT_PCT  # fallback на default
+    # int % 3 — stable через все процессы (vs hash() который PYTHONHASHSEED-зависим
+    # для objects). TG user_ids распределены равномерно → ~33% per variant.
+    return DISCOUNT_VARIANTS[abs(int(user_id)) % len(DISCOUNT_VARIANTS)]
+
+
 # Referral: % off обоим (новому юзеру + приглашающему другу) после первого
 # /start с deep-link `?start=ref_<friend_tg_id>`. Меньше чем remarketing
 # discount (20%), потому что к ref-link идут «холодные» юзеры — pricing

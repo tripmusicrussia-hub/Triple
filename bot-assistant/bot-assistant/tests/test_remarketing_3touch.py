@@ -11,31 +11,33 @@ import pytest
 
 
 class TestRemarketingTouchesConfig:
+    """Sprint 5 заменил _REMARKETING_TOUCHES (fixed dict array) на helper
+    functions с per-user A/B variant. Тесты обновлены под новую structure."""
+
     def test_three_touches(self):
         import bot
-        assert len(bot._REMARKETING_TOUCHES) == 3
+        assert bot._remarketing_touch_count() == 3
 
     def test_threshold_sequence(self):
         import bot
-        touches = bot._REMARKETING_TOUCHES
-        # 24h, 72h, 7d
-        assert touches[0]["after_sec"] == 24 * 3600
-        assert touches[1]["after_sec"] == 72 * 3600
-        assert touches[2]["after_sec"] == 7 * 24 * 3600
+        delays = bot._REMARKETING_TOUCH_DELAYS_SEC
+        assert delays[0] == 24 * 3600
+        assert delays[1] == 72 * 3600
+        assert delays[2] == 7 * 24 * 3600
 
-    def test_pct_escalation(self):
+    def test_pct_escalation_variant_20(self):
+        # uid=1 → variant=20 → 20/25/30 (default-equivalent поведение)
         import bot
-        # 20% → 25% → 30% (escalating intensity)
-        assert bot._REMARKETING_TOUCHES[0]["pct"] == 20
-        assert bot._REMARKETING_TOUCHES[1]["pct"] == 25
-        assert bot._REMARKETING_TOUCHES[2]["pct"] == 30
+        assert bot._remarketing_touch_pct(0, 1) == 20
+        assert bot._remarketing_touch_pct(1, 1) == 25
+        assert bot._remarketing_touch_pct(2, 1) == 30
 
     def test_drop_after_buffer(self):
         import bot
         # Drop after 8 days — buffer после 7d third touch
         assert bot._REMARKETING_DROP_AFTER_SEC == 8 * 24 * 3600
-        # Должен быть >= 7d (последний touch)
-        assert bot._REMARKETING_DROP_AFTER_SEC >= bot._REMARKETING_TOUCHES[-1]["after_sec"]
+        # Должен быть >= 7d (последний delay)
+        assert bot._REMARKETING_DROP_AFTER_SEC >= bot._REMARKETING_TOUCH_DELAYS_SEC[-1]
 
 
 class TestRemarketingMigration:
