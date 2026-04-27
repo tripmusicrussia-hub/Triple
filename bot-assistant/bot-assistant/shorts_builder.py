@@ -260,13 +260,18 @@ def build_short(image_path: Path, mp3_path: Path, out_path: Path,
     if meta is not None:
         try:
             text_png_path = out_path.with_name(f"text_{out_path.stem}.png")
+            logger.info("shorts: rendering text overlay PNG (PIL)...")
             _render_text_overlay_png(
                 meta_name=meta.name,
                 meta_bpm=meta.bpm,
                 meta_key_short=getattr(meta, "key_short", None),
                 out_path=text_png_path,
             )
-            logger.info("shorts: text overlay PNG generated → %s", text_png_path)
+            png_size = text_png_path.stat().st_size if text_png_path.exists() else 0
+            logger.info(
+                "shorts: text overlay PNG generated → %s (%d KB)",
+                text_png_path, png_size // 1024,
+            )
         except Exception as e:
             logger.warning(
                 "shorts: text overlay PNG failed (%s) — fallback на blurred-bg only",
@@ -342,10 +347,22 @@ def build_short(image_path: Path, mp3_path: Path, out_path: Path,
     # Render free CPU shared — encoding 30-сек 1080×1920 с overlay'ями может
     # занять 2-5 мин. timeout 600 = 10 мин с большим запасом.
     timeout = max(600, duration_sec * 20)
+    logger.info(
+        "shorts: starting ffmpeg subprocess (timeout=%ds, inputs=%d, filter=%s)",
+        timeout, sum(1 for a in cmd if a == "-i"),
+        "complex" if any(a == "-filter_complex" for a in cmd) else "simple",
+    )
+    import time as _time
+    _t0 = _time.time()
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as e:
         raise RuntimeError(f"shorts ffmpeg timeout {timeout}s") from e
+    _elapsed = _time.time() - _t0
+    logger.info(
+        "shorts: ffmpeg subprocess done in %.1fs (rc=%d)",
+        _elapsed, proc.returncode,
+    )
 
     if proc.returncode != 0:
         raise RuntimeError(
