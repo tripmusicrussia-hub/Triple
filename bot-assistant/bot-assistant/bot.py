@@ -7373,19 +7373,31 @@ def _pick_next_repost_candidate() -> dict | None:
     return candidates[0][1]
 
 
+# Sprint 3 — 3-touch re-engagement sequence:
+# Touch 1 (24h): -20% (legacy DISCOUNT_PCT default)
+# Touch 2 (72h): -25% — «ещё думаешь? накину ещё 5%»
+# Touch 3 (7d):  -30% — «last chance» (после ничего)
+_REMARKETING_TOUCHES = [
+    {"after_sec": 24 * 3600, "pct": 20, "label_24h": True},
+    {"after_sec": 72 * 3600, "pct": 25, "label_24h": False},
+    {"after_sec": 7 * 24 * 3600, "pct": 30, "label_24h": False},
+]
+_REMARKETING_DROP_AFTER_SEC = 8 * 24 * 3600  # 8d — buffer после 7d touch
+
+
 async def remarketing_scheduler(bot):
-    """Раз в час проходит pending_reminders. Если запись >24h и юзер ещё не
-    куплен этот бит — шлёт ОДИН reminder с CTA + ref_remind tracking.
-    Если >7 дней — silent drop (не агрессивно).
+    """Раз в час проходит pending_reminders. **Sprint 3 update**: 3-touch
+    sequence вместо 1-touch. Discount растёт от 20% → 25% → 30%.
+
+    Auto-migration: legacy `reminded: bool` записи конвертируются в
+    `touch_count: 1` при первом проходе.
 
     Anti-spam защита:
-    - Один reminder per (user, beat)
+    - Max 3 touches per (user, beat) — после 3-го drop record
     - Skip юзеров в reminders_optout (через /stop_reminders)
     - Skip ADMIN_ID
     - Если bot.send_message упал с Forbidden (юзер blocked бот) — auto-optout
     """
-    REMINDER_AFTER_SEC = 24 * 3600       # 24h after view
-    DROP_AFTER_SEC = 7 * 24 * 3600        # 7d → drop без действия
     while True:
         try:
             await asyncio.sleep(60 * 60)  # каждый час
@@ -7396,18 +7408,27 @@ async def remarketing_scheduler(bot):
                 logger.exception("discounts cleanup failed (non-fatal)")
             now = time.time()
             to_drop = []
-            to_remind = []
+            to_send = []  # list of (key, rec, touch_idx)
             for key, rec in list(pending_reminders.items()):
+                # Migration: legacy `reminded: bool` → `touch_count: int`
+                if "touch_count" not in rec:
+                    rec["touch_count"] = 1 if rec.get("reminded") else 0
                 age = now - rec.get("ts", now)
-                if age > DROP_AFTER_SEC:
+                if age > _REMARKETING_DROP_AFTER_SEC:
                     to_drop.append(key)
                     continue
-                if rec.get("reminded"):
+                touch_count = int(rec.get("touch_count", 0))
+                # 3 touches max — после drop
+                if touch_count >= len(_REMARKETING_TOUCHES):
+                    if age > 7 * 24 * 3600:
+                        to_drop.append(key)
                     continue
-                if age >= REMINDER_AFTER_SEC:
-                    to_remind.append((key, rec))
+                # Проверяем threshold для следующего touch'а
+                next_touch = _REMARKETING_TOUCHES[touch_count]
+                if age >= next_touch["after_sec"]:
+                    to_send.append((key, rec, touch_count))
 
-            for key, rec in to_remind:
+            for key, rec, touch_idx in to_send:
                 try:
                     user_id_s, beat_id_s = key.split(":", 1)
                     user_id = int(user_id_s)
@@ -7427,20 +7448,31 @@ async def remarketing_scheduler(bot):
                     to_drop.append(key)
                     continue
 
-                # Создаём персональный discount-token (TTL 24h) — даёт юзеру
-                # -DISCOUNT_PCT% на этот бит. Кнопка ведёт на 3-payment-picker.
-                # Если token уже есть (idempotent — повторный reminder не
-                # ожидается, но защищаемся) — переиспользуем.
-                disc_token = _make_discount_token(user_id, beat_id)
-                pct = licensing.DISCOUNT_PCT
+                touch_cfg = _REMARKETING_TOUCHES[touch_idx]
+                pct = touch_cfg["pct"]
+                # Создаём discount token с conкретным pct (Sprint 1 расширил
+                # _make_discount_token на pct param).
+                disc_token = _make_discount_token(user_id, beat_id, pct=pct)
                 disc_rub = licensing.mp3_price_with_discount(pct, "RUB")
                 bpm = beat.get("bpm") or "?"
                 key_short = beat.get("key") or ""
                 rec_name = rec.get("name") or beat.get("name") or "бит"
+
+                # Per-touch text — escalating intensity
+                if touch_idx == 0:
+                    text_intro = f"🎧 Помнишь <b>«{html.escape(str(rec_name))}»</b>?"
+                    text_offer = f"🎁 <b>Только тебе скидка -{pct}% на 24 часа</b>"
+                elif touch_idx == 1:
+                    text_intro = f"🤔 Ещё думаешь над <b>«{html.escape(str(rec_name))}»</b>?"
+                    text_offer = f"🎁 <b>Накину ещё 5% — теперь -{pct}%</b>"
+                else:  # touch_idx == 2 (last chance)
+                    text_intro = f"⚡ Last call по <b>«{html.escape(str(rec_name))}»</b>"
+                    text_offer = f"🎁 <b>Финалка: -{pct}% и больше скидок не будет</b>"
+
                 text = (
-                    f"🎧 Помнишь <b>«{html.escape(str(rec_name))}»</b>?\n"
+                    f"{text_intro}\n"
                     f"⚡ {bpm} BPM · 🎹 {html.escape(str(key_short))}\n\n"
-                    f"🎁 <b>Только тебе скидка -{pct}% на 24 часа</b>\n"
+                    f"{text_offer}\n"
                     f"<s>{licensing.PRICE_MP3_RUB}₽</s> → <b>{disc_rub}₽</b>\n\n"
                     f"<i>Не интересно? /stop_reminders — больше не напишу.</i>"
                 )
@@ -7455,26 +7487,27 @@ async def remarketing_scheduler(bot):
                         user_id, text, parse_mode="HTML",
                         disable_web_page_preview=True, reply_markup=kb,
                     )
-                    rec["reminded"] = True
+                    rec["touch_count"] = touch_idx + 1
+                    rec["reminded"] = True  # backward-compat
+                    rec[f"reminded_at_touch_{touch_idx}"] = now
                     logger.info(
-                        "remarketing: sent discount reminder user=%d beat=%d token=%s",
-                        user_id, beat_id, disc_token,
+                        "remarketing: touch %d (-%d%%) user=%d beat=%d token=%s",
+                        touch_idx + 1, pct, user_id, beat_id, disc_token,
                     )
                 except Exception as e:
                     err_s = str(e).lower()
                     if "forbidden" in err_s or "blocked" in err_s or "deactivated" in err_s:
-                        # Юзер blocked бот — auto-optout
                         reminders_optout.add(user_id)
                         _save_optout()
                         to_drop.append(key)
                         logger.info("remarketing: auto-optout user=%d (blocked)", user_id)
                     else:
-                        logger.warning("remarketing: send failed user=%d: %s",
-                                       user_id, e)
+                        logger.warning("remarketing: send failed user=%d touch=%d: %s",
+                                       user_id, touch_idx, e)
 
             for key in to_drop:
                 pending_reminders.pop(key, None)
-            if to_remind or to_drop:
+            if to_send or to_drop:
                 _save_reminders()
         except Exception:
             logger.exception("remarketing_scheduler iteration failed")
