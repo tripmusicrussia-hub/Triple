@@ -7726,8 +7726,76 @@ WELCOME_SEQ_ENABLED = os.getenv("WELCOME_SEQ_ENABLED", "1") == "1"
 _WELCOME_STEP_AGE = {1: 24, 2: 72, 3: 24 * 7}
 
 
+# Sprint 6 — Source-specific welcome intros
+# Per-source intro для step 1 (recs). Source приходит из bot_users.source —
+# first-touch attribution из deep-link `/start ref_<src>`.
+_WELCOME_RECS_INTRO_BY_SOURCE = {
+    "yt": (
+        "🎬 Спасибо что пришёл с YouTube!\n\n"
+        "Вот свежак для тебя — тыкай на бит, послушаешь сразу:"
+    ),
+    "ytshorts": (
+        "🎬 Привет из Shorts!\n\n"
+        "Раз свайпнул на канал — глянь полные версии, дольше дропа в Shorts:"
+    ),
+    "tiktok": (
+        "🔥 Из TikTok зашёл — респект.\n\n"
+        "Вот свежие хиты для тебя:"
+    ),
+    "insta": (
+        "📸 Из Insta пришёл — спасибо.\n\n"
+        "Глянь что есть в каталоге:"
+    ),
+    "tg": (
+        "👋 Из канала @iiiplfiii — здарова!\n\n"
+        "Персональная подборка для своих:"
+    ),
+    "landing": (
+        "🌐 С сайта зашёл!\n\n"
+        "Вот свежее в каталоге:"
+    ),
+}
+
+
+def _welcome_recs_intro(source: str | None) -> str:
+    """Возвращает intro text для step 1 recs.
+
+    `source` (first-touch из bot_users.source) определяет tone:
+    - известные channels (yt, tiktok, insta, tg, landing) → custom intro
+    - ref_<friend_id> (referral от друга) → friend-specific (handled in caller)
+    - None или unknown → default
+    """
+    if not source:
+        return _WELCOME_RECS_INTRO_DEFAULT
+    s = source.lower().strip()
+    # Strip `ref_` prefix если есть («ref_yt» → «yt»)
+    if s.startswith("ref_"):
+        s = s[4:]
+    # Numeric (friend referral) — каждый юзер кто кого-то пригласил → разные id
+    if s.isdigit():
+        return _WELCOME_RECS_INTRO_FRIEND_REF
+    return _WELCOME_RECS_INTRO_BY_SOURCE.get(s, _WELCOME_RECS_INTRO_DEFAULT)
+
+
+_WELCOME_RECS_INTRO_DEFAULT = (
+    "👋 Здарова! Прошёл день, глянь что свежее залил:\n\n"
+    "(тыкай на бит — послушаешь сразу)"
+)
+
+_WELCOME_RECS_INTRO_FRIEND_REF = (
+    "👋 Друг рекомендовал — спасибо что доверился.\n\n"
+    "Вот подборка для тебя:"
+)
+
+
 async def _send_welcome_recs(bot, tg_id: int, source: str | None) -> bool:
-    """Step 1 → 2: 3 personal recs из новых битов. Click → play_<id>."""
+    """Step 1 → 2: 3 personal recs из новых битов с source-specific intro.
+    Click → play_<id>.
+
+    Sprint 6: source-aware intro text (yt/tiktok/insta/tg/landing/ref_friend
+    have custom welcome). Filter beats — пока без source-affinity (TODO:
+    western artists для yt, generic для других).
+    """
     candidates = [
         b for b in beats_db.BEATS_CACHE
         if b.get("content_type", "beat") == "beat"
@@ -7747,9 +7815,9 @@ async def _send_welcome_recs(bot, tg_id: int, source: str | None) -> bool:
             label += f" {ks}"
         rows.append([InlineKeyboardButton(label, callback_data="play_" + str(b["id"]))])
     rows.append([InlineKeyboardButton("🎹 В каталог", callback_data="menu_beat")])
+    intro = _welcome_recs_intro(source)
     text = (
-        "👋 Здарова! Прошёл день, глянь что свежее залил:\n\n"
-        "(тыкай на бит — послушаешь сразу)\n\n"
+        f"{intro}\n\n"
         "<i>Не интересно? /stop_reminders — больше не напишу.</i>"
     )
     await bot.send_message(
