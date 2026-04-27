@@ -6837,6 +6837,113 @@ async def cmd_repost_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _do_repost(context.bot, update.effective_chat.id, beat, meta)
 
 
+async def cmd_preview_shorts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """`/preview_shorts <beat_id>` — собрать Shorts mp4 и прислать в ЛС
+    БЕЗ загрузки на YouTube + БЕЗ TG channel post.
+
+    Use case: посмотреть как выйдет Short с новым дизайном (full-screen +
+    drawtext + опциональный EQ overlay) ПЕРЕД auto-publish'ем.
+
+    Если ENABLE_EQ_OVERLAY=1 в env — preview включит EQ visualizer.
+    """
+    if update.effective_user.id != ADMIN_ID:
+        return
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Usage: /preview_shorts <beat_id>\n\n"
+            "Соберу Shorts mp4 и пришлю в ЛС. На YT не заливаю — только preview."
+        )
+        return
+    try:
+        beat_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text(f"⚠️ beat_id должен быть числом: {args[0]}")
+        return
+    beat = beats_db.get_beat_by_id(beat_id)
+    if not beat:
+        await update.message.reply_text(f"❌ Бит id={beat_id} не найден.")
+        return
+
+    import beat_upload
+    meta = beat_upload.beat_record_to_meta(beat)
+    if meta is None:
+        await update.message.reply_text(
+            f"❌ id={beat_id}: нет BPM/key/artist-tag.\n"
+            f"bpm={beat.get('bpm')} key={beat.get('key')!r} tags={beat.get('tags')}"
+        )
+        return
+
+    file_id = beat.get("file_id")
+    if not file_id:
+        await update.message.reply_text(f"❌ id={beat_id}: нет file_id (mp3 не загружен).")
+        return
+
+    bot = context.bot
+    chat_id = update.effective_chat.id
+    status = await bot.send_message(
+        chat_id,
+        f"🎬 Собираю preview Shorts для «{meta.name}»...\n"
+        f"⏱ ~60-180 сек (full-screen, без YT upload).",
+    )
+
+    # 1. Download mp3 → temp file
+    import tempfile
+    from pathlib import Path as _P
+    tmp_dir = _P(tempfile.mkdtemp(prefix="preview_short_"))
+    mp3_path = tmp_dir / "audio.mp3"
+    short_path = tmp_dir / f"short_{meta.name}.mp4"
+    try:
+        tg_file = await bot.get_file(file_id)
+        await tg_file.download_to_drive(custom_path=mp3_path)
+
+        # 2. Get brand image (cached)
+        brand_path = _ensure_brand_image()
+        if brand_path is None:
+            await status.edit_text("❌ Brand image недоступен (GH Release fetch failed).")
+            return
+
+        # 3. Build short via shorts_builder (executor — не блокируем event loop)
+        import shorts_builder
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: shorts_builder.build_short(
+                brand_path, mp3_path, short_path, meta=meta,
+            ),
+        )
+
+        # 4. Send mp4 в ЛС админа
+        size_mb = short_path.stat().st_size / (1024 * 1024)
+        eq_state = "ON" if shorts_builder.ENABLE_EQ_OVERLAY else "OFF"
+        caption = (
+            f"🎬 Preview Shorts: <b>{meta.name}</b>\n"
+            f"BPM: {meta.bpm} | Key: {getattr(meta, 'key_short', '?')}\n"
+            f"Size: {size_mb:.1f} MB · EQ: {eq_state}\n\n"
+            f"<i>Это preview — на YT не залит.</i>"
+        )
+        with open(short_path, "rb") as f:
+            await bot.send_video(
+                chat_id, video=f, caption=caption, parse_mode="HTML",
+                width=1080, height=1920, supports_streaming=True,
+            )
+        try:
+            await status.delete()
+        except Exception:
+            pass
+
+    except Exception as e:
+        logger.exception("preview_shorts failed for beat_id=%s", beat_id)
+        try:
+            await status.edit_text(f"❌ Сборка Shorts провалилась: {e}")
+        except Exception:
+            pass
+    finally:
+        # Cleanup temp dir
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 async def _do_repost(bot, reply_chat_id: int, beat: dict, meta) -> str | None:
     """Полный repost flow для одного бита. Вызывается из /repost_now (manual)
     и из auto_repost_scheduler (auto).
@@ -8244,6 +8351,7 @@ async def post_init(application):
             BotCommand("queue", "📅 Очередь публикаций"),
             BotCommand("auto_repost", "🔁 Auto-repost on/off/status"),
             BotCommand("repost_now", "🚀 Опубликовать бит сейчас"),
+            BotCommand("preview_shorts", "🎬 Preview Shorts (без YT upload)"),
             BotCommand("yt_audit", "📺 YouTube канал audit"),
             BotCommand("yt_refresh_old", "🔄 Обновить description старого видео"),
             BotCommand("yt_rename_one", "🏷 Переименовать YT видео по canonical"),
@@ -9082,6 +9190,7 @@ async def run_bot():
     app.add_handler(CommandHandler("cancel_product", cmd_cancel_product))
     app.add_handler(CommandHandler("feature", cmd_feature))
     app.add_handler(CommandHandler("repost_now", cmd_repost_now))
+    app.add_handler(CommandHandler("preview_shorts", cmd_preview_shorts))
     app.add_handler(CommandHandler("auto_repost", cmd_auto_repost))
     app.add_handler(CommandHandler("quick_meta", cmd_quick_meta))
     app.add_handler(CommandHandler("stop_reminders", cmd_stop_reminders))
