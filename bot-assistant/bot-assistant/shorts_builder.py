@@ -336,6 +336,7 @@ def build_short(image_path: Path, mp3_path: Path, out_path: Path,
         "-preset", "ultrafast",
         "-crf", "28",
         "-r", "30",
+        "-threads", "2",  # Render free: ограничиваем parallel buffers (peak RAM)
         "-c:a", "aac",
         "-b:a", "128k",
         "-ac", "2",
