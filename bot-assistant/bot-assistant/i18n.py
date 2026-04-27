@@ -25,21 +25,21 @@ _LANG_RU_PREFIXES = ("ru", "uk", "be", "kk")
 
 
 def detect_lang(language_code: str | None) -> str:
-    """TG `user.language_code` → 'ru' или 'en' (default).
+    """TG `user.language_code` → 'ru' или 'en'.
+
+    Default = 'ru' (бот изначально для RU-аудитории, текущие юзеры все русские).
+    EN только если явный non-CIS language_code.
 
     Примеры:
-        'ru'         → 'ru'
-        'ru-RU'      → 'ru'
-        'uk'         → 'ru' (украинцы понимают русский лучше английского)
-        'be-BY'      → 'ru'
-        'en'         → 'en'
-        'en-US'      → 'en'
-        'de'         → 'en' (default для не-RU)
-        None         → 'en'
+        'ru' / 'ru-RU' / 'uk' / 'be-BY' / 'kk'  → 'ru'
+        'en' / 'en-US'                          → 'en'
+        'de' / 'fr' / 'es' / 'ja'               → 'en' (явные non-CIS)
+        None / ''                               → 'ru' (нет signal — не отпугиваем
+                                                  RU юзера английским по ошибке)
     """
-    if not language_code:
-        return "en"
-    code = language_code.lower().strip()
+    code = (language_code or "").lower().strip()
+    if not code:
+        return "ru"
     for prefix in _LANG_RU_PREFIXES:
         if code.startswith(prefix):
             return "ru"

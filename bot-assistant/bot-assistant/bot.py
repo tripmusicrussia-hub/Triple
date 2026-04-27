@@ -844,6 +844,34 @@ def _filter_beats(filter_name: str) -> list[dict]:
         return [b for b in beats_only if (b.get("bpm") or 0) >= 150]
     if filter_name == "bpm160":
         return [b for b in beats_only if (b.get("bpm") or 0) >= 160]
+    # Диапазоны BPM: bpm_<lo>_<hi> → lo ≤ bpm < hi
+    if filter_name.startswith("bpm_"):
+        try:
+            parts = filter_name[4:].split("_")
+            lo = int(parts[0])
+            hi = int(parts[1]) if len(parts) > 1 else lo + 100
+        except (ValueError, IndexError):
+            return []
+        return [b for b in beats_only if lo <= (b.get("bpm") or 0) < hi]
+    # По тональности: key_<short> → match key_short или first 2-3 chars от key
+    if filter_name.startswith("key_"):
+        target = filter_name[4:].lower()
+        out = []
+        for b in beats_only:
+            short = (b.get("key_short") or "").lower()
+            if short == target:
+                out.append(b)
+                continue
+            # Fallback: парсим из key field "A minor" → "am"
+            full = (b.get("key") or "").lower()
+            if not full or full == "-":
+                continue
+            note = full.split()[0]  # "A", "C#", "Bb"
+            is_minor = "minor" in full
+            derived = note + ("m" if is_minor else "")
+            if derived == target:
+                out.append(b)
+        return out
     return []
 
 
@@ -886,6 +914,20 @@ _FILTER_TITLES = {
 }
 
 
+def _filter_title(filter_name: str) -> str:
+    """Возвращает читаемый title для filter_name. Хардкод для known + динамический
+    для key_*/bpm_<lo>_<hi>."""
+    if filter_name in _FILTER_TITLES:
+        return _FILTER_TITLES[filter_name]
+    if filter_name.startswith("key_"):
+        return f"🎵 Тональность {filter_name[4:].upper()}"
+    if filter_name.startswith("bpm_"):
+        parts = filter_name[4:].split("_")
+        if len(parts) == 2:
+            return f"⚡ {parts[0]}-{parts[1]} BPM"
+    return filter_name
+
+
 async def do_quick_filter(bot, chat_id: int, user_id: int, filter_name: str,
                           page: int = 0, query=None):
     """Шлёт ОДИН случайный бит из выбранного фильтра (с anti-repeat history).
@@ -895,7 +937,7 @@ async def do_quick_filter(bot, chat_id: int, user_id: int, filter_name: str,
     но игнорируется — один бит per клик.
     """
     results = _filter_beats(filter_name)
-    title = _FILTER_TITLES.get(filter_name, filter_name)
+    title = _filter_title(filter_name)
     if not results:
         text = f"{title}: пусто, попробуй другой фильтр"
         if query is not None:
@@ -958,17 +1000,59 @@ def kb_beats_menu(user_id: int | None = None):
         InlineKeyboardButton("🏙 Detroit", callback_data="qf_detroit"),
         InlineKeyboardButton("🇷🇺 RU", callback_data="qf_ru"),
     ])
-    # Quick-filter chips: BPM
-    rows.append([
-        InlineKeyboardButton("⚡ 130+", callback_data="qf_bpm130"),
-        InlineKeyboardButton("⚡ 140+", callback_data="qf_bpm140"),
-        InlineKeyboardButton("⚡ 150+", callback_data="qf_bpm150"),
-        InlineKeyboardButton("⚡ 160+", callback_data="qf_bpm160"),
-    ])
+    # По BPM — submenu с диапазонами 120-130/130-140/140-150/150-160/160+
+    rows.append([InlineKeyboardButton(
+        "⚡ По BPM", callback_data="bpm_picker",
+    )])
+    # По тональности — submenu с 12 ключами (minor по умолчанию + major switch)
+    rows.append([InlineKeyboardButton(
+        "🎵 По тональности", callback_data="keys_minor",
+    )])
     rows.append([InlineKeyboardButton(
         f"🎲 Случайный ({beats} всего)", callback_data="randcat_beat",
     )])
     rows.append([InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")])
+    return InlineKeyboardMarkup(rows)
+
+
+# ── BPM picker (диапазоны) ─────────────────────────────────
+def kb_bpm_picker() -> InlineKeyboardMarkup:
+    """Picker по BPM: диапазоны 120-130/130-140/140-150/150-160/160+.
+    Клик → qf_bpm_<lo>_<hi> filter (или qf_bpm_160 для 160+).
+    """
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⚡ 120-130", callback_data="qf_bpm_120_130"),
+         InlineKeyboardButton("⚡ 130-140", callback_data="qf_bpm_130_140")],
+        [InlineKeyboardButton("⚡ 140-150", callback_data="qf_bpm_140_150"),
+         InlineKeyboardButton("⚡ 150-160", callback_data="qf_bpm_150_160")],
+        [InlineKeyboardButton("⚡ 160+", callback_data="qf_bpm160")],
+        [InlineKeyboardButton("◀️ Раздел Биты", callback_data="menu_beat")],
+    ])
+
+
+# ── Keys picker (12 minor + 12 major) ──────────────────────
+_KEY_PICKER_NOTES = ["A", "A#", "B", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#"]
+
+
+def kb_keys_picker(major: bool = False) -> InlineKeyboardMarkup:
+    """Picker по тональности: 12 ключей в grid 4×3 + переключатель minor/major.
+    Клик по ключу → qf_key_<short> filter (Am, C#m, D, etc).
+    """
+    suffix = "" if major else "m"
+    rows = []
+    for i in range(0, 12, 4):
+        rows.append([
+            InlineKeyboardButton(
+                f"{n}{suffix}",
+                callback_data=f"qf_key_{n}{suffix}",
+            )
+            for n in _KEY_PICKER_NOTES[i:i+4]
+        ])
+    if major:
+        rows.append([InlineKeyboardButton("← Минор", callback_data="keys_minor")])
+    else:
+        rows.append([InlineKeyboardButton("→ Мажор", callback_data="keys_major")])
+    rows.append([InlineKeyboardButton("◀️ Раздел Биты", callback_data="menu_beat")])
     return InlineKeyboardMarkup(rows)
 
 def kb_artists():
@@ -1506,6 +1590,16 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _REF_WHITELIST = {"yt", "ytshorts", "insta", "tg", "tiktok",
                               "soundcloud", "landing", "ads", "collab", "remind"}
             ref_source = raw_src if raw_src in _REF_WHITELIST else "other"
+
+    # i18n: сохраняем language_code из TG в cache при первом /start.
+    # Все последующие callbacks (kb_after_beat / cart_add / etc) получат
+    # язык из cache БЕЗ Supabase round-trip — даже если column lang не
+    # создан, юзер видит правильный язык весь session.
+    try:
+        import i18n as _i
+        _i._user_lang_cache[user_id] = _i.detect_lang(user.language_code)
+    except Exception:
+        pass
 
     # is_new определяется через Supabase (source of truth между Render
     # redeploy'ями). Fallback — in-memory all_users (свежий процесс).
@@ -4048,7 +4142,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _nav_reply(query, "🔍 Напиши название бита, имя артиста или тег — найду всё что есть!")
         return
 
-    # Quick-filter chips (qf_hard / qf_memphis / qf_detroit / qf_ru / qf_bpm140 / qf_bpm160)
+    # BPM picker submenu (от kb_beats_menu «⚡ По BPM»)
+    if data == "bpm_picker":
+        await _nav_reply(query, "⚡ Выбери диапазон BPM:", reply_markup=kb_bpm_picker())
+        return
+
+    # Keys picker submenu (от kb_beats_menu «🎵 По тональности»)
+    if data == "keys_minor":
+        await _nav_reply(query, "🎵 Выбери тональность (minor):", reply_markup=kb_keys_picker(major=False))
+        return
+    if data == "keys_major":
+        await _nav_reply(query, "🎵 Выбери тональность (major):", reply_markup=kb_keys_picker(major=True))
+        return
+
+    # Quick-filter chips (qf_hard / qf_memphis / qf_detroit / qf_ru / qf_bpm140 / qf_bpm160 / qf_key_Am / qf_bpm_120_130)
     if data.startswith("qf_"):
         filter_name = data[3:]
         await do_quick_filter(bot, query.message.chat_id, user_id, filter_name, page=0, query=query)

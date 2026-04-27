@@ -26,10 +26,12 @@ class TestDetectLang:
         for code in ("de", "fr", "es", "it", "ja", "zh", "pt-BR"):
             assert i18n.detect_lang(code) == "en", f"failed for {code}"
 
-    def test_none_or_empty(self):
-        assert i18n.detect_lang(None) == "en"
-        assert i18n.detect_lang("") == "en"
-        assert i18n.detect_lang("   ") == "en"
+    def test_none_or_empty_defaults_ru(self):
+        # Default = 'ru' (бот для RU-аудитории, no-signal не должен дать EN
+        # русскому юзеру по ошибке)
+        assert i18n.detect_lang(None) == "ru"
+        assert i18n.detect_lang("") == "ru"
+        assert i18n.detect_lang("   ") == "ru"
 
 
 class TestTranslate:
