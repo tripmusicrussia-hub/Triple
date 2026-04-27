@@ -7746,6 +7746,21 @@ async def post_init(application):
     if _POST_INIT_DONE:
         return  # idempotency: PTB hook + manual call → второй раз no-op
     _POST_INIT_DONE = True
+    # Force-eject старого polling session через TG API. Render не шлёт SIGTERM
+    # (или шлёт SIGKILL сразу) — graceful shutdown handler не срабатывает.
+    # `bot.close()` закрывает getUpdates connection на TG-стороне → старый
+    # instance мгновенно получает Conflict в своём polling loop и умирает.
+    # Новый instance подхватывает чисто без zombie cascade.
+    # Лимит: TG API позволяет close() не чаще 1 раза в 10 мин — при rapid
+    # redeploys может вернуть error, не критично (старый умрёт сам через
+    # 60 сек polling timeout).
+    try:
+        await application.bot.close()
+        logger.info("post_init: bot.close() — old polling session ejected")
+    except Exception as e:
+        # Часто бывает «too many requests» если deploy < 10 мин назад.
+        # Не fatal — старый instance всё равно умрёт через TG polling timeout.
+        logger.info("post_init: bot.close() skipped: %s", str(e)[:100])
     try:
         await application.bot.delete_webhook(drop_pending_updates=True)
         logger.info("post_init: webhook cleared, pending updates dropped")
