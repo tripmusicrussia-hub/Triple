@@ -2415,8 +2415,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     logger.exception("beats_db append failed")
 
-                # ── YT Shorts: второй upload 9:16 версии 45 сек ───────
-                # Использует тот же brand-кадр, но в 1080×1920 letterbox.
+                # ── YT Shorts: второй upload 9:16 версии 30 сек ───────
+                # Full-screen 1080×1920: blurred bg + sharp center + drawtext
+                # (beat name + BPM/KEY) — artist scrolls feed → видит fit за 0.5с.
                 # Shorts feed = отдельный recommendation-канал внутри YT,
                 # не каннибализирует основной трек.
                 try:
@@ -2425,7 +2426,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await loop.run_in_executor(
                         None,
                         lambda: shorts_builder.build_short(
-                            thumb_path, mp3_path, short_path,
+                            thumb_path, mp3_path, short_path, meta=meta,
                         ),
                     )
                     short_title = beat_post_builder.build_shorts_title(meta)
@@ -8641,24 +8642,35 @@ async def _build_and_upload_shorts(bot, token: str) -> None:
         )
         return
 
-    # 2) Build short via ffmpeg (executor — не блокируем event loop)
+    # 2) Hydrate BeatMeta для full-screen Shorts с beat name + BPM/KEY drawtext
+    try:
+        meta_obj = _BM(**meta_d)
+    except Exception:
+        logger.exception("shorts: BeatMeta hydrate failed for %s", token)
+        meta_obj = None
+
+    # 3) Build short via ffmpeg (executor — не блокируем event loop)
     short_path = _P(str(mp3_path)).with_name(f"short_{token}.mp4")
     loop = asyncio.get_running_loop()
     try:
         await loop.run_in_executor(
             None,
-            lambda: shorts_builder.build_short(thumb_path, mp3_path, short_path),
+            lambda: shorts_builder.build_short(
+                thumb_path, mp3_path, short_path, meta=meta_obj,
+            ),
         )
     except Exception:
         logger.exception("shorts: build_short failed for %s", token)
         await bot.send_message(ADMIN_ID, f"❌ ffmpeg сборка Shorts провалилась для {token}")
         return
 
-    # 3) YT Shorts upload
-    try:
-        meta_obj = _BM(**meta_d)
-    except Exception:
-        logger.exception("shorts: BeatMeta hydrate failed for %s", token)
+    # 4) YT Shorts upload — meta_obj already hydrated above
+    if meta_obj is None:
+        await bot.send_message(
+            ADMIN_ID,
+            f"❌ Shorts: BeatMeta hydrate failed для `{token}` — без meta нет "
+            f"title/desc/tags для YT upload. Отменяю.",
+        )
         try:
             short_path.unlink(missing_ok=True)
         except Exception:
