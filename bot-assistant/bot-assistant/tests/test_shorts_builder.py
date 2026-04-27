@@ -1,15 +1,14 @@
-"""Tests для shorts_builder — Step 1 full-screen + drawtext layout.
+"""Tests для shorts_builder — Step 1 full-screen + PIL text overlay.
 
 Не делаем end-to-end ffmpeg run (занимает 60-180 сек на free CPU, не подходит
 для unit tests). Вместо этого:
-- Тестируем filter chain construction (что текст правильно эскейпится,
-  truncation работает, fallback на letterbox при meta=None)
-- Тестируем _truncate_name + _escape_drawtext отдельно
-- E2E test build_short() помечен @pytest.mark.slow и skipped по умолчанию
+- Тестируем filter chain construction (overlay структура для разных комбинаций)
+- Тестируем _truncate_name + PIL text overlay rendering
+- Smoke contract: build_short raises на missing inputs
 """
 from __future__ import annotations
 
-from unittest.mock import patch
+from pathlib import Path
 
 import pytest
 
@@ -31,128 +30,119 @@ class TestTruncateName:
         assert len(out) == 14
 
     def test_truncate_strips_trailing_space(self):
-        # «AGGRESSIVE ME…» — "AGGRESSIVE M" + "…" — но "AGGRESSIVE " имеет
-        # пробел в конце который мы strip'аем
         out = shorts_builder._truncate_name("AGGRESSIVE MORE TEXT", max_len=12)
         assert out.endswith("…")
-        # Не должно быть «AGGRESSIVE …» с пробелом перед эллипсом
         assert "  " not in out
-
-
-class TestEscapeDrawtext:
-    def test_no_special_chars_passthrough(self):
-        assert shorts_builder._escape_drawtext("WAW") == "WAW"
-        assert shorts_builder._escape_drawtext("136 BPM") == "136 BPM"
-
-    def test_colon_escaped(self):
-        # «BPM: 136» → «BPM\: 136»
-        out = shorts_builder._escape_drawtext("BPM: 136")
-        assert out == r"BPM\: 136"
-
-    def test_backslash_escaped(self):
-        out = shorts_builder._escape_drawtext(r"path\name")
-        assert out == r"path\\name"
-
-    def test_apostrophe_replaced_with_typographic(self):
-        # ' нельзя внутри single-quoted text — заменяем на ’
-        out = shorts_builder._escape_drawtext("don't stop")
-        assert "'" not in out
-        assert "’" in out
-
-    def test_combined_escaping(self):
-        out = shorts_builder._escape_drawtext("a:b'c\\d")
-        assert out == r"a\:b’c\\d"
 
 
 class TestFilterChain:
     def test_legacy_letterbox_when_meta_none(self):
-        chain = shorts_builder._build_filter_chain(None, None, None)
-        # Legacy fallback: simple scale + pad
+        chain = shorts_builder._build_filter_chain(None)
         assert "scale=1080:-2" in chain
         assert "pad=1080:1920" in chain
-        # Без drawtext / split / boxblur
-        assert "drawtext" not in chain
+        # Без overlay структуры
         assert "split" not in chain
         assert "boxblur" not in chain
 
-    def test_full_screen_when_meta_provided(self):
-        chain = shorts_builder._build_filter_chain("WAW", 136, "Cm")
-        # Step 1: blurred bg + sharp center
+    def test_no_overlays_blurred_bg_only(self):
+        # meta_name есть, но без text/eq overlay
+        chain = shorts_builder._build_filter_chain(
+            "WAW", text_overlay=False, eq_overlay=False,
+        )
+        # Step 1 base: blurred bg + sharp center
         assert "split=2[bg_src][fg_src]" in chain
         assert "boxblur=20:5" in chain
         assert "force_original_aspect_ratio=increase" in chain
-        # Step 2: drawtext overlays
-        assert "drawtext" in chain
-        assert "WAW" in chain
-        assert "136 BPM" in chain
-        assert "Cm" in chain
-        # Final label для -map
+        # Финал [v_out]
         assert "[v_out]" in chain
-
-    def test_bpm_only_when_no_key(self):
-        chain = shorts_builder._build_filter_chain("WAW", 136, None)
-        assert "136 BPM" in chain
-        # Не должно быть «| Cm» суффикса
-        assert "BPM | " not in chain
-
-    def test_no_bpm_skip_bpm_filter(self):
-        chain = shorts_builder._build_filter_chain("WAW", None, None)
-        # Только name drawtext, без BPM
-        assert "WAW" in chain
-        assert "BPM" not in chain
-
-    def test_long_name_truncated_in_chain(self):
-        chain = shorts_builder._build_filter_chain(
-            "AGGRESSIVE MEMPHIS DRILL", 145, "Am",
-        )
-        # Полное имя не в chain (truncated)
-        assert "AGGRESSIVE MEMPHIS DRILL" not in chain
-        assert "…" in chain
-
-    def test_special_chars_escaped(self):
-        # «don't» имеет ' — должен стать ’
-        chain = shorts_builder._build_filter_chain("don't stop", 140, "Am")
-        assert "don't" not in chain
-        assert "don’t" in chain
-
-    def test_eq_overlay_adds_third_input_overlay(self):
-        # eq_overlay=True → finals chain имеет [base][2:v]overlay
-        chain = shorts_builder._build_filter_chain(
-            "WAW", 136, "Cm", eq_overlay=True,
-        )
-        assert "[base]" in chain
-        assert "[2:v]overlay" in chain
-        assert "[v_out]" in chain
-        # format=yuv420p в самом конце (после overlay) — не теряем alpha
-        assert chain.rstrip("[v_out]").rstrip().endswith("format=yuv420p")
-
-    def test_no_eq_overlay_skips_third_input(self):
-        chain = shorts_builder._build_filter_chain(
-            "WAW", 136, "Cm", eq_overlay=False,
-        )
+        # Никаких extra overlay'ев
         assert "[2:v]" not in chain
-        # format=yuv420p сразу после drawtext'ов перед [v_out]
-        assert "format=yuv420p[v_out]" in chain
+        assert "[3:v]" not in chain
+
+    def test_text_overlay_adds_input_2(self):
+        chain = shorts_builder._build_filter_chain(
+            "WAW", text_overlay=True, eq_overlay=False,
+        )
+        # input #2 = text PNG
+        assert "[2:v]overlay=0:0" in chain
+        assert "[with_text]" in chain
+        # Финал yuv420p
+        assert "[v_out]" in chain
+
+    def test_eq_only_uses_input_2(self):
+        # text_overlay=False — EQ занимает input #2 (shifting)
+        chain = shorts_builder._build_filter_chain(
+            "WAW", text_overlay=False, eq_overlay=True,
+        )
+        assert "[2:v]overlay" in chain
+        assert "shortest=1" in chain
+
+    def test_text_and_eq_use_input_2_and_3(self):
+        chain = shorts_builder._build_filter_chain(
+            "WAW", text_overlay=True, eq_overlay=True,
+        )
+        assert "[2:v]overlay=0:0" in chain  # text
+        assert "[3:v]overlay" in chain  # EQ
+        assert "shortest=1" in chain
+
+    def test_format_yuv420p_at_end(self):
+        # format=yuv420p должен быть В САМОМ КОНЦЕ цепочки (alpha сохраняется
+        # до последнего overlay'я)
+        chain = shorts_builder._build_filter_chain(
+            "WAW", text_overlay=True, eq_overlay=True,
+        )
+        # Последняя operation перед [v_out]
+        assert chain.rstrip().endswith("format=yuv420p[v_out]")
 
 
-class TestFontArg:
-    def test_returns_empty_when_font_missing(self):
-        with patch("shorts_builder.Path.exists", return_value=False):
-            out = shorts_builder._font_arg(bold=True)
-        assert out == ""
+class TestRenderTextOverlayPng:
+    """PIL text overlay — проверяем что PNG создаётся, размер правильный, alpha сохранён."""
 
-    def test_returns_fontfile_when_exists(self):
-        with patch("shorts_builder.Path.exists", return_value=True):
-            out = shorts_builder._font_arg(bold=True)
-        assert ":fontfile=" in out
-        assert "Bold" in out
+    def test_creates_png_with_correct_size(self, tmp_path):
+        out = tmp_path / "text.png"
+        shorts_builder._render_text_overlay_png(
+            meta_name="WAW", meta_bpm=136, meta_key_short="Cm",
+            out_path=out,
+        )
+        assert out.exists()
+        from PIL import Image
+        img = Image.open(out)
+        assert img.size == (1080, 1920)
+        assert img.mode == "RGBA"
 
-    def test_regular_when_not_bold(self):
-        with patch("shorts_builder.Path.exists", return_value=True):
-            out = shorts_builder._font_arg(bold=False)
-        assert ":fontfile=" in out
-        # DejaVu-Sans.ttf (no Bold)
-        assert "Bold" not in out
+    def test_handles_long_name(self, tmp_path):
+        out = tmp_path / "text.png"
+        # Длинное имя — не падает, truncate работает
+        shorts_builder._render_text_overlay_png(
+            meta_name="AGGRESSIVE MEMPHIS DRILL", meta_bpm=145, meta_key_short="Am",
+            out_path=out,
+        )
+        assert out.exists()
+
+    def test_handles_no_bpm(self, tmp_path):
+        out = tmp_path / "text.png"
+        shorts_builder._render_text_overlay_png(
+            meta_name="WAW", meta_bpm=None, meta_key_short=None,
+            out_path=out,
+        )
+        assert out.exists()
+
+    def test_handles_bpm_no_key(self, tmp_path):
+        out = tmp_path / "text.png"
+        shorts_builder._render_text_overlay_png(
+            meta_name="WAW", meta_bpm=140, meta_key_short=None,
+            out_path=out,
+        )
+        assert out.exists()
+
+    def test_unicode_name_supported(self, tmp_path):
+        out = tmp_path / "text.png"
+        # Cyrillic / accents — PIL handles natively (vs ffmpeg drawtext escaping)
+        shorts_builder._render_text_overlay_png(
+            meta_name="БИТЁНОК", meta_bpm=140, meta_key_short="Am",
+            out_path=out,
+        )
+        assert out.exists()
 
 
 class TestBuildShortContract:
@@ -160,7 +150,6 @@ class TestBuildShortContract:
     raise при отсутствии input файлов."""
 
     def test_missing_image_raises(self, tmp_path):
-        from pathlib import Path
         mp3 = tmp_path / "fake.mp3"
         mp3.touch()
         out = tmp_path / "out.mp4"
@@ -170,7 +159,6 @@ class TestBuildShortContract:
             )
 
     def test_missing_mp3_raises(self, tmp_path):
-        from pathlib import Path
         img = tmp_path / "fake.jpg"
         img.touch()
         out = tmp_path / "out.mp4"

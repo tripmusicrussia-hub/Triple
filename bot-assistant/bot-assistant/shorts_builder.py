@@ -1,16 +1,18 @@
 """Сборка 9:16 видео для YouTube Shorts (и универсально — для TG Story,
 Reels, TikTok если понадобится).
 
-Дизайн (2026-04-27 update):
+Дизайн (2026-04-28 update):
 * **Blurred bg + sharp center** — full-screen, без чёрных полос. Тот же
   brand-кадр копируется: одна копия scale-up до 1080×1920 + boxblur =
   размытый bg, вторая копия (оригинал 16:9 → 1080×608) overlay'ится
   по центру = sharp focal point.
-* **Text overlays**: beat name top-center (84px bold) + BPM/KEY
-  bottom-right (44px). Artist scrolls Shorts feed → видит fit за 0.5с
-  без открытия description.
+* **Text overlays через PIL** — beat name top-center (84px bold) + BPM/KEY
+  bottom-right (44px). Рисуется в transparent PNG, накладывается через
+  ffmpeg overlay filter. PIL подход вместо ffmpeg drawtext потому что
+  imageio-ffmpeg static binary НЕ имеет drawtext filter (compile-time
+  disabled — known issue).
 * `-tune stillimage` — быстрый энкод (~60s на 30-сек short с overlay'ями
-  на Render free tier; vs 50s до изменений — overhead +20% от boxblur+drawtext).
+  на Render free tier).
 
 Backwards-compat: если `meta=None` → старый letterbox approach (legacy callers).
 """
@@ -35,12 +37,25 @@ _FFMPEG_CACHE: str | None = None
 # через Render env без redeploy.
 ENABLE_EQ_OVERLAY = os.getenv("ENABLE_EQ_OVERLAY", "0") == "1"
 
-# Font paths на Render Linux (Debian-based images). DejaVu обычно установлен.
-# Если absent — fallback на ffmpeg internal font.
-_DEJAVU_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVu-Sans-Bold.ttf"
-_DEJAVU_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVu-Sans.ttf"
+# Font search paths (в порядке prioritет): system Linux DejaVu, common Mac
+# и Windows локации, fallback на PIL bundled. PIL не имеет встроенных
+# красивых TTF — без файла fallback на bitmap font (мелкий, ugly).
+_FONT_CANDIDATES_BOLD = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",  # Debian/Ubuntu
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/Library/Fonts/Arial Bold.ttf",  # macOS
+    "C:/Windows/Fonts/arialbd.ttf",  # Windows
+    "DejaVuSans-Bold.ttf",  # PIL search path
+]
+_FONT_CANDIDATES_REGULAR = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/Library/Fonts/Arial.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+    "DejaVuSans.ttf",
+]
 
-# Ограничение длины beat name для drawtext layout (84px font, 1080px viewport
+# Ограничение длины beat name для PIL text layout (84px font, 1080px viewport
 # вмещает ~14 символов с padding). Длиннее — обрезаем + «…».
 _NAME_MAX_LEN = 14
 
@@ -71,93 +86,136 @@ def _probe_duration_sec(mp3_path: Path) -> float:
     return 0.0
 
 
-def _escape_drawtext(s: str) -> str:
-    r"""Экранирует строку для ffmpeg drawtext: `:`, `\`, `'` — special chars.
-
-    ffmpeg parses drawtext text='...' с особыми правилами: backslash перед
-    : и \ нужен. Одинарную кавычку нельзя внутри single-quoted text — заменяем
-    на типографскую ’ (Unicode U+2019), не отличается визуально.
-    """
-    return (
-        s.replace("\\", r"\\")
-         .replace(":", r"\:")
-         .replace("'", "’")
-    )
-
-
 def _truncate_name(name: str, max_len: int = _NAME_MAX_LEN) -> str:
-    """«AGGRESSIVE MEMPHIS DRILL» → «AGGRESSIVE ME…» — fits drawtext layout."""
+    """«AGGRESSIVE MEMPHIS DRILL» → «AGGRESSIVE ME…» — fits text layout."""
     if len(name) <= max_len:
         return name
     return name[: max_len - 1].rstrip() + "…"
 
 
-def _font_arg(bold: bool = False) -> str:
-    """Возвращает `:fontfile=PATH` если шрифт существует на хосте, иначе ''.
-
-    На Render Linux DejaVu обычно есть. Если нет — ffmpeg использует internal
-    monospace font (некрасиво но работает, не падает).
+def _load_pil_font(size: int, bold: bool = False):
+    """Возвращает PIL ImageFont для draw.text. Перебирает candidates
+    Linux/Mac/Windows; fallback на bitmap font (выглядит плохо, но не падает).
     """
-    target = _DEJAVU_BOLD if bold else _DEJAVU_REGULAR
-    if Path(target).exists():
-        return f":fontfile={target}"
-    return ""
-
-
-def _build_filter_chain(meta_name: str | None, meta_bpm: int | None,
-                        meta_key_short: str | None,
-                        eq_overlay: bool = False) -> str:
-    """Конструирует ffmpeg filter_complex для blurred bg + sharp center +
-    drawtext overlays + опциональный EQ overlay (input #2 = mp3, #2:v = EQ webm).
-
-    Если meta_name=None → fallback на старый letterbox (для legacy callers).
-    Если eq_overlay=True → ожидает 3rd input (EQ webm) с alpha-каналом,
-    overlay'ится по центру.
-    """
-    if meta_name is None:
-        # Legacy fallback: simple scale + black-bar pad
-        return "scale=1080:-2,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p"
-
-    # Step 1 chain: blurred bg + sharp center + drawtext → label [base]
-    name_safe = _escape_drawtext(_truncate_name(meta_name))
-    name_filter = (
-        f"drawtext=text='{name_safe}'"
-        f":fontsize=84:fontcolor=white:borderw=4:bordercolor=black@0.7"
-        f":x=(w-text_w)/2:y=120"
-        f"{_font_arg(bold=True)}"
+    from PIL import ImageFont
+    candidates = _FONT_CANDIDATES_BOLD if bold else _FONT_CANDIDATES_REGULAR
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size)
+        except (OSError, IOError):
+            continue
+    logger.warning(
+        "shorts: no TTF font found among %d candidates → fallback на bitmap",
+        len(candidates),
     )
+    return ImageFont.load_default()
 
-    text_overlays = name_filter
+
+def _render_text_overlay_png(meta_name: str, meta_bpm: int | None,
+                             meta_key_short: str | None,
+                             out_path: Path,
+                             width: int = 1080, height: int = 1920) -> Path:
+    """Рисует transparent PNG с beat name top + BPM/KEY bottom-right.
+
+    Используется вместо ffmpeg drawtext filter, который отсутствует в
+    imageio-ffmpeg static binary (compile-time disabled, known issue 2024).
+
+    Layout:
+    - Beat name (truncated): top-center, y=120, 84px bold, white + black shadow
+    - BPM/KEY: bottom-right, y=h-th-80, 44px regular, white + black shadow
+    """
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))  # transparent
+    draw = ImageDraw.Draw(img)
+
+    # Beat name top-center
+    name_text = _truncate_name(meta_name)
+    name_font = _load_pil_font(84, bold=True)
+    bbox = draw.textbbox((0, 0), name_text, font=name_font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    name_x = (width - tw) // 2 - bbox[0]
+    name_y = 120 - bbox[1]
+    # Shadow + main
+    draw.text((name_x + 3, name_y + 3), name_text, font=name_font,
+              fill=(0, 0, 0, 200))
+    draw.text((name_x, name_y), name_text, font=name_font,
+              fill=(255, 255, 255, 255))
+
+    # BPM/KEY bottom-right (если bpm есть)
     if meta_bpm:
         if meta_key_short:
             bpm_text = f"{meta_bpm} BPM | {meta_key_short}"
         else:
             bpm_text = f"{meta_bpm} BPM"
-        bpm_safe = _escape_drawtext(bpm_text)
-        bpm_filter = (
-            f"drawtext=text='{bpm_safe}'"
-            f":fontsize=44:fontcolor=white:borderw=3:bordercolor=black@0.7"
-            f":x=w-text_w-60:y=h-text_h-80"
-            f"{_font_arg(bold=False)}"
-        )
-        text_overlays = f"{name_filter},{bpm_filter}"
+        bpm_font = _load_pil_font(44, bold=False)
+        bbox_b = draw.textbbox((0, 0), bpm_text, font=bpm_font)
+        bw, bh = bbox_b[2] - bbox_b[0], bbox_b[3] - bbox_b[1]
+        bpm_x = width - bw - 60 - bbox_b[0]
+        bpm_y = height - bh - 80 - bbox_b[1]
+        draw.text((bpm_x + 2, bpm_y + 2), bpm_text, font=bpm_font,
+                  fill=(0, 0, 0, 200))
+        draw.text((bpm_x, bpm_y), bpm_text, font=bpm_font,
+                  fill=(255, 255, 255, 255))
+
+    img.save(out_path, "PNG")
+    return out_path
+
+
+def _build_filter_chain(meta_name: str | None,
+                        text_overlay: bool = False,
+                        eq_overlay: bool = False) -> str:
+    """Конструирует ffmpeg filter_complex.
+
+    Inputs ordering:
+    - [0:v] = brand image (loop)
+    - [1:a] = mp3
+    - [2:v] = text overlay PNG (transparent), если text_overlay=True
+    - [3:v] = EQ webm (transparent), если eq_overlay=True
+      (или [2:v] если text_overlay=False — input shifting)
+
+    Cases:
+    - meta_name=None → legacy letterbox
+    - text_overlay=False, eq_overlay=False → blurred bg + sharp, без overlay
+    - text_overlay=True, eq_overlay=False → + text PNG overlay
+    - text_overlay=False, eq_overlay=True → + EQ webm overlay
+    - text_overlay=True, eq_overlay=True → + text + EQ
+    """
+    if meta_name is None:
+        # Legacy fallback: simple scale + black-bar pad
+        return "scale=1080:-2,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p"
 
     base_chain = (
         "[0:v]split=2[bg_src][fg_src];"
         "[bg_src]scale=1080:1920:force_original_aspect_ratio=increase,"
         "crop=1080:1920,boxblur=20:5[bg];"
         "[fg_src]scale=1080:-2[fg];"
-        f"[bg][fg]overlay=(W-w)/2:(H-h)/2,{text_overlays}"
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2"
     )
 
+    # Build progressive chain через named labels
+    chain = f"{base_chain}[base]"
+    cur = "[base]"
+    text_idx = 2  # input #2 = text PNG если включен
+    eq_idx = 3 if text_overlay else 2  # input shifts если text disabled
+
+    if text_overlay:
+        chain += f";{cur}[{text_idx}:v]overlay=0:0[with_text]"
+        cur = "[with_text]"
     if eq_overlay:
-        # 3rd input = EQ webm с alpha. Overlay по центру 1080×1920.
-        # format=yuv420p только в самом конце (не теряем alpha до overlay).
-        return (
-            f"{base_chain}[base];"
-            "[base][2:v]overlay=(W-w)/2:(H-h)/2:shortest=1,format=yuv420p[v_out]"
+        chain += (
+            f";{cur}[{eq_idx}:v]overlay=(W-w)/2:(H-h)/2:shortest=1"
+            f",format=yuv420p[v_out]"
         )
-    return f"{base_chain},format=yuv420p[v_out]"
+    else:
+        # Финал: format=yuv420p после последнего overlay (или сразу после base)
+        if text_overlay:
+            # cur = [with_text]
+            chain += f";{cur}format=yuv420p[v_out]"
+        else:
+            # Нет ни text ни EQ — base сразу финал
+            chain += f";{cur}format=yuv420p[v_out]"
+    return chain
 
 
 def build_short(image_path: Path, mp3_path: Path, out_path: Path,
@@ -168,7 +226,7 @@ def build_short(image_path: Path, mp3_path: Path, out_path: Path,
     начиная со смещения start_offset_sec.
 
     Если `meta` (BeatMeta) передан → full-screen blurred bg + sharp center +
-    text overlays (beat name + BPM/KEY).
+    text overlays (PIL → PNG → ffmpeg overlay).
 
     Если `meta=None` → legacy letterbox (для старых callers, не рекомендуется).
 
@@ -197,9 +255,27 @@ def build_short(image_path: Path, mp3_path: Path, out_path: Path,
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Pre-render text overlay PNG если meta есть
+    text_png_path: Path | None = None
+    if meta is not None:
+        try:
+            text_png_path = out_path.with_name(f"text_{out_path.stem}.png")
+            _render_text_overlay_png(
+                meta_name=meta.name,
+                meta_bpm=meta.bpm,
+                meta_key_short=getattr(meta, "key_short", None),
+                out_path=text_png_path,
+            )
+            logger.info("shorts: text overlay PNG generated → %s", text_png_path)
+        except Exception as e:
+            logger.warning(
+                "shorts: text overlay PNG failed (%s) — fallback на blurred-bg only",
+                e,
+            )
+            text_png_path = None
+
     # Step 2: pre-generate circular EQ webm если включен ENABLE_EQ_OVERLAY
-    # и meta предоставлен. Graceful degradation: при failure → fallback на
-    # Step 1 only (без блокирующего сбоя).
+    # Graceful degradation: при failure → fallback без EQ (text overlay остаётся).
     eq_webm_path: Path | None = None
     if ENABLE_EQ_OVERLAY and meta is not None:
         try:
@@ -213,28 +289,25 @@ def build_short(image_path: Path, mp3_path: Path, out_path: Path,
             logger.info("shorts: EQ overlay generated → %s", eq_webm_path)
         except Exception as e:
             logger.warning(
-                "shorts: EQ overlay generation failed (%s) — fallback на Step 1 only",
+                "shorts: EQ overlay generation failed (%s) — fallback без EQ",
                 e,
             )
             eq_webm_path = None
 
-    # Build filter chain (blurred bg + sharp center + drawtext +/- EQ)
+    # Build filter chain
     if meta is not None:
         filter_chain = _build_filter_chain(
             meta_name=meta.name,
-            meta_bpm=meta.bpm,
-            meta_key_short=getattr(meta, "key_short", None),
+            text_overlay=(text_png_path is not None),
             eq_overlay=(eq_webm_path is not None),
         )
-        # audio map: input #1 если EQ нет, input #1 если EQ есть (#2 = video EQ)
-        # ffmpeg input ordering: [0]=image, [1]=mp3, [2]=eq.webm
         filter_arg = ["-filter_complex", filter_chain, "-map", "[v_out]", "-map", "1:a"]
     else:
         # Legacy path: simple -vf
-        filter_arg = ["-vf", _build_filter_chain(None, None, None)]
+        filter_arg = ["-vf", _build_filter_chain(None)]
 
-    # `-ss` ПЕРЕД `-i` — accurate seek без overhead'а на full decode.
-    # Применяем только к audio (image — `-loop 1` бесконечная статика).
+    # ffmpeg cmd: inputs [0]=image, [1]=mp3, [2]=text PNG (if any), [3]=EQ webm
+    # `-ss` ПЕРЕД `-i mp3` — accurate seek без overhead'а на full decode.
     cmd = [
         _ffmpeg(),
         "-y",
@@ -245,7 +318,10 @@ def build_short(image_path: Path, mp3_path: Path, out_path: Path,
         "-i", str(mp3_path),
         "-t", str(duration_sec),
     ]
-    # 3rd input = EQ webm if generated
+    # 3rd input = text overlay PNG (loop)
+    if text_png_path is not None and text_png_path.exists():
+        cmd += ["-loop", "1", "-i", str(text_png_path)]
+    # 4th input = EQ webm
     if eq_webm_path is not None and eq_webm_path.exists():
         cmd += ["-i", str(eq_webm_path)]
     cmd += [
@@ -276,17 +352,19 @@ def build_short(image_path: Path, mp3_path: Path, out_path: Path,
             f"shorts ffmpeg failed ({proc.returncode}): {proc.stderr[-1500:]}"
         )
 
-    # Cleanup intermediate EQ webm (~3-10MB) — не нужен после композитинга
-    if eq_webm_path is not None and eq_webm_path.exists():
-        try:
-            eq_webm_path.unlink()
-        except Exception:
-            pass
+    # Cleanup intermediate files (~1MB each) — не нужны после композитинга
+    for tmp in (text_png_path, eq_webm_path):
+        if tmp is not None and tmp.exists():
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
 
     logger.info(
-        "short built OK: %s (%ds @ offset=%ds, meta=%s, eq=%s)",
+        "short built OK: %s (%ds @ offset=%ds, meta=%s, text=%s, eq=%s)",
         out_path, duration_sec, actual_offset,
         meta.name if meta else "none",
+        text_png_path is not None,
         eq_webm_path is not None,
     )
     return out_path
