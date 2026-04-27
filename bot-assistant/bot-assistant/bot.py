@@ -993,13 +993,6 @@ def kb_beats_menu(user_id: int | None = None):
     rows.append([InlineKeyboardButton(cart_label, callback_data=cart_cb)])
     # По артистам
     rows.append([InlineKeyboardButton("🎤 По артистам", callback_data="beats_by_artist")])
-    # Quick-filter chips: scenes
-    rows.append([
-        InlineKeyboardButton("🔥 Hard", callback_data="qf_hard"),
-        InlineKeyboardButton("🌃 Memphis", callback_data="qf_memphis"),
-        InlineKeyboardButton("🏙 Detroit", callback_data="qf_detroit"),
-        InlineKeyboardButton("🇷🇺 RU", callback_data="qf_ru"),
-    ])
     # По BPM — submenu с диапазонами 120-130/130-140/140-150/150-160/160+
     rows.append([InlineKeyboardButton(
         "⚡ По BPM", callback_data="bpm_picker",
