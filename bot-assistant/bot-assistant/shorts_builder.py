@@ -115,47 +115,70 @@ def _render_text_overlay_png(meta_name: str, meta_bpm: int | None,
                              meta_key_short: str | None,
                              out_path: Path,
                              width: int = 1080, height: int = 1920,
-                             cta_text: str = "FREE PACK → t.me/iiiplfiii") -> Path:
-    """Рисует transparent PNG с beat name top + BPM/KEY + CTA bottom.
+                             cta_text: str = "FREE PACK → t.me/iiiplfiii",
+                             top_text: str | None = None,
+                             save: bool = True):
+    """Рисует transparent PNG с TYPE top + BPM/KEY + CTA bottom.
 
     Используется вместо ffmpeg drawtext filter, который отсутствует в
     imageio-ffmpeg static binary (compile-time disabled, known issue 2024).
 
-    Layout:
-    - Beat name (truncated): top-center, y=120, 84px bold, white + black shadow
-    - BPM/KEY: bottom-right, y=h-th-280, 44px regular (поднято чтобы не
-      перекрывала YT Shorts UI: like/comment/share buttons на мобилке)
-    - CTA «FREE PACK → t.me/iiiplfiii»: bottom-center, y=h-ch-100, 38px bold
+    Параметры:
+    - `top_text` — что показывать сверху. Если None → fallback на meta_name
+      (legacy). Для нового дизайна caller передаёт `artist_display.upper()`
+      (TYPE TAG: «KENNY MUNEY» / «HARD TRAP» / «FUTURE»).
+    - `width`/`height` — размеры canvas. Шрифты автомасштаб от height
+      (1920 reference, минимум 24px).
+    - `cta_text=""` → CTA не рисуется.
+    - `save=True` сохраняет в out_path; иначе возвращает Image (для
+      thumbnail composite в PIL).
+
+    Layout (proportional к height):
+    - Top text: top-center, y=120*scale, 84*scale px bold
+    - BPM/KEY: bottom-right, y=h-th-280*scale, 44*scale px regular
+    - CTA: bottom-center, y=h-ch-100*scale, 38*scale px bold
     """
     from PIL import Image, ImageDraw
+
+    # Auto-scale fonts от height (1920 reference). Floor — минимальный читаемый
+    # размер, чтобы на 720 не было слишком мелко.
+    scale = height / 1920
+    name_size = max(48, int(84 * scale))
+    bpm_size = max(28, int(44 * scale))
+    cta_size = max(24, int(38 * scale))
+    top_y = max(40, int(120 * scale))
+    bpm_offset_bottom = max(60, int(280 * scale))
+    cta_offset_bottom = max(40, int(100 * scale))
+    side_padding = max(30, int(60 * scale))
 
     img = Image.new("RGBA", (width, height), (0, 0, 0, 0))  # transparent
     draw = ImageDraw.Draw(img)
 
-    # Beat name top-center
-    name_text = _truncate_name(meta_name)
-    name_font = _load_pil_font(84, bold=True)
-    bbox = draw.textbbox((0, 0), name_text, font=name_font)
-    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    name_x = (width - tw) // 2 - bbox[0]
-    name_y = 120 - bbox[1]
-    # Shadow + main
-    draw.text((name_x + 3, name_y + 3), name_text, font=name_font,
-              fill=(0, 0, 0, 200))
-    draw.text((name_x, name_y), name_text, font=name_font,
-              fill=(255, 255, 255, 255))
+    # Top text (TYPE TAG primary, fallback на beat name для legacy)
+    display_top = top_text if top_text else _truncate_name(meta_name)
+    if display_top:
+        name_font = _load_pil_font(name_size, bold=True)
+        bbox = draw.textbbox((0, 0), display_top, font=name_font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        name_x = (width - tw) // 2 - bbox[0]
+        name_y = top_y - bbox[1]
+        # Shadow + main
+        draw.text((name_x + 3, name_y + 3), display_top, font=name_font,
+                  fill=(0, 0, 0, 200))
+        draw.text((name_x, name_y), display_top, font=name_font,
+                  fill=(255, 255, 255, 255))
 
-    # BPM/KEY bottom-right (поднято на 280px от низа — не перекрывает YT UI)
+    # BPM/KEY bottom-right (поднято от низа — не перекрывает YT UI)
     if meta_bpm:
         if meta_key_short:
             bpm_text = f"{meta_bpm} BPM | {meta_key_short}"
         else:
             bpm_text = f"{meta_bpm} BPM"
-        bpm_font = _load_pil_font(44, bold=False)
+        bpm_font = _load_pil_font(bpm_size, bold=False)
         bbox_b = draw.textbbox((0, 0), bpm_text, font=bpm_font)
         bw, bh = bbox_b[2] - bbox_b[0], bbox_b[3] - bbox_b[1]
-        bpm_x = width - bw - 60 - bbox_b[0]
-        bpm_y = height - bh - 280 - bbox_b[1]
+        bpm_x = width - bw - side_padding - bbox_b[0]
+        bpm_y = height - bh - bpm_offset_bottom - bbox_b[1]
         draw.text((bpm_x + 2, bpm_y + 2), bpm_text, font=bpm_font,
                   fill=(0, 0, 0, 200))
         draw.text((bpm_x, bpm_y), bpm_text, font=bpm_font,
@@ -163,18 +186,20 @@ def _render_text_overlay_png(meta_name: str, meta_bpm: int | None,
 
     # CTA bottom-center (funnel в Telegram bot)
     if cta_text:
-        cta_font = _load_pil_font(38, bold=True)
+        cta_font = _load_pil_font(cta_size, bold=True)
         bbox_c = draw.textbbox((0, 0), cta_text, font=cta_font)
         cw, ch = bbox_c[2] - bbox_c[0], bbox_c[3] - bbox_c[1]
         cta_x = (width - cw) // 2 - bbox_c[0]
-        cta_y = height - ch - 100 - bbox_c[1]
+        cta_y = height - ch - cta_offset_bottom - bbox_c[1]
         draw.text((cta_x + 2, cta_y + 2), cta_text, font=cta_font,
                   fill=(0, 0, 0, 220))
         draw.text((cta_x, cta_y), cta_text, font=cta_font,
                   fill=(255, 255, 255, 255))
 
-    img.save(out_path, "PNG")
-    return out_path
+    if save:
+        img.save(out_path, "PNG")
+        return out_path
+    return img  # PIL Image для in-memory composite
 
 
 def _build_filter_chain(meta_name: str | None,
@@ -278,11 +303,18 @@ def build_short(image_path: Path, mp3_path: Path, out_path: Path,
         try:
             text_png_path = out_path.with_name(f"text_{out_path.stem}.png")
             logger.info("shorts: rendering text overlay PNG (PIL)...")
+            # TYPE TAG primary (artist_display upper) — не beat name.
+            # Reason: discovery hook за 0.5с — артист видит «KENNY MUNEY»
+            # → instant recognition. Beat name «WAW» бессмысленный для outsider'а.
+            artist_top = (getattr(meta, "artist_display", "") or "").upper().strip()
+            if not artist_top:
+                artist_top = "HARD TRAP"  # generic fallback
             _render_text_overlay_png(
-                meta_name=meta.name,
+                meta_name=meta.name,  # legacy fallback внутри если top_text=None
                 meta_bpm=meta.bpm,
                 meta_key_short=getattr(meta, "key_short", None),
                 out_path=text_png_path,
+                top_text=artist_top,
             )
             png_size = text_png_path.stat().st_size if text_png_path.exists() else 0
             logger.info(

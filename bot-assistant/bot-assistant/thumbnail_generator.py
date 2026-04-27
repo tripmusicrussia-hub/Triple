@@ -207,7 +207,8 @@ def _score_frame(img_path: Path) -> float:
         return 0.0
 
 
-def generate_thumbnail_from_clip(loop_path: Path, out_path: Path) -> Path | None:
+def generate_thumbnail_from_clip(loop_path: Path, out_path: Path,
+                                 meta=None) -> Path | None:
     """Извлекает best-scoring кадр из clip-loop'а как thumbnail.
 
     Возвращает out_path или None если все кадры провалились.
@@ -256,9 +257,33 @@ def generate_thumbnail_from_clip(loop_path: Path, out_path: Path) -> Path | None
         if img.size != (THUMB_W, THUMB_H):
             img = img.resize((THUMB_W, THUMB_H), Image.LANCZOS)
 
+        # Brand text overlay (TYPE TAG + BPM/KEY + CTA) — same design как Shorts/long video
+        if meta is not None:
+            try:
+                import shorts_builder
+                artist_top = (getattr(meta, "artist_display", "") or "").upper().strip()
+                if not artist_top:
+                    artist_top = "HARD TRAP"
+                overlay_img = shorts_builder._render_text_overlay_png(
+                    meta_name=meta.name,
+                    meta_bpm=meta.bpm,
+                    meta_key_short=getattr(meta, "key_short", None),
+                    out_path=Path("/tmp/_unused.png"),  # save=False, не пишем
+                    width=THUMB_W, height=THUMB_H,
+                    top_text=artist_top,
+                    save=False,
+                )
+                # PIL alpha_composite — img RGB → conv RGBA → composite → conv RGB
+                base_rgba = img.convert("RGBA")
+                base_rgba.alpha_composite(overlay_img)
+                img = base_rgba.convert("RGB")
+                logger.info("thumbnail: text overlay applied (meta=%s)", meta.name)
+            except Exception as e:
+                logger.warning("thumbnail: text overlay failed (%s) — fallback raw", e)
+
         img.save(out_path, "JPEG", quality=92)
-        logger.info("thumbnail from clip %s → %s (score %.1f)",
-                    loop_path.name, out_path, best[0])
+        logger.info("thumbnail from clip %s → %s (score %.1f, text=%s)",
+                    loop_path.name, out_path, best[0], meta is not None)
         return out_path
     finally:
         # Чистим временные кадры

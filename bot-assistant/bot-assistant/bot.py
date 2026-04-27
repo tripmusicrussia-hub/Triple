@@ -2423,10 +2423,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     import shorts_builder
                     short_path = video_path.with_name(f"short_{video_path.name}")
+                    # Используем raw brand image (без overlay), чтобы избежать
+                    # double-text. thumb_path уже имеет text overlay для YT
+                    # thumbnail+video bg; build_short накладывает СВОЙ 9:16
+                    # text overlay через PIL.
+                    _shorts_bg = await loop.run_in_executor(None, _ensure_brand_image)
+                    if _shorts_bg is None:
+                        _shorts_bg = thumb_path  # fallback на thumb (с double-text — лучше чем без bg)
                     await loop.run_in_executor(
                         None,
                         lambda: shorts_builder.build_short(
-                            thumb_path, mp3_path, short_path, meta=meta,
+                            _shorts_bg, mp3_path, short_path, meta=meta,
                         ),
                     )
                     short_title = beat_post_builder.build_shorts_title(meta)
@@ -5205,9 +5212,12 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await status.edit_text(status.text + "\n🖼 Готовлю brand-кадр...")
         brand_path = await loop.run_in_executor(None, _ensure_brand_image)
         if brand_path:
-            import shutil
-            shutil.copy2(brand_path, thumb_path)
-            logger.info("upload: using brand image as thumbnail")
+            # Brand image + text overlay (TYPE TAG + BPM/KEY + CTA) → thumb_path
+            await loop.run_in_executor(
+                None,
+                lambda: _render_thumb_with_brand_overlay(brand_path, thumb_path, meta),
+            )
+            logger.info("upload: brand image + overlay → thumbnail")
         else:
             # Fallback — legacy text-overlay (для случая если GH Release недоступен)
             logger.warning("upload: brand image unavailable, using legacy text-thumbnail")
@@ -6991,11 +7001,13 @@ async def _do_repost(bot, reply_chat_id: int, beat: dict, meta) -> str | None:
         f = await bot.get_file(file_id)
         await f.download_to_drive(str(mp3_path))
 
-        # 2. Thumbnail (brand)
+        # 2. Thumbnail (brand + text overlay: TYPE TAG + BPM/KEY + CTA)
         brand_path = await loop.run_in_executor(None, _ensure_brand_image)
         if brand_path:
-            import shutil
-            shutil.copy2(brand_path, thumb_path)
+            await loop.run_in_executor(
+                None,
+                lambda: _render_thumb_with_brand_overlay(brand_path, thumb_path, meta),
+            )
         else:
             import thumbnail_generator
             thumbnail_generator.generate_thumbnail(meta.name, meta.artist_line, thumb_path)
@@ -8760,11 +8772,16 @@ async def _build_and_upload_shorts(bot, token: str) -> None:
     # 3) Build short via ffmpeg (executor — не блокируем event loop)
     short_path = _P(str(mp3_path)).with_name(f"short_{token}.mp4")
     loop = asyncio.get_running_loop()
+    # Используем raw brand image как bg (без double-text overlay).
+    # thumb_path из Supabase Storage может иметь overlay → используем raw.
+    _shorts_bg = await loop.run_in_executor(None, _ensure_brand_image)
+    if _shorts_bg is None:
+        _shorts_bg = thumb_path  # fallback
     try:
         await loop.run_in_executor(
             None,
             lambda: shorts_builder.build_short(
-                thumb_path, mp3_path, short_path, meta=meta_obj,
+                _shorts_bg, mp3_path, short_path, meta=meta_obj,
             ),
         )
     except Exception:
@@ -8920,6 +8937,54 @@ def _add_to_yt_playlists(video_id: str, meta):
             f"Hard {scene} Type Beats",
             playlist_desc=f"Hard {scene} type beats for upcoming rappers. @iiiplfiii",
         )
+
+
+def _render_thumb_with_brand_overlay(brand_path, thumb_path, meta):
+    """Берёт brand_path (1280×720 jpg), накладывает text overlay (TYPE TAG +
+    BPM/KEY + CTA) через PIL composite, сохраняет в thumb_path как jpg.
+
+    Используется вместо `shutil.copy2(brand_path, thumb_path)` в upload
+    flows — чтобы YT thumbnail И video background имели одинаковый
+    brand-дизайн что у Shorts.
+
+    Если PIL fail (font / disk) → fallback на простой copy без overlay.
+    """
+    if meta is None:
+        # Legacy: just copy
+        import shutil as _sh
+        _sh.copy2(brand_path, thumb_path)
+        return thumb_path
+    try:
+        from PIL import Image
+        import shorts_builder
+        img = Image.open(brand_path).convert("RGB")
+        if img.size != (1280, 720):
+            img = img.resize((1280, 720), Image.LANCZOS)
+
+        artist_top = (getattr(meta, "artist_display", "") or "").upper().strip()
+        if not artist_top:
+            artist_top = "HARD TRAP"
+
+        overlay = shorts_builder._render_text_overlay_png(
+            meta_name=meta.name,
+            meta_bpm=meta.bpm,
+            meta_key_short=getattr(meta, "key_short", None),
+            out_path=Path("/tmp/_unused_overlay.png"),
+            width=1280, height=720,
+            top_text=artist_top,
+            save=False,  # вернёт PIL Image без записи на диск
+        )
+        img_rgba = img.convert("RGBA")
+        img_rgba.alpha_composite(overlay)
+        img = img_rgba.convert("RGB")
+        img.save(thumb_path, "JPEG", quality=92)
+        logger.info("thumb: brand+overlay applied (meta=%s) → %s", meta.name, thumb_path)
+        return thumb_path
+    except Exception as e:
+        logger.warning("thumb: overlay failed (%s) — fallback на простой copy", e)
+        import shutil as _sh
+        _sh.copy2(brand_path, thumb_path)
+        return thumb_path
 
 
 def _ensure_brand_image():
