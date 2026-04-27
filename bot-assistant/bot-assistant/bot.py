@@ -57,6 +57,17 @@ beat_plays_users = {}
 # In-memory only — после redeploy state потеряется (юзеры начнут заново).
 last_bit_audio_msg: dict[int, int] = {}
 
+# Sprint 4 — session bundle suggestion
+# Tracks user's viewed beats в last 30 min для auto-bundle popup.
+# Когда юзер видит 3 unique beats → шлём «🎁 Получи эти 3 за 4500₽».
+# {user_id: [(beat_id, ts), ...]} — sorted by ts ascending, max 5 entries.
+_session_views: dict[int, list] = {}
+_SESSION_VIEW_TTL_SEC = 30 * 60  # 30 min — после reset
+_SESSION_VIEW_MAX_ENTRIES = 5
+# Anti-spam cooldown: после показа bundle suggestion не show повторно 30 min.
+_session_bundle_suggested_at: dict[int, float] = {}
+_SESSION_SUGGEST_COOLDOWN_SEC = 30 * 60
+
 # Re-marketing: отслеживаем какие биты юзер посмотрел но не купил.
 # Через 24-48 часов шлём ОДИН reminder с CTA. Структура:
 # {(user_id, beat_id): { "ts": float, "name": str, "reminded": bool }}
@@ -71,6 +82,68 @@ REMINDERS_OPTOUT_PATH = os.path.join(BASE_DIR, "reminders_optout.json")
 def _reminder_key(user_id: int, beat_id: int) -> str:
     """JSON-keys должны быть строками — encode tuple."""
     return f"{user_id}:{beat_id}"
+
+
+# ── Session bundle suggestion (Sprint 4) ─────────────────────────────
+
+def _track_session_view(user_id: int, beat_id: int) -> None:
+    """Append beat_id в session_views для user_id с current ts.
+
+    Cleanup expired entries (>30 min) + dedupe (если этот beat_id уже
+    в session — обновляем ts, не дублируем). Max 5 entries — старшие drop'аются.
+    """
+    now = time.time()
+    cutoff = now - _SESSION_VIEW_TTL_SEC
+    entries = _session_views.get(user_id, [])
+    # Filter expired + remove duplicates of current beat_id
+    entries = [(bid, ts) for bid, ts in entries if ts >= cutoff and bid != beat_id]
+    entries.append((beat_id, now))
+    # Cap к last N (newest)
+    if len(entries) > _SESSION_VIEW_MAX_ENTRIES:
+        entries = entries[-_SESSION_VIEW_MAX_ENTRIES:]
+    _session_views[user_id] = entries
+
+
+def _get_session_unique_views(user_id: int) -> list[int]:
+    """Возвращает unique beat_ids viewed в last 30 min, в порядке от старшего
+    к свежему. Cleanup expired entries попутно.
+    """
+    now = time.time()
+    cutoff = now - _SESSION_VIEW_TTL_SEC
+    entries = _session_views.get(user_id, [])
+    fresh = [(bid, ts) for bid, ts in entries if ts >= cutoff]
+    if len(fresh) != len(entries):
+        if fresh:
+            _session_views[user_id] = fresh
+        else:
+            _session_views.pop(user_id, None)
+    seen = set()
+    unique = []
+    for bid, _ts in fresh:
+        if bid not in seen:
+            seen.add(bid)
+            unique.append(bid)
+    return unique
+
+
+def _should_suggest_session_bundle(user_id: int) -> bool:
+    """True если юзер посмотрел >= BUNDLE_TOTAL уникальных битов в last 30 min
+    И мы НЕ показывали suggestion в последние 30 min (cooldown).
+    """
+    if user_id == ADMIN_ID:
+        return False  # admin не получает promotional pop-ups
+    unique_views = _get_session_unique_views(user_id)
+    if len(unique_views) < BUNDLE_TOTAL:
+        return False
+    last_suggested = _session_bundle_suggested_at.get(user_id, 0)
+    if time.time() - last_suggested < _SESSION_SUGGEST_COOLDOWN_SEC:
+        return False
+    return True
+
+
+def _mark_session_bundle_suggested(user_id: int) -> None:
+    """Stamp когда показали suggestion — для cooldown."""
+    _session_bundle_suggested_at[user_id] = time.time()
 
 
 def _load_reminders_state() -> None:
@@ -1547,6 +1620,59 @@ async def send_beat(bot, chat_id, beat, user_id):
 
     if sent is not None:
         last_bit_audio_msg[user_id] = sent.message_id
+
+    # Sprint 4: session bundle tracking + auto-suggestion при 3+ unique views.
+    # Track только beats (не tracks/remixes) — bundle применяется только к beat.
+    if beat.get("content_type", "beat") == "beat":
+        _track_session_view(user_id, beat["id"])
+        if _should_suggest_session_bundle(user_id):
+            try:
+                ids_unique = _get_session_unique_views(user_id)[:BUNDLE_TOTAL]
+                # asyncio.create_task — не блокируем send_beat'а return
+                asyncio.create_task(
+                    _send_session_bundle_suggestion(bot, chat_id, user_id, ids_unique),
+                )
+                _mark_session_bundle_suggested(user_id)
+            except Exception:
+                logger.exception("session bundle suggest failed")
+
+
+async def _send_session_bundle_suggestion(bot, chat_id: int, user_id: int,
+                                          beat_ids: list[int]) -> None:
+    """Шлёт popup «🎁 Получи эти 3 за {price}₽» с pre-filled bundle.
+
+    Click → callback `sess_bundle_<id1>_<id2>_<id3>` → bundle_selection setup
+    + show kb_bundle_pay (тот же payment menu что у cart_buy).
+    """
+    try:
+        # Hydrate beat names для preview
+        beats = [beats_db.get_beat_by_id(bid) for bid in beat_ids]
+        beats = [b for b in beats if b]
+        if len(beats) < BUNDLE_TOTAL:
+            return
+        names_block = "\n".join(f"• {b['name']}" for b in beats[:BUNDLE_TOTAL])
+        full_single = BUNDLE_TOTAL * licensing.PRICE_MP3_RUB
+        saving = full_single - licensing.PRICE_BUNDLE3_RUB
+        ids_csv = "_".join(str(b["id"]) for b in beats[:BUNDLE_TOTAL])
+        text = (
+            "🎁 <b>Заметил, тебе зашло несколько битов</b>\n\n"
+            f"Возьми эти 3 как набор за <b>{licensing.PRICE_BUNDLE3_RUB}₽</b>\n"
+            f"<i>(вместо {full_single}₽ поодиночке — экономия {saving}₽)</i>\n\n"
+            f"<b>3 бита:</b>\n{names_block}"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                f"✅ Купить набор · {licensing.PRICE_BUNDLE3_RUB}₽ (-{saving}₽)",
+                callback_data=f"sess_bundle_{ids_csv}",
+            )],
+            [InlineKeyboardButton("❌ Не сейчас", callback_data="upsell_decline")],
+        ])
+        # Пауза 3 сек — даём audio полностью загрузиться у юзера прежде popup
+        await asyncio.sleep(3)
+        await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb)
+        logger.info("session bundle suggestion: user=%d beats=%s", user_id, beat_ids)
+    except Exception:
+        logger.exception("send_session_bundle_suggestion failed user=%d", user_id)
 
 
 # ── /start ────────────────────────────────────────────────────
@@ -3092,6 +3218,47 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         beat = beats_db.get_beat_by_id(int(data.split("_")[1]))
         if beat:
             await send_beat(bot, query.message.chat_id, beat, user_id)
+        return
+
+    if data.startswith("sess_bundle_"):
+        # Sprint 4: pre-filled bundle с last 3 viewed beats (session suggestion)
+        ids_part = data[len("sess_bundle_"):]
+        try:
+            chosen_ids = [int(x) for x in ids_part.split("_") if x.strip()]
+        except ValueError:
+            await query.answer("Некорректный bundle", show_alert=True)
+            return
+        if len(chosen_ids) != BUNDLE_TOTAL:
+            await query.answer(f"Нужно {BUNDLE_TOTAL} бита", show_alert=True)
+            return
+        chosen_beats = [beats_db.get_beat_by_id(bid) for bid in chosen_ids]
+        chosen_beats = [b for b in chosen_beats if b]
+        if len(chosen_beats) != BUNDLE_TOTAL:
+            await query.answer("Один из битов пропал — попробуй заново", show_alert=True)
+            return
+        # Setup bundle_selection — re-uses existing bundle_pay_* флоу
+        bundle_selection[user_id] = {
+            "anchor": int(chosen_beats[0]["id"]),
+            "selected": [int(b["id"]) for b in chosen_beats[1:]],
+            "page": 0,
+        }
+        names_block = "\n".join(f"• {b['name']}" for b in chosen_beats)
+        full_single = BUNDLE_TOTAL * licensing.PRICE_MP3_RUB
+        saving = full_single - licensing.PRICE_BUNDLE3_RUB
+        try:
+            await query.message.edit_text(
+                (
+                    f"🎁 <b>Набор «3 бита за {licensing.PRICE_BUNDLE3_RUB}₽»</b>\n"
+                    f"<i>Скидка {saving}₽ vs {full_single}₽ поодиночке</i>\n\n"
+                    f"<b>3 бита:</b>\n{names_block}\n\n"
+                    "Выбери способ оплаты:"
+                ),
+                parse_mode="HTML",
+                reply_markup=kb_bundle_pay(),
+            )
+        except TelegramError:
+            pass
+        await query.answer()
         return
 
     if data == "upsell_decline":
