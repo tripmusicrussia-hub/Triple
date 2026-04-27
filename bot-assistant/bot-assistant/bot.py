@@ -1507,42 +1507,49 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ) if hasattr(users_db, "is_user_registered") else (
                 referral_friend_id in all_users
             )
+            # i18n: персонализируем notify по языку каждого юзера отдельно.
+            # Friend может быть RU, новый юзер EN — каждый получит на своём.
+            import i18n
+            new_user_lang = i18n.get_user_lang(user_id, language_code=user.language_code)
             if friend_registered:
                 friend_tok = _make_referral_discount_token(
                     referral_friend_id, user_id, pct,
                 )
-                # Notify friend about new referral + his token
+                # Notify friend on его языке (lang_code друга нам не известен,
+                # берём из cache/Supabase — set из его прошлых /start)
                 try:
                     new_user_uname = (
                         "@" + user.username if user.username else user.full_name
                     )
+                    friend_lang = i18n.get_user_lang(referral_friend_id)
                     await bot.send_message(
                         referral_friend_id,
-                        f"🎁 <b>{html.escape(str(new_user_uname))} пришёл по твоей ссылке!</b>\n\n"
-                        f"Тебе бонус: <b>скидка -{pct}%</b> на любой бит из каталога "
-                        "(действует 30 дней).\n\n"
-                        "Открой любой бит — кнопка «🎁 Купить со скидкой» появится автоматом.",
+                        i18n.t(
+                            "ref_friend_notify", friend_lang,
+                            name=html.escape(str(new_user_uname)),
+                            pct=pct,
+                        ),
                         parse_mode="HTML",
                     )
                 except Exception:
-                    # Friend мог заблокировать бота / удалить аккаунт — не критично
                     logger.info("referral: friend %d notify failed", referral_friend_id)
-            # Notify new user — с прямой CTA-кнопкой чтобы юзер сразу попал на бит,
-            # иначе discount сгорит за 30 дней не использован.
+            # Notify new user с CTA-кнопкой
             try:
                 cta_kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton(
-                        f"🎧 Открыть случайный бит и применить -{pct}%",
+                        i18n.t("ref_open_random_btn", new_user_lang, pct=pct),
                         callback_data="random_beat",
                     )],
-                    [InlineKeyboardButton("🎹 Каталог битов", callback_data="menu_beat")],
+                    [InlineKeyboardButton(
+                        i18n.t("ref_catalog_btn", new_user_lang),
+                        callback_data="menu_beat",
+                    )],
                 ])
+                title = i18n.t("ref_welcome_title", new_user_lang, pct=pct)
+                body = i18n.t("ref_welcome_body", new_user_lang, pct=pct)
                 await bot.send_message(
                     user_id,
-                    f"🎁 <b>Скидка -{pct}% от друга!</b>\n\n"
-                    f"Тебе и тому кто тебя пригласил — по <b>-{pct}%</b> на любой бит "
-                    "(действует 30 дней).\n\n"
-                    "Открой бит → кнопка «🎁 Купить со скидкой» появится автоматом.",
+                    f"<b>{title}</b>\n\n{body}",
                     parse_mode="HTML",
                     reply_markup=cta_kb,
                 )
@@ -1606,10 +1613,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 name_safe = html.escape(str(beat.get("name") or "?"))
                 bpm_safe = html.escape(str(beat.get("bpm") or "?"))
                 key_safe = html.escape(str(beat.get("key") or "?"))
+                # i18n: critical conversion entry-point. Юзер пришёл из YT
+                # description deep-link `?start=ref_yt_buy_<id>` — увидит
+                # carding на родном языке (RU для CIS, EN для всех остальных).
+                import i18n
+                _lang = i18n.get_user_lang(user_id, language_code=user.language_code)
                 caption = (
                     f"🎧 <b>{name_safe}</b>\n"
                     f"⚡ BPM {bpm_safe}  🎹 {key_safe}\n\n"
-                    "Выбери вариант покупки — или напиши @iiiplfiii для WAV/Unlimited/Exclusive:"
+                    f"{i18n.t('buy_carding_intro', _lang)}"
                 )
                 await bot.send_message(
                     user_id, caption,
@@ -7047,6 +7059,29 @@ async def cmd_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_cart_view(context.bot, user_id, edit_message=None)
 
 
+async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """`/lang ru` или `/lang en` — переключить язык интерфейса.
+    Без аргументов — показать текущий + usage.
+    """
+    user_id = update.effective_user.id
+    args = context.args or []
+    import i18n
+    if not args:
+        cur = i18n.get_user_lang(user_id, language_code=update.effective_user.language_code)
+        await update.message.reply_text(
+            f"Current: {cur.upper()}\n\n"
+            f"{i18n.t('lang_invalid', cur)}"
+        )
+        return
+    new_lang = args[0].strip().lower()
+    if new_lang not in ("ru", "en"):
+        cur = i18n.get_user_lang(user_id, language_code=update.effective_user.language_code)
+        await update.message.reply_text(i18n.t("lang_invalid", cur))
+        return
+    i18n.set_user_lang(user_id, new_lang)
+    await update.message.reply_text(i18n.t("lang_switched", new_lang))
+
+
 async def cmd_reset_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """`/reset_history` — сбросить историю просмотренных битов.
     После этого все биты в каталоге снова доступны через 🎲 / Hard / Memphis / etc.
@@ -8025,6 +8060,7 @@ async def post_init(application):
         user_commands = [
             BotCommand("start", "Главное меню"),
             BotCommand("cart", "🎁 Набор «3 за 4500₽»"),
+            BotCommand("lang", "🌐 Switch language (ru/en)"),
             BotCommand("reset_history", "🔄 Сбросить историю прослушанных"),
             BotCommand("stop_reminders", "Отписаться от напоминаний"),
             BotCommand("start_reminders", "Включить напоминания обратно"),
@@ -8877,6 +8913,7 @@ async def run_bot():
     app.add_handler(CommandHandler("yt_titles", cmd_yt_titles))
     app.add_handler(CommandHandler("cart", cmd_cart))
     app.add_handler(CommandHandler("reset_history", cmd_reset_history))
+    app.add_handler(CommandHandler("lang", cmd_lang))
     app.add_handler(CommandHandler("export_beats", cmd_export_beats))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(PreCheckoutQueryHandler(handle_precheckout))
