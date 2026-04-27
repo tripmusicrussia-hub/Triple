@@ -134,19 +134,24 @@ def _load_discounts() -> None:
             logger.exception("discounts: load failed")
 
 
-def _make_discount_token(user_id: int, beat_id: int) -> str:
-    """Создаёт persistent token со скидкой licensing.DISCOUNT_PCT% для single MP3 lease.
+def _make_discount_token(user_id: int, beat_id: int, pct: int | None = None) -> str:
+    """Создаёт persistent token со скидкой `pct`% для single MP3 lease.
+
+    Если `pct=None` → fallback на `licensing.DISCOUNT_PCT` (20% по умолчанию).
+    Sprint 1 post-purchase upsell использует pct=30 для боле сильного offer'а.
 
     Если token уже существует для (user, beat) и не истёк/использован — возвращает его
     же (idempotent). Иначе создаёт новый.
     """
     import secrets
     now = time.time()
-    # Idempotency: ищем активный token для этого user+beat
+    actual_pct = pct if pct is not None else licensing.DISCOUNT_PCT
+    # Idempotency: ищем активный token для этого user+beat с тем же pct
     for tok, rec in active_discounts.items():
         if (
             rec.get("user_id") == user_id
             and rec.get("beat_id") == beat_id
+            and rec.get("pct") == actual_pct
             and not rec.get("used")
             and rec.get("expires_at", 0) > now
         ):
@@ -155,7 +160,7 @@ def _make_discount_token(user_id: int, beat_id: int) -> str:
     active_discounts[token] = {
         "user_id": user_id,
         "beat_id": beat_id,
-        "pct": licensing.DISCOUNT_PCT,
+        "pct": actual_pct,
         "expires_at": now + DISCOUNT_TTL_SEC,
         "used": False,
     }
@@ -1087,7 +1092,10 @@ def kb_after_beat(beat_id, content_type="beat", user_id: int | None = None):
     статус (✅ В корзине / 🛒 + В корзину) и счётчик корзины.
     """
     back_map = {"beat": "menu_beat", "track": "menu_track", "remix": "menu_remix"}
-    rows = [[InlineKeyboardButton("▶️ Следующий похожий", callback_data="next_" + str(beat_id))]]
+    rows = [[
+        InlineKeyboardButton("▶️ Следующий", callback_data="next_" + str(beat_id)),
+        InlineKeyboardButton("🔥 Список похожих", callback_data="simlist_" + str(beat_id)),
+    ]]
     if content_type == "beat":
         rows.append([
             InlineKeyboardButton(f"⭐ {licensing.PRICE_MP3_STARS}", callback_data="buy_mp3_" + str(beat_id)),
@@ -3078,6 +3086,63 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         beat = beats_db.get_beat_by_id(int(data.split("_")[1]))
         if beat:
             await send_beat(bot, query.message.chat_id, beat, user_id)
+        return
+
+    if data == "upsell_decline":
+        # Post-purchase upsell декларирован — просто убираем карточку.
+        try:
+            await query.message.delete()
+        except Exception:
+            try:
+                await query.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+        await query.answer("Окей, понял 👍")
+        return
+
+    if data.startswith("simlist_"):
+        # «🔥 Список похожих» — показать 3 битa-кандидата отсортированных по
+        # similarity score (artist tag > BPM ±5 > key match). Reuses
+        # beats_db.get_similar_beats. Каждый бит = inline button → play_<id>.
+        try:
+            beat_id = int(data[len("simlist_"):])
+        except ValueError:
+            return
+        current = beats_db.get_beat_by_id(beat_id)
+        if not current:
+            await query.answer("Бит не найден", show_alert=True)
+            return
+        history = set(get_history(user_id))
+        similar = beats_db.get_similar_beats(current, exclude_ids=history)[:3]
+        if not similar:
+            # Fallback: random 3 из той же категории
+            ct = current.get("content_type", "beat")
+            pool = [b for b in beats_db.BEATS_CACHE
+                    if b.get("content_type", "beat") == ct
+                    and b["id"] != beat_id]
+            random.shuffle(pool)
+            similar = pool[:3]
+        if not similar:
+            await query.answer("Похожих не нашёл 🤔", show_alert=True)
+            return
+        rows = []
+        for b in similar:
+            bpm_part = f" · {b.get('bpm')} BPM" if b.get("bpm") else ""
+            key_part = f" {b.get('key_short')}" if b.get("key_short") else ""
+            label = f"🔥 {b['name'][:30]}{bpm_part}{key_part}"
+            rows.append([InlineKeyboardButton(label, callback_data="play_" + str(b["id"]))])
+        rows.append([InlineKeyboardButton("◀️ Назад к биту",
+                                          callback_data="play_" + str(beat_id))])
+        cur_artist = (current.get("artist_display") or "").strip() or "Hard Trap"
+        text = (
+            f"🔥 <b>Похожие на «{current.get('name', '?')}»</b>\n"
+            f"Стиль: <i>{cur_artist}</i> · {current.get('bpm', '?')} BPM"
+        )
+        await bot.send_message(
+            query.message.chat_id, text,
+            reply_markup=InlineKeyboardMarkup(rows), parse_mode="HTML",
+        )
+        await query.answer()
         return
 
     if data.startswith("buy_usdt_"):
@@ -5520,6 +5585,88 @@ async def _deliver_mp3_lease(bot, user, beat: dict, *, payment_charge_id: str,
         )
     except Exception:
         pass
+
+    # ── Post-purchase upsell (Sprint 1) ──────────────────────────────
+    # После успешной MP3 lease — fire-and-forget upsell с похожим битом
+    # и -30% discount на 24h. Industry standard: 20-30% AOV увеличение.
+    # asyncio.create_task — не блокируем delivery; если упадёт — log.
+    try:
+        asyncio.create_task(_send_post_purchase_upsell(bot, user.id, beat))
+    except Exception:
+        logger.exception("post-purchase upsell schedule failed")
+
+
+async def _send_post_purchase_upsell(bot, user_id: int, just_bought: dict) -> None:
+    """Шлёт upsell card с похожим битом и -30% discount token (24h TTL).
+
+    Trigger: после успешной mp3_lease delivery. AOV booster — индустрия
+    type-beat producers использует «buy 1 get next -30%» как стандартный
+    post-purchase flow.
+
+    Idempotency: discount tokens persistent — повторный вызов того же
+    upsell вернёт тот же token (см. _make_discount_token).
+    """
+    try:
+        similar = beats_db.get_similar_beats(just_bought)
+        # Filter: только биты с file_id (можем продать) + не куплено уже
+        history = set(get_history(user_id))
+        candidates = [
+            b for b in similar
+            if b.get("file_id")
+            and b.get("content_type", "beat") == "beat"
+            and b["id"] not in history  # необязательно — но если view'нул и не купил, более релевантно
+        ]
+        if not candidates:
+            # Fallback на любые similar с file_id
+            candidates = [b for b in similar if b.get("file_id")]
+        if not candidates:
+            return
+        upsell = candidates[0]
+        upsell_id = upsell["id"]
+        token = _make_discount_token(user_id, upsell_id, pct=30)
+
+        artist = (upsell.get("artist_display") or "Hard Trap").strip()
+        bpm = upsell.get("bpm", "?")
+        key_short = upsell.get("key_short", "") or ""
+        name = upsell.get("name", "?")
+
+        disc_stars = licensing.mp3_price_with_discount(30, "XTR")
+        disc_usdt = licensing.mp3_price_with_discount(30, "USDT")
+        disc_rub = licensing.mp3_price_with_discount(30, "RUB")
+
+        text = (
+            f"🎁 <b>Бонус от автора</b>\n\n"
+            f"Раз бит <b>{just_bought.get('name', '?')}</b> зашёл — вот похожий "
+            f"со скидкой <b>-30%</b> на 24 часа:\n\n"
+            f"🔥 <b>{name}</b>\n"
+            f"<i>{artist}</i> · {bpm} BPM"
+        )
+        if key_short:
+            text += f" · {key_short}"
+        text += (
+            f"\n\n"
+            f"⭐ {disc_stars} (было {licensing.PRICE_MP3_STARS})\n"
+            f"💵 {disc_usdt:g} USDT (было {licensing.PRICE_MP3_USDT:g})\n"
+            f"💳 {disc_rub}₽ (было {licensing.PRICE_MP3_RUB})\n\n"
+            f"⏱ Скидка пропадёт через 24 часа."
+        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("▶️ Послушать сначала",
+                                  callback_data="play_" + str(upsell_id))],
+            [InlineKeyboardButton(f"⭐ {disc_stars}",
+                                  callback_data=f"disc_pay_stars_{token}"),
+             InlineKeyboardButton(f"💵 {disc_usdt:g}",
+                                  callback_data=f"disc_pay_usdt_{token}")],
+            [InlineKeyboardButton(f"💳 {disc_rub}₽ (MIR/СБП)",
+                                  callback_data=f"disc_pay_rub_{token}")],
+            [InlineKeyboardButton("❌ Не сейчас", callback_data="upsell_decline")],
+        ])
+        await asyncio.sleep(2)  # пауза чтобы лицензия успела дойти до юзера
+        await bot.send_message(user_id, text, reply_markup=keyboard, parse_mode="HTML")
+        logger.info("post-purchase upsell sent to user=%s for beat=%s (-30%%)",
+                    user_id, upsell_id)
+    except Exception:
+        logger.exception("post-purchase upsell failed for user=%s", user_id)
 
 
 async def _deliver_bundle(bot, user, beats: list[dict], *, payment_charge_id: str,
