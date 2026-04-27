@@ -792,7 +792,7 @@ def kb_main_menu(user_id: int | None = None):
         [InlineKeyboardButton(f"🎹 Биты ({beats})", callback_data="menu_beat")],
         [InlineKeyboardButton(f"🎤 Треки ({tracks})", callback_data="menu_track"),
          InlineKeyboardButton(f"🔀 Ремиксы ({remixes})", callback_data="menu_remix")],
-        [InlineKeyboardButton("📦 Kits & Packs", callback_data="menu_products")],
+        [InlineKeyboardButton("📦 Loops&Kits", callback_data="menu_products")],
         [InlineKeyboardButton("ℹ️ Услуги и цены", callback_data="menu_services")],
         [InlineKeyboardButton(
             f"🎁 Пригласить друга → -{licensing.REFERRAL_PCT}% обоим",
@@ -1372,7 +1372,7 @@ def kb_admin():
         ready_count = 0
 
     queue_label = f"📅 Очередь публикаций ({queue_n})" if queue_n else "📅 Очередь публикаций (пусто)"
-    products_label = f"📦 Kits & Packs ({products_n})" if products_n else "📦 Kits & Packs — залить первый"
+    products_label = f"📦 Loops&Kits ({products_n})" if products_n else "📦 Loops&Kits — залить первый"
     qm_label = f"🎹 Заполнить ключи ({qm_pending})" if qm_pending else "🎹 Все ключи заполнены ✅"
     ar_label = (
         f"🔁 Auto-repost: ✅ ON · {ready_count} ready"
@@ -2052,7 +2052,7 @@ async def cmd_cancel_product(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def _start_product_upload(bot, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     """Общий старт FSM: reply через cmd_upload_product ИЛИ через кнопку
-    «📦 Kits & Packs» в /admin → «➕ Залить новый»."""
+    «📦 Loops&Kits» в /admin → «➕ Залить новый»."""
     context.user_data["product_upload"] = {"step": "await_type"}
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🥁 Drum Kit (1500⭐)", callback_data="prod_type_drumkit")],
@@ -2664,7 +2664,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         await bot.send_message(
             user_id,
-            "🔕 Опубликуешь позже — кнопка будет в /admin → «📦 Kits & Packs» → карточка продукта.",
+            "🔕 Опубликуешь позже — кнопка будет в /admin → «📦 Loops&Kits» → карточка продукта.",
         )
         return
 
@@ -2816,7 +2816,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows.append([InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")])
         await _nav_reply(
             query,
-            f"📦 Паки и киты ({total}) — выбирай категорию:",
+            f"📦 Loops&Kits ({total}) — выбирай категорию:",
             reply_markup=InlineKeyboardMarkup(rows),
         )
         return
@@ -3261,7 +3261,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             "📦 <b>Drum Kits / Sample Packs / Loop Packs — 1000⭐-1500⭐</b>\n"
             "Готовые наборы ударных, сэмплов, лупов для продюсеров. После оплаты — "
-            "zip-файл мгновенно в ЛС. Смотри каталог «📦 Kits &amp; Packs» в меню.\n\n"
+            "zip-файл мгновенно в ЛС. Смотри каталог «📦 Loops&amp;Kits» в меню.\n\n"
 
             f"🎛 <b>Сведение треков · mix + master под ключ — "
             f"{licensing.PRICE_MIX_STARS}⭐ / {licensing.PRICE_MIX_USDT:g} USDT / {licensing.PRICE_MIX_RUB}₽</b>\n"
@@ -3283,7 +3283,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(f"🎛 Заказать сведение ({licensing.PRICE_MIX_RUB}₽)", callback_data="menu_mixing")],
                 [InlineKeyboardButton("🎹 К битам", callback_data="menu_beat"),
-                 InlineKeyboardButton("📦 Kits & Packs", callback_data="menu_products")],
+                 InlineKeyboardButton("📦 Loops&Kits", callback_data="menu_products")],
                 [InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")],
             ]),
         )
