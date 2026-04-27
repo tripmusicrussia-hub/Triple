@@ -6942,8 +6942,8 @@ async def _do_repost(bot, reply_chat_id: int, beat: dict, meta) -> str | None:
         # только в пределах 48ч после публикации. Legacy-биты публиковались
         # давно → Bot API всегда возвращает 400 'Message can't be deleted'.
         # Fallback: Telethon (user-account API), который не имеет 48h лимита.
+        deleted = False
         if old_msg_id:
-            deleted = False
             try:
                 await bot.delete_message(CHANNEL_ID, old_msg_id)
                 deleted = True
@@ -7018,11 +7018,17 @@ async def _do_repost(bot, reply_chat_id: int, beat: dict, meta) -> str | None:
             logger.exception("repost: failed to create scheduled_uploads row (Shorts unavailable)")
             repost_token = ""
 
+        if not old_msg_id:
+            del_line = "(старого msg_id не было)"
+        elif deleted:
+            del_line = "🗑 Старый пост удалён"
+        else:
+            del_line = f"⚠️ Старый пост НЕ удалён (msg_id={old_msg_id}) — удали вручную"
         msg_text = (
             f"✅ Repost готов: {meta.name}\n"
             f"🎬 https://youtu.be/{vid}\n"
             f"📢 https://t.me/{CHANNEL_ID.lstrip('@')}/{new_msg_id}\n"
-            f"{'🗑 Старый пост удалён' if old_msg_id else '(старого msg_id не было)'}"
+            f"{del_line}"
         )
         keyboard = None
         if repost_token:
