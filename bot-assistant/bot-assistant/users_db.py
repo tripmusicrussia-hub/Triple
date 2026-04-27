@@ -205,6 +205,68 @@ def set_subscribed(tg_id: int, flag: bool) -> None:
         logger.warning("users_db.set_subscribed(%d) failed: %s", tg_id, e)
 
 
+# ─── Welcome sequence (Sprint 2) ──────────────────────────────────────────
+
+def get_welcome_step(tg_id: int) -> int:
+    """Возвращает welcome_seq_step для юзера. 0 = только вступил, 1 = sample
+    pack отправлен, 2 = recs sent, 3 = digest sent, 4 = discount sent (final).
+
+    None при Supabase down → fallback 0 (новый юзер). Если column absent
+    (ALTER не выполнен) — тоже 0.
+    """
+    client = _get_supabase()
+    if client is None:
+        return 0
+    try:
+        res = client.table(_TABLE).select("welcome_seq_step").eq("tg_id", tg_id).execute()
+        if res.data:
+            return int(res.data[0].get("welcome_seq_step") or 0)
+        return 0
+    except Exception as e:
+        logger.warning("users_db.get_welcome_step(%d) failed: %s", tg_id, e)
+        return 0
+
+
+def set_welcome_step(tg_id: int, step: int) -> None:
+    """Идемпотентный update welcome_seq_step. Вызывается scheduler'ом после
+    каждой touch-точки в welcome sequence.
+    """
+    client = _get_supabase()
+    if client is None:
+        return
+    try:
+        client.table(_TABLE).update({
+            "welcome_seq_step": step,
+            "updated_at": datetime.now(_MSK).isoformat(),
+        }).eq("tg_id", tg_id).execute()
+    except Exception as e:
+        logger.warning("users_db.set_welcome_step(%d, %d) failed: %s", tg_id, step, e)
+
+
+def list_users_for_welcome_step(step: int, max_age_hours: float | None = None) -> list[dict]:
+    """Возвращает users с заданным welcome_seq_step. Опционально filter
+    по `joined_at` >= now - max_age_hours (для anti-spam edge cases).
+
+    Returns list of {tg_id, joined_at, source} dicts.
+    """
+    client = _get_supabase()
+    if client is None:
+        return []
+    try:
+        q = client.table(_TABLE).select("tg_id,joined_at,source").eq("welcome_seq_step", step)
+        res = q.execute()
+        rows = res.data or []
+        if max_age_hours is not None:
+            from datetime import timedelta
+            cutoff = datetime.now(_MSK) - timedelta(hours=max_age_hours)
+            cutoff_iso = cutoff.isoformat()
+            rows = [r for r in rows if (r.get("joined_at") or "") >= cutoff_iso]
+        return rows
+    except Exception as e:
+        logger.warning("users_db.list_users_for_welcome_step(%d) failed: %s", step, e)
+        return []
+
+
 # ─── Reads / bulk ────────────────────────────────────────────────────────────
 
 def load_to_memory() -> tuple[dict[int, dict], set[int], set[int], dict[int, list[int]]]:

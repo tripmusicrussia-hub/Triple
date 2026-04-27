@@ -1803,6 +1803,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if sent:
             users_received_pack.add(user_id)
             await asyncio.to_thread(users_db.mark_sample_pack_received, user_id)
+            # Welcome sequence kickoff: step 0 → 1 (sample pack отправлен).
+            # Дальше welcome_sequence_loop через 24h автоматом → step 2 (recs).
+            try:
+                await asyncio.to_thread(users_db.set_welcome_step, user_id, 1)
+            except Exception:
+                pass
             asyncio.create_task(asyncio.to_thread(save_users))
         try:
             uname = "@" + user.username if user.username else user.full_name
@@ -7474,6 +7480,199 @@ async def remarketing_scheduler(bot):
             logger.exception("remarketing_scheduler iteration failed")
 
 
+# ── Welcome sequence (Sprint 2) ─────────────────────────────────────
+# Multi-touch nurture series для новых юзеров. Расширяет одноразовый
+# sample pack до 3 follow-up touches: recs (24h) → digest (72h) →
+# discount (7d). Использует bot_users.welcome_seq_step (Supabase column,
+# требует ALTER TABLE bot_users ADD COLUMN welcome_seq_step int DEFAULT 0).
+
+WELCOME_SEQ_ENABLED = os.getenv("WELCOME_SEQ_ENABLED", "1") == "1"
+
+# Step → required age в часах (с момента joined_at)
+_WELCOME_STEP_AGE = {1: 24, 2: 72, 3: 24 * 7}
+
+
+async def _send_welcome_recs(bot, tg_id: int, source: str | None) -> bool:
+    """Step 1 → 2: 3 personal recs из новых битов. Click → play_<id>."""
+    candidates = [
+        b for b in beats_db.BEATS_CACHE
+        if b.get("content_type", "beat") == "beat"
+        and b.get("file_id")
+        and b.get("bpm")
+    ]
+    if not candidates:
+        return False
+    candidates.sort(key=lambda b: b.get("id", 0), reverse=True)
+    picks = candidates[:3]
+    rows = []
+    for b in picks:
+        bpm = b.get("bpm", "?")
+        ks = b.get("key_short") or ""
+        label = f"🔥 {b['name'][:25]} · {bpm} BPM"
+        if ks:
+            label += f" {ks}"
+        rows.append([InlineKeyboardButton(label, callback_data="play_" + str(b["id"]))])
+    rows.append([InlineKeyboardButton("🎹 В каталог", callback_data="menu_beat")])
+    text = (
+        "👋 Здарова! Прошёл день, глянь что свежее залил:\n\n"
+        "(тыкай на бит — послушаешь сразу)\n\n"
+        "<i>Не интересно? /stop_reminders — больше не напишу.</i>"
+    )
+    await bot.send_message(
+        tg_id, text, reply_markup=InlineKeyboardMarkup(rows), parse_mode="HTML",
+    )
+    return True
+
+
+async def _send_welcome_digest(bot, tg_id: int) -> bool:
+    """Step 2 → 3: «Бит дня» — random бит из топ-20 newest как audio + kb."""
+    candidates = [
+        b for b in beats_db.BEATS_CACHE
+        if b.get("content_type", "beat") == "beat" and b.get("file_id")
+    ]
+    if not candidates:
+        return False
+    candidates.sort(key=lambda b: b.get("id", 0), reverse=True)
+    pick = random.choice(candidates[:20])
+    text = (
+        "🎬 Бит дня от автора:\n"
+        f"<b>{pick.get('name', '?')}</b>"
+    )
+    if pick.get("bpm"):
+        text += f" · {pick['bpm']} BPM"
+    if pick.get("artist_display"):
+        text += f"\n<i>стиль: {pick['artist_display']}</i>"
+    text += "\n\n<i>/stop_reminders — выкл напоминания</i>"
+    await bot.send_message(tg_id, text, parse_mode="HTML")
+    try:
+        await bot.send_audio(
+            tg_id, audio=pick["file_id"],
+            reply_markup=kb_after_beat(pick["id"], "beat", user_id=tg_id),
+        )
+    except Exception:
+        logger.exception("welcome digest: send_audio failed for tg_id=%d", tg_id)
+    return True
+
+
+async def _send_welcome_discount(bot, tg_id: int) -> bool:
+    """Step 3 → 4 (final): Universal -15% discount на 24h. Apply через
+    `disc_apply_<beat_id>` в любом kb_after_beat (existing referral pattern).
+    """
+    import secrets
+    now = time.time()
+    token = f"d{tg_id}_None_{secrets.token_hex(4)}"
+    active_discounts[token] = {
+        "user_id": tg_id,
+        "beat_id": None,  # universal — apply на любой бит
+        "pct": 15,
+        "expires_at": now + 24 * 3600,
+        "used": False,
+    }
+    _save_discounts()
+    text = (
+        "🎁 <b>Personal -15% на 24 часа</b>\n\n"
+        "Прошла неделя, ты ещё со мной — вот скидка от меня. "
+        "Действует на <b>любой бит</b> в каталоге:\n\n"
+        "1. Открой каталог битов\n"
+        "2. Выбери бит → откроется карточка с ценами\n"
+        "3. Жми «🎁 Купить со скидкой -15%»\n\n"
+        "<i>Скидка пропадёт через 24 часа.</i>"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎹 К битам со скидкой", callback_data="menu_beat")],
+    ])
+    await bot.send_message(tg_id, text, parse_mode="HTML", reply_markup=kb)
+    return True
+
+
+_WELCOME_STEP_ACTIONS = {
+    1: _send_welcome_recs,
+    2: _send_welcome_digest,
+    3: _send_welcome_discount,
+}
+
+
+async def welcome_sequence_loop(bot):
+    """Раз в час итерирует bot_users по welcome_seq_step (1, 2, 3) и
+    выполняет соответствующий action для тех, у кого joined_at достаточно
+    давно. Step 4 = final, не обрабатывается.
+
+    Anti-spam:
+    - ADMIN_ID → mark step=4 без send
+    - reminders_optout → mark step=4 без send
+    - Forbidden/blocked → auto-optout + step=4
+    """
+    if not WELCOME_SEQ_ENABLED:
+        logger.info("welcome_sequence: disabled (WELCOME_SEQ_ENABLED=0)")
+        return
+    INTERVAL_SEC = 60 * 60  # 1 hour
+    while True:
+        try:
+            await asyncio.sleep(INTERVAL_SEC)
+            for step in (1, 2, 3):
+                threshold_h = _WELCOME_STEP_AGE[step]
+                rows = users_db.list_users_for_welcome_step(step)
+                for row in rows:
+                    try:
+                        tg_id = int(row["tg_id"])
+                    except Exception:
+                        continue
+                    joined_at_s = row.get("joined_at") or ""
+                    if tg_id == ADMIN_ID:
+                        users_db.set_welcome_step(tg_id, 4)
+                        continue
+                    if tg_id in reminders_optout:
+                        users_db.set_welcome_step(tg_id, 4)
+                        continue
+                    if not joined_at_s:
+                        continue
+                    try:
+                        joined_dt = datetime.fromisoformat(
+                            joined_at_s.replace("Z", "+00:00"),
+                        )
+                    except Exception:
+                        continue
+                    age_h = (
+                        datetime.now(joined_dt.tzinfo) - joined_dt
+                    ).total_seconds() / 3600
+                    if age_h < threshold_h:
+                        continue
+                    action = _WELCOME_STEP_ACTIONS.get(step)
+                    if action is None:
+                        continue
+                    try:
+                        if step == 1:
+                            success = await action(bot, tg_id, row.get("source"))
+                        else:
+                            success = await action(bot, tg_id)
+                        if success:
+                            await asyncio.to_thread(
+                                users_db.set_welcome_step, tg_id, step + 1,
+                            )
+                            logger.info(
+                                "welcome_seq: tg_id=%d step %d → %d",
+                                tg_id, step, step + 1,
+                            )
+                    except Exception as e:
+                        err_s = str(e).lower()
+                        if "forbidden" in err_s or "blocked" in err_s or "deactivated" in err_s:
+                            reminders_optout.add(tg_id)
+                            _save_optout()
+                            await asyncio.to_thread(
+                                users_db.set_welcome_step, tg_id, 4,
+                            )
+                            logger.info(
+                                "welcome_seq: auto-optout tg_id=%d (blocked)", tg_id,
+                            )
+                        else:
+                            logger.warning(
+                                "welcome_seq: action failed tg_id=%d step=%d: %s",
+                                tg_id, step, e,
+                            )
+        except Exception:
+            logger.exception("welcome_sequence_loop iteration failed")
+
+
 async def cmd_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """`/cart` — показ персональной корзины битов для bundle-покупки."""
     user_id = update.effective_user.id
@@ -8624,6 +8823,7 @@ async def post_init(application):
     asyncio.create_task(yk_fallback_polling(application.bot))
     asyncio.create_task(auto_repost_scheduler(application.bot))
     asyncio.create_task(remarketing_scheduler(application.bot))
+    asyncio.create_task(welcome_sequence_loop(application.bot))
     # Git autopush для beats_data.json + admin_prefs.json — Render free disk
     # эфемерный, без push'а файлы слетают на каждый redeploy. Loop debounced 60с.
     try:
