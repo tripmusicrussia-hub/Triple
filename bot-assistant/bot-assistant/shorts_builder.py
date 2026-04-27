@@ -114,15 +114,18 @@ def _load_pil_font(size: int, bold: bool = False):
 def _render_text_overlay_png(meta_name: str, meta_bpm: int | None,
                              meta_key_short: str | None,
                              out_path: Path,
-                             width: int = 1080, height: int = 1920) -> Path:
-    """Рисует transparent PNG с beat name top + BPM/KEY bottom-right.
+                             width: int = 1080, height: int = 1920,
+                             cta_text: str = "FREE PACK → t.me/iiiplfiii") -> Path:
+    """Рисует transparent PNG с beat name top + BPM/KEY + CTA bottom.
 
     Используется вместо ffmpeg drawtext filter, который отсутствует в
     imageio-ffmpeg static binary (compile-time disabled, known issue 2024).
 
     Layout:
     - Beat name (truncated): top-center, y=120, 84px bold, white + black shadow
-    - BPM/KEY: bottom-right, y=h-th-80, 44px regular, white + black shadow
+    - BPM/KEY: bottom-right, y=h-th-280, 44px regular (поднято чтобы не
+      перекрывала YT Shorts UI: like/comment/share buttons на мобилке)
+    - CTA «FREE PACK → t.me/iiiplfiii»: bottom-center, y=h-ch-100, 38px bold
     """
     from PIL import Image, ImageDraw
 
@@ -142,7 +145,7 @@ def _render_text_overlay_png(meta_name: str, meta_bpm: int | None,
     draw.text((name_x, name_y), name_text, font=name_font,
               fill=(255, 255, 255, 255))
 
-    # BPM/KEY bottom-right (если bpm есть)
+    # BPM/KEY bottom-right (поднято на 280px от низа — не перекрывает YT UI)
     if meta_bpm:
         if meta_key_short:
             bpm_text = f"{meta_bpm} BPM | {meta_key_short}"
@@ -152,10 +155,22 @@ def _render_text_overlay_png(meta_name: str, meta_bpm: int | None,
         bbox_b = draw.textbbox((0, 0), bpm_text, font=bpm_font)
         bw, bh = bbox_b[2] - bbox_b[0], bbox_b[3] - bbox_b[1]
         bpm_x = width - bw - 60 - bbox_b[0]
-        bpm_y = height - bh - 80 - bbox_b[1]
+        bpm_y = height - bh - 280 - bbox_b[1]
         draw.text((bpm_x + 2, bpm_y + 2), bpm_text, font=bpm_font,
                   fill=(0, 0, 0, 200))
         draw.text((bpm_x, bpm_y), bpm_text, font=bpm_font,
+                  fill=(255, 255, 255, 255))
+
+    # CTA bottom-center (funnel в Telegram bot)
+    if cta_text:
+        cta_font = _load_pil_font(38, bold=True)
+        bbox_c = draw.textbbox((0, 0), cta_text, font=cta_font)
+        cw, ch = bbox_c[2] - bbox_c[0], bbox_c[3] - bbox_c[1]
+        cta_x = (width - cw) // 2 - bbox_c[0]
+        cta_y = height - ch - 100 - bbox_c[1]
+        draw.text((cta_x + 2, cta_y + 2), cta_text, font=cta_font,
+                  fill=(0, 0, 0, 220))
+        draw.text((cta_x, cta_y), cta_text, font=cta_font,
                   fill=(255, 255, 255, 255))
 
     img.save(out_path, "PNG")
@@ -185,12 +200,14 @@ def _build_filter_chain(meta_name: str | None,
         # Legacy fallback: simple scale + black-bar pad
         return "scale=1080:-2,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p"
 
+    # Zoom-fill: scale 16:9 brand image до 1920 height, crop sides до 1080.
+    # Убрали blurred-bg pattern (выглядел как letterbox в vertical frame —
+    # downranking signal для YT Shorts алгоритма + слабее retention).
+    # Теряем ~25% по краям, но фокус (центр кадра — артефакт/цепочки) сохраняется.
+    # Bonus: убрали дорогой boxblur=20:5 → encode на 30-40% быстрее.
     base_chain = (
-        "[0:v]split=2[bg_src][fg_src];"
-        "[bg_src]scale=1080:1920:force_original_aspect_ratio=increase,"
-        "crop=1080:1920,boxblur=20:5[bg];"
-        "[fg_src]scale=1080:-2[fg];"
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2"
+        "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920"
     )
 
     # Build progressive chain через named labels

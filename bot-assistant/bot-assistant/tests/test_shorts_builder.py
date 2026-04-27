@@ -44,15 +44,17 @@ class TestFilterChain:
         assert "split" not in chain
         assert "boxblur" not in chain
 
-    def test_no_overlays_blurred_bg_only(self):
+    def test_no_overlays_zoom_fill_only(self):
         # meta_name есть, но без text/eq overlay
         chain = shorts_builder._build_filter_chain(
             "WAW", text_overlay=False, eq_overlay=False,
         )
-        # Step 1 base: blurred bg + sharp center
-        assert "split=2[bg_src][fg_src]" in chain
-        assert "boxblur=20:5" in chain
-        assert "force_original_aspect_ratio=increase" in chain
+        # Zoom-fill base: scale up + crop, без blurred-bg
+        assert "scale=1080:1920:force_original_aspect_ratio=increase" in chain
+        assert "crop=1080:1920" in chain
+        # Убрали blurred-bg pattern: НЕ должно быть split / boxblur
+        assert "split=2" not in chain
+        assert "boxblur" not in chain
         # Финал [v_out]
         assert "[v_out]" in chain
         # Никаких extra overlay'ев
@@ -143,6 +145,25 @@ class TestRenderTextOverlayPng:
             out_path=out,
         )
         assert out.exists()
+
+    def test_cta_can_be_disabled(self, tmp_path):
+        # cta_text="" → не рисует CTA, не падает
+        out = tmp_path / "text.png"
+        shorts_builder._render_text_overlay_png(
+            meta_name="WAW", meta_bpm=136, meta_key_short="Cm",
+            out_path=out, cta_text="",
+        )
+        assert out.exists()
+
+    def test_default_cta_present(self, tmp_path):
+        # Default CTA — t.me/iiiplfiii в тексте overlay'ится
+        out = tmp_path / "text.png"
+        # Проверяем что default cta_text имеет t.me link
+        import inspect
+        sig = inspect.signature(shorts_builder._render_text_overlay_png)
+        default_cta = sig.parameters["cta_text"].default
+        assert "t.me/iiiplfiii" in default_cta
+        assert "FREE" in default_cta or "PACK" in default_cta
 
 
 class TestBuildShortContract:
