@@ -4119,6 +4119,87 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _send_quick_meta_card(bot, query.message.chat_id, user_id)
         return
 
+    # ── YT title optimizer (admin only) ────────────────────────
+    if data.startswith("yt_title_apply_"):
+        if user_id != ADMIN_ID:
+            await query.answer()
+            return
+        try:
+            idx = int(data[len("yt_title_apply_"):])
+        except ValueError:
+            await query.answer()
+            return
+        state = pending_yt_titles.get(user_id)
+        if not state:
+            await query.answer("Сессия устарела, запусти /yt_titles заново", show_alert=True)
+            return
+        variants = state.get("variants") or []
+        if idx < 0 or idx >= len(variants):
+            await query.answer("Bad variant", show_alert=True)
+            return
+        chosen_title = variants[idx]["title"]
+        video_id = state["video_id"]
+        loop = asyncio.get_running_loop()
+        await query.answer("🔄 Обновляю на YT...")
+        try:
+            import yt_api
+            await loop.run_in_executor(
+                None, lambda: yt_api.update_video(
+                    video_id, chosen_title,
+                    state.get("old_description", ""),
+                    state.get("old_tags", []),
+                ),
+            )
+            pending_yt_titles.pop(user_id, None)
+            await query.message.edit_text(
+                f"✅ Title обновлён на YT:\n"
+                f"<code>{html.escape(chosen_title)}</code>\n\n"
+                f"https://youtu.be/{video_id}",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.exception("yt_title_apply failed for %s", video_id)
+            await query.message.edit_text(f"❌ Ошибка update_video: {e}")
+        return
+
+    if data == "yt_title_regen":
+        if user_id != ADMIN_ID:
+            await query.answer()
+            return
+        state = pending_yt_titles.get(user_id)
+        if not state:
+            await query.answer("Сессия устарела, запусти /yt_titles заново", show_alert=True)
+            return
+        await query.answer("🔄 Регенерирую...")
+        # Re-run cmd_yt_titles logic с тем же video_id — context.args fake'аем
+        class _FakeCtx:
+            args = [state["video_id"]]
+            bot = context.bot
+        # Используем reply_text на текущее message для UX continuity
+        try:
+            await query.message.edit_text(
+                f"🔄 Регенерирую варианты для {state['video_id']}...",
+            )
+        except TelegramError:
+            pass
+        # Imitating new /yt_titles call
+        fake_update = Update(update_id=update.update_id, message=query.message)
+        fake_update._effective_user = update.effective_user
+        await cmd_yt_titles(fake_update, _FakeCtx())
+        return
+
+    if data == "yt_title_skip":
+        if user_id != ADMIN_ID:
+            await query.answer()
+            return
+        pending_yt_titles.pop(user_id, None)
+        try:
+            await query.message.edit_text("❌ YT title не обновлён.")
+        except TelegramError:
+            pass
+        await query.answer()
+        return
+
     # Reclassify бита из обычной карточки (admin only). Specific checks
     # `admin_reclass_set_` и `admin_reclass_cancel` ОБЯЗАНЫ идти ДО общего
     # `admin_reclass_<id>`, иначе общий проглотит и упадёт на ValueError при
@@ -7399,6 +7480,175 @@ async def cmd_yt_audit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+pending_yt_titles: dict[int, dict] = {}  # admin_id → {video_id, variants: list[dict], current_title}
+
+
+async def cmd_yt_titles(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """`/yt_titles <video_id>` — сгенерировать 3 LLM-альтернативы title через
+    yt-dlp top-10 анализ конкурентов в нише.
+
+    Pipeline:
+    1. Get current title через yt_api.get_video
+    2. yt-dlp scan top-10 `<artist> type beat 2026` (определяем артиста из current title или beat record)
+    3. LLM по prompt'у с current + top-10 → 3 варианта JSON
+    4. Показываем юзеру inline-кнопки [A] [B] [C] [🔄 Регенерить] [❌ Skip]
+    5. Клик → yt_api.update_video(video_id, title=chosen)
+
+    Use case: legacy YT-видео со снейкэйс'ным title → юзер копирует video_id
+    из URL → /yt_titles <id> → получает 3 LLM-варианта по топ-10 паттернам.
+    """
+    if update.effective_user.id != ADMIN_ID:
+        return
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Usage: /yt_titles <video_id>\n\n"
+            "Сгенерирую 3 LLM-альтернативы title через анализ топ-10 "
+            "конкурентов в нише через yt-dlp."
+        )
+        return
+    video_id = args[0].strip()
+    user_id = update.effective_user.id
+    bot = context.bot
+    msg = await update.message.reply_text(
+        f"🔄 Анализирую {video_id}...\n"
+        "1/3 Получаю current title с YT API\n"
+    )
+    loop = asyncio.get_running_loop()
+
+    try:
+        import yt_api
+        v = await loop.run_in_executor(None, lambda: yt_api.get_video(video_id))
+        if not v:
+            await msg.edit_text(f"❌ Видео {video_id} не найдено")
+            return
+        sn = v["snippet"]
+        current_title = sn.get("title", "")
+        # Извлекаем artist из current title heuristically (первое слово до "type beat")
+        # Или: пытаемся найти бит в каталоге через post_events
+        artist_display = ""
+        bpm: int | None = None
+        key_short = ""
+        scene = ""
+        # Попытка через Supabase
+        try:
+            import httpx
+            sb_url = os.getenv("SUPABASE_URL", "").strip()
+            sb_key = os.getenv("SUPABASE_KEY", "").strip()
+            if sb_url and sb_key:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    r = await client.get(
+                        f"{sb_url}/rest/v1/post_events",
+                        params={
+                            "select": "artist,bpm,key,beat_name",
+                            "yt_video_id": f"eq.{video_id}",
+                            "limit": "1",
+                        },
+                        headers={"apikey": sb_key, "Authorization": f"Bearer {sb_key}"},
+                    )
+                if r.status_code == 200 and r.json():
+                    row = r.json()[0]
+                    artist_display = (row.get("artist") or "").title().strip()
+                    bpm = int(row.get("bpm") or 0) or None
+                    key = (row.get("key") or "").strip()
+                    if "minor" in key.lower():
+                        key_short = key.split()[0] + "m"
+                    elif "major" in key.lower():
+                        key_short = key.split()[0]
+        except Exception:
+            logger.exception("yt_titles: Supabase lookup failed")
+        # Fallback: парсим artist из current title
+        if not artist_display:
+            m_artist = re.match(r"\(?\[?FREE\]?\)?\s*([A-Za-z][A-Za-z\s]{1,30}?)\s+[Tt]ype\s+[Bb]eat", current_title)
+            if m_artist:
+                artist_display = m_artist.group(1).strip()
+            else:
+                artist_display = "Hard Trap"  # совсем без атрибуции
+
+        await msg.edit_text(
+            f"🔄 Анализирую {video_id}...\n"
+            f"1/3 ✅ {current_title[:60]}\n"
+            f"2/3 yt-dlp scan топ-10 «{artist_display} type beat 2026»...\n"
+        )
+
+        import yt_strategy
+        top10 = await loop.run_in_executor(
+            None, lambda: yt_strategy.scrape_top10_for_beat(artist_display),
+        )
+
+        await msg.edit_text(
+            f"🔄 Анализирую {video_id}...\n"
+            f"1/3 ✅ Current title\n"
+            f"2/3 ✅ Top-10 ({len(top10)} found)\n"
+            f"3/3 LLM генерит 3 варианта...\n"
+        )
+
+        prompt = yt_strategy.build_title_optimizer_prompt(
+            artist_display=artist_display,
+            current_title=current_title,
+            top10=top10,
+            bpm=bpm, key_short=key_short or None,
+        )
+        import post_generator
+        try:
+            llm_text = await post_generator._call_llm(
+                prompt, max_tokens=600, temperature=0.7,
+            )
+        except Exception as e:
+            await msg.edit_text(f"❌ LLM недоступен: {e}")
+            return
+
+        variants = yt_strategy.parse_llm_titles_response(llm_text)
+        if not variants:
+            await msg.edit_text(
+                f"❌ LLM вернул мусор. Raw output:\n<code>{html.escape(llm_text[:500])}</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        # Сохраняем state для callback
+        pending_yt_titles[user_id] = {
+            "video_id": video_id,
+            "current_title": current_title,
+            "variants": variants,
+            "old_tags": sn.get("tags", []),
+            "old_description": sn.get("description", ""),
+        }
+
+        # Шлём UI с inline кнопками
+        text_parts = [
+            f"🎬 <b>YT title optimizer</b>\n",
+            f"Current:\n<code>{html.escape(current_title[:120])}</code>\n",
+            f"Top-10 в нише: {len(top10)} видео проанализировано\n",
+            f"\n<b>3 LLM-варианта:</b>\n",
+        ]
+        kb_rows = []
+        for i, v in enumerate(variants):
+            text_parts.append(
+                f"\n<b>[{chr(65 + i)}]</b> <code>{html.escape(v['title'])}</code>\n"
+                f"<i>{html.escape(v['rationale'])}</i>\n"
+            )
+            kb_rows.append([InlineKeyboardButton(
+                f"✅ Применить [{chr(65 + i)}]",
+                callback_data=f"yt_title_apply_{i}",
+            )])
+        kb_rows.append([
+            InlineKeyboardButton("🔄 Regenerate", callback_data="yt_title_regen"),
+            InlineKeyboardButton("❌ Skip", callback_data="yt_title_skip"),
+        ])
+        await msg.edit_text(
+            "".join(text_parts),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(kb_rows),
+        )
+    except Exception as e:
+        logger.exception("cmd_yt_titles failed for %s", video_id)
+        try:
+            await msg.edit_text(f"❌ Ошибка: {e}")
+        except Exception:
+            pass
+
+
 async def cmd_yt_rename_one(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """`/yt_rename_one <video_id> [<beat_id>]` — переименовывает один YT-бит
     по canonical шаблону `[FREE] {ARTIST} Type Beat 2026 - "{NAME}" | {SCENE} | {BPM} BPM {KEY}`
@@ -7793,6 +8043,7 @@ async def post_init(application):
             BotCommand("yt_audit", "📺 YouTube канал audit"),
             BotCommand("yt_refresh_old", "🔄 Обновить description старого видео"),
             BotCommand("yt_rename_one", "🏷 Переименовать YT видео по canonical"),
+            BotCommand("yt_titles", "🤖 LLM-варианты title (топ-10 анализ)"),
             BotCommand("export_beats", "💾 Скачать backup beats_data.json"),
             BotCommand("feature", "🎤 Опубликовать «На бите X записан трек Y»"),
             BotCommand("pin_hub", "📌 Обновить закреп-пост канала"),
@@ -8623,6 +8874,7 @@ async def run_bot():
     app.add_handler(CommandHandler("yt_audit", cmd_yt_audit))
     app.add_handler(CommandHandler("yt_refresh_old", cmd_yt_refresh_old))
     app.add_handler(CommandHandler("yt_rename_one", cmd_yt_rename_one))
+    app.add_handler(CommandHandler("yt_titles", cmd_yt_titles))
     app.add_handler(CommandHandler("cart", cmd_cart))
     app.add_handler(CommandHandler("reset_history", cmd_reset_history))
     app.add_handler(CommandHandler("export_beats", cmd_export_beats))
