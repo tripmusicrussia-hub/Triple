@@ -115,6 +115,25 @@ class TestFilterChain:
         assert "don't" not in chain
         assert "don’t" in chain
 
+    def test_eq_overlay_adds_third_input_overlay(self):
+        # eq_overlay=True → finals chain имеет [base][2:v]overlay
+        chain = shorts_builder._build_filter_chain(
+            "WAW", 136, "Cm", eq_overlay=True,
+        )
+        assert "[base]" in chain
+        assert "[2:v]overlay" in chain
+        assert "[v_out]" in chain
+        # format=yuv420p в самом конце (после overlay) — не теряем alpha
+        assert chain.rstrip("[v_out]").rstrip().endswith("format=yuv420p")
+
+    def test_no_eq_overlay_skips_third_input(self):
+        chain = shorts_builder._build_filter_chain(
+            "WAW", 136, "Cm", eq_overlay=False,
+        )
+        assert "[2:v]" not in chain
+        # format=yuv420p сразу после drawtext'ов перед [v_out]
+        assert "format=yuv420p[v_out]" in chain
+
 
 class TestFontArg:
     def test_returns_empty_when_font_missing(self):

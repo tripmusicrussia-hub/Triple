@@ -17,6 +17,7 @@ Backwards-compat: если `meta=None` → старый letterbox approach (lega
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from pathlib import Path
 
@@ -27,6 +28,12 @@ from config import SHORTS_DURATION_SEC, SHORTS_OFFSET_SEC
 logger = logging.getLogger(__name__)
 
 _FFMPEG_CACHE: str | None = None
+
+# Step 2 kill-switch: ENABLE_EQ_OVERLAY=1 включает circular EQ visualizer
+# (FL Studio style polar bar chart). Default OFF — graceful degradation
+# на случай OOM / timeout / matplotlib install проблем. Юзер flag'ает
+# через Render env без redeploy.
+ENABLE_EQ_OVERLAY = os.getenv("ENABLE_EQ_OVERLAY", "0") == "1"
 
 # Font paths на Render Linux (Debian-based images). DejaVu обычно установлен.
 # Если absent — fallback на ffmpeg internal font.
@@ -98,18 +105,20 @@ def _font_arg(bold: bool = False) -> str:
 
 
 def _build_filter_chain(meta_name: str | None, meta_bpm: int | None,
-                        meta_key_short: str | None) -> str:
+                        meta_key_short: str | None,
+                        eq_overlay: bool = False) -> str:
     """Конструирует ffmpeg filter_complex для blurred bg + sharp center +
-    drawtext overlays.
+    drawtext overlays + опциональный EQ overlay (input #2 = mp3, #2:v = EQ webm).
 
     Если meta_name=None → fallback на старый letterbox (для legacy callers).
+    Если eq_overlay=True → ожидает 3rd input (EQ webm) с alpha-каналом,
+    overlay'ится по центру.
     """
     if meta_name is None:
         # Legacy fallback: simple scale + black-bar pad
         return "scale=1080:-2,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p"
 
-    # Step 1 chain: blurred bg + sharp center → label [base]
-    # Step 2 chain: drawtext name + drawtext bpm → label [v_out] (final)
+    # Step 1 chain: blurred bg + sharp center + drawtext → label [base]
     name_safe = _escape_drawtext(_truncate_name(meta_name))
     name_filter = (
         f"drawtext=text='{name_safe}'"
@@ -133,14 +142,22 @@ def _build_filter_chain(meta_name: str | None, meta_bpm: int | None,
         )
         text_overlays = f"{name_filter},{bpm_filter}"
 
-    # Single-graph filter — все шаги в одну цепочку, финал помечен [v_out]
-    return (
+    base_chain = (
         "[0:v]split=2[bg_src][fg_src];"
         "[bg_src]scale=1080:1920:force_original_aspect_ratio=increase,"
         "crop=1080:1920,boxblur=20:5[bg];"
         "[fg_src]scale=1080:-2[fg];"
-        f"[bg][fg]overlay=(W-w)/2:(H-h)/2,{text_overlays},format=yuv420p[v_out]"
+        f"[bg][fg]overlay=(W-w)/2:(H-h)/2,{text_overlays}"
     )
+
+    if eq_overlay:
+        # 3rd input = EQ webm с alpha. Overlay по центру 1080×1920.
+        # format=yuv420p только в самом конце (не теряем alpha до overlay).
+        return (
+            f"{base_chain}[base];"
+            "[base][2:v]overlay=(W-w)/2:(H-h)/2:shortest=1,format=yuv420p[v_out]"
+        )
+    return f"{base_chain},format=yuv420p[v_out]"
 
 
 def build_short(image_path: Path, mp3_path: Path, out_path: Path,
@@ -180,13 +197,37 @@ def build_short(image_path: Path, mp3_path: Path, out_path: Path,
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Build filter chain (blurred bg + sharp center + drawtext OR legacy letterbox)
+    # Step 2: pre-generate circular EQ webm если включен ENABLE_EQ_OVERLAY
+    # и meta предоставлен. Graceful degradation: при failure → fallback на
+    # Step 1 only (без блокирующего сбоя).
+    eq_webm_path: Path | None = None
+    if ENABLE_EQ_OVERLAY and meta is not None:
+        try:
+            import circular_eq_renderer
+            eq_webm_path = out_path.with_name(f"eq_{out_path.stem}.webm")
+            circular_eq_renderer.render_circular_eq_overlay(
+                mp3_path, eq_webm_path,
+                duration_sec=duration_sec, offset_sec=actual_offset,
+                fps=30, size=800,
+            )
+            logger.info("shorts: EQ overlay generated → %s", eq_webm_path)
+        except Exception as e:
+            logger.warning(
+                "shorts: EQ overlay generation failed (%s) — fallback на Step 1 only",
+                e,
+            )
+            eq_webm_path = None
+
+    # Build filter chain (blurred bg + sharp center + drawtext +/- EQ)
     if meta is not None:
         filter_chain = _build_filter_chain(
             meta_name=meta.name,
             meta_bpm=meta.bpm,
             meta_key_short=getattr(meta, "key_short", None),
+            eq_overlay=(eq_webm_path is not None),
         )
+        # audio map: input #1 если EQ нет, input #1 если EQ есть (#2 = video EQ)
+        # ffmpeg input ordering: [0]=image, [1]=mp3, [2]=eq.webm
         filter_arg = ["-filter_complex", filter_chain, "-map", "[v_out]", "-map", "1:a"]
     else:
         # Legacy path: simple -vf
@@ -203,6 +244,11 @@ def build_short(image_path: Path, mp3_path: Path, out_path: Path,
         "-ss", str(actual_offset),
         "-i", str(mp3_path),
         "-t", str(duration_sec),
+    ]
+    # 3rd input = EQ webm if generated
+    if eq_webm_path is not None and eq_webm_path.exists():
+        cmd += ["-i", str(eq_webm_path)]
+    cmd += [
         *filter_arg,
         "-c:v", "libx264",
         "-tune", "stillimage",
@@ -230,9 +276,17 @@ def build_short(image_path: Path, mp3_path: Path, out_path: Path,
             f"shorts ffmpeg failed ({proc.returncode}): {proc.stderr[-1500:]}"
         )
 
+    # Cleanup intermediate EQ webm (~3-10MB) — не нужен после композитинга
+    if eq_webm_path is not None and eq_webm_path.exists():
+        try:
+            eq_webm_path.unlink()
+        except Exception:
+            pass
+
     logger.info(
-        "short built OK: %s (%ds @ offset=%ds, meta=%s)",
+        "short built OK: %s (%ds @ offset=%ds, meta=%s, eq=%s)",
         out_path, duration_sec, actual_offset,
         meta.name if meta else "none",
+        eq_webm_path is not None,
     )
     return out_path
