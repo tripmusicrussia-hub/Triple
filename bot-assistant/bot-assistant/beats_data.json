@@ -462,18 +462,20 @@
   },
   {
     "id": 4050021,
-    "msg_id": 83,
-    "name": "Теперь тут будут мп3шки битов! #memphis",
+    "msg_id": 732,
+    "name": "ТЕПЕРЬ ТУТ БУДУТ МП3ШКИ БИТОВ! #",
     "tags": [
       "memphis"
     ],
-    "post_url": "https://t.me/iiiplfiii/83",
+    "post_url": "https://t.me/iiiplfiii/732",
     "bpm": 156,
     "key": "Dm",
     "file_id": "CQACAgIAAx0Cb_cPkAADU2nTCd5ep0QkU_EUUFdCMqHEOxSDAAIHRAACUc-xS3_0fDC2OH91OwQ",
     "content_type": "beat",
     "file_unique_id": "AgADB0QAAlHPsUs",
-    "classification_confidence": 0.95
+    "classification_confidence": 0.95,
+    "last_reposted_at": "2026-04-28T18:06:45",
+    "last_posted_at": "2026-04-28T18:06:45"
   },
   {
     "id": 8593121,
