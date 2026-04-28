@@ -297,95 +297,83 @@ def build_short(image_path: Path, mp3_path: Path, out_path: Path,
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Pre-render text overlay PNG если meta есть
-    text_png_path: Path | None = None
+    # 2026-04-28 RAM optimization для Render free 512MB:
+    # Вместо ffmpeg filter_complex с 2-3 inputs (brand image + text PNG +
+    # опц. EQ webm) — pre-composite ВСЁ via PIL в один JPG. ffmpeg получает
+    # single image input → simple encode без filter graph → RAM в 2-3x ниже,
+    # OOM-kill устранён на free tier.
+    #
+    # Pipeline:
+    # 1. PIL: zoom-fill brand image до 1080×1920 (was ffmpeg scale+crop)
+    # 2. PIL: composite text overlay (was ffmpeg overlay filter)
+    # 3. Save as JPG (small file, fast load в ffmpeg)
+    # 4. ffmpeg: single image + mp3 → mp4, simple `-vf format=yuv420p`
+    pre_composed_bg: Path | None = None
     if meta is not None:
         try:
-            text_png_path = out_path.with_name(f"text_{out_path.stem}.png")
-            logger.info("shorts: rendering text overlay PNG (PIL)...")
-            # TYPE TAG primary (artist_display upper) — не beat name.
-            # Reason: discovery hook за 0.5с — артист видит «KENNY MUNEY»
-            # → instant recognition. Beat name «WAW» бессмысленный для outsider'а.
+            pre_composed_bg = out_path.with_name(f"bg_{out_path.stem}.jpg")
+            logger.info("shorts: PIL pre-compose bg+text...")
             artist_top = (getattr(meta, "artist_display", "") or "").upper().strip()
             if not artist_top:
-                artist_top = "HARD TRAP"  # generic fallback
-            _render_text_overlay_png(
-                meta_name=meta.name,  # legacy fallback внутри если top_text=None
+                artist_top = "HARD TRAP"
+            _pre_compose_shorts_bg(
+                image_path=image_path,
+                out_path=pre_composed_bg,
+                meta_name=meta.name,
                 meta_bpm=meta.bpm,
                 meta_key_short=getattr(meta, "key_short", None),
-                out_path=text_png_path,
                 top_text=artist_top,
             )
-            png_size = text_png_path.stat().st_size if text_png_path.exists() else 0
+            sz = pre_composed_bg.stat().st_size if pre_composed_bg.exists() else 0
             logger.info(
-                "shorts: text overlay PNG generated → %s (%d KB)",
-                text_png_path, png_size // 1024,
+                "shorts: pre-composed bg → %s (%d KB)",
+                pre_composed_bg, sz // 1024,
             )
         except Exception as e:
             logger.warning(
-                "shorts: text overlay PNG failed (%s) — fallback на blurred-bg only",
+                "shorts: pre-compose failed (%s) — fallback на raw brand image",
                 e,
             )
-            text_png_path = None
+            pre_composed_bg = None
 
-    # Step 2: pre-generate circular EQ webm если включен ENABLE_EQ_OVERLAY
-    # Graceful degradation: при failure → fallback без EQ (text overlay остаётся).
-    eq_webm_path: Path | None = None
+    # Step 2: EQ overlay disabled в этом branch (ffmpeg complex needed для
+    # alpha composite — restore later когда RAM не проблема).
+    # Backwards-compat: если ENABLE_EQ_OVERLAY=1 — log warning и skip.
     if ENABLE_EQ_OVERLAY and meta is not None:
-        try:
-            import circular_eq_renderer
-            eq_webm_path = out_path.with_name(f"eq_{out_path.stem}.webm")
-            circular_eq_renderer.render_circular_eq_overlay(
-                mp3_path, eq_webm_path,
-                duration_sec=duration_sec, offset_sec=actual_offset,
-                fps=30, size=800,
-            )
-            logger.info("shorts: EQ overlay generated → %s", eq_webm_path)
-        except Exception as e:
-            logger.warning(
-                "shorts: EQ overlay generation failed (%s) — fallback без EQ",
-                e,
-            )
-            eq_webm_path = None
-
-    # Build filter chain
-    if meta is not None:
-        filter_chain = _build_filter_chain(
-            meta_name=meta.name,
-            text_overlay=(text_png_path is not None),
-            eq_overlay=(eq_webm_path is not None),
+        logger.warning(
+            "shorts: ENABLE_EQ_OVERLAY=1 ignored в pre-compose mode (RAM safety)",
         )
-        filter_arg = ["-filter_complex", filter_chain, "-map", "[v_out]", "-map", "1:a"]
+
+    # Source image для ffmpeg: pre-composed (с текстом) ИЛИ raw brand
+    source_image = pre_composed_bg if (pre_composed_bg and pre_composed_bg.exists()) else image_path
+    # Filter: если pre-composed — изображение УЖЕ 1080×1920, нужен только
+    # format=yuv420p для x264. Иначе legacy letterbox (для legacy meta=None
+    # path или если pre-compose упал → fallback raw 1280×720).
+    if pre_composed_bg and pre_composed_bg.exists():
+        filter_arg = ["-vf", "format=yuv420p"]
     else:
-        # Legacy path: simple -vf
         filter_arg = ["-vf", _build_filter_chain(None)]
 
-    # ffmpeg cmd: inputs [0]=image, [1]=mp3, [2]=text PNG (if any), [3]=EQ webm
+    # ffmpeg cmd: simple single image + mp3 → mp4. Без filter_complex.
     # `-ss` ПЕРЕД `-i mp3` — accurate seek без overhead'а на full decode.
     cmd = [
         _ffmpeg(),
         "-y",
         "-loop", "1",
         "-r", "1",
-        "-i", str(image_path),
+        "-i", str(source_image),
         "-ss", str(actual_offset),
         "-i", str(mp3_path),
         "-t", str(duration_sec),
     ]
-    # 3rd input = text overlay PNG (loop)
-    if text_png_path is not None and text_png_path.exists():
-        cmd += ["-loop", "1", "-i", str(text_png_path)]
-    # 4th input = EQ webm
-    if eq_webm_path is not None and eq_webm_path.exists():
-        cmd += ["-i", str(eq_webm_path)]
     cmd += [
         *filter_arg,
         "-c:v", "libx264",
         "-tune", "stillimage",
-        "-preset", "ultrafast",
+        "-preset", "superfast",  # superfast vs ultrafast: меньше RAM (counter-intuitive)
         "-crf", "28",
         "-r", "30",
-        "-threads", "2",  # Render free: ограничиваем parallel buffers (peak RAM)
+        "-threads", "1",  # Render free 512MB: один thread = минимальный peak RAM
         "-c:a", "aac",
         "-b:a", "128k",
         "-ac", "2",
@@ -419,19 +407,74 @@ def build_short(image_path: Path, mp3_path: Path, out_path: Path,
             f"shorts ffmpeg failed ({proc.returncode}): {proc.stderr[-1500:]}"
         )
 
-    # Cleanup intermediate files (~1MB each) — не нужны после композитинга
-    for tmp in (text_png_path, eq_webm_path):
-        if tmp is not None and tmp.exists():
-            try:
-                tmp.unlink()
-            except Exception:
-                pass
+    # Cleanup intermediate pre-composed bg jpg (~250KB) — не нужен после encode
+    if pre_composed_bg is not None and pre_composed_bg.exists():
+        try:
+            pre_composed_bg.unlink()
+        except Exception:
+            pass
 
     logger.info(
-        "short built OK: %s (%ds @ offset=%ds, meta=%s, text=%s, eq=%s)",
+        "short built OK: %s (%ds @ offset=%ds, meta=%s, pre_composed=%s)",
         out_path, duration_sec, actual_offset,
         meta.name if meta else "none",
-        text_png_path is not None,
-        eq_webm_path is not None,
+        pre_composed_bg is not None,
     )
+    return out_path
+
+
+def _pre_compose_shorts_bg(image_path: Path, out_path: Path,
+                           meta_name: str, meta_bpm: int | None,
+                           meta_key_short: str | None,
+                           top_text: str,
+                           width: int = 1080, height: int = 1920) -> Path:
+    """Pre-composite final 1080×1920 background+text via PIL → save as JPG.
+
+    Заменяет ffmpeg filter_complex (zoom-fill scale + crop + overlay text PNG)
+    одной PIL операцией. После этого ffmpeg получает single image input
+    и делает простой encode — RAM consumption в 2-3x ниже на Render free 512MB.
+
+    Steps:
+    1. Load brand image (1280×720)
+    2. Zoom-fill: scale to height=1920, crop sides to width=1080
+       (force_original_aspect_ratio=increase + center crop)
+    3. Render text overlay (TYPE TAG + BPM/KEY + CTA) via _render_text_overlay_png
+    4. PIL alpha_composite text onto background
+    5. Save as JPG quality 90 (small file ~250KB)
+    """
+    from PIL import Image
+    src = Image.open(image_path).convert("RGB")
+    src_w, src_h = src.size
+
+    # Zoom-fill: scale так чтобы short side >= target, потом center crop
+    target_ratio = width / height  # 1080/1920 = 0.5625
+    src_ratio = src_w / src_h
+    if src_ratio > target_ratio:
+        # Источник шире чем нужно — scale по высоте, crop по ширине
+        new_h = height
+        new_w = int(src_w * (height / src_h))
+    else:
+        # Источник уже чем нужно — scale по ширине, crop по высоте
+        new_w = width
+        new_h = int(src_h * (width / src_w))
+    scaled = src.resize((new_w, new_h), Image.LANCZOS)
+    # Center crop
+    x0 = (new_w - width) // 2
+    y0 = (new_h - height) // 2
+    cropped = scaled.crop((x0, y0, x0 + width, y0 + height))
+
+    # Render text overlay via existing helper (in-memory, save=False)
+    text_overlay = _render_text_overlay_png(
+        meta_name=meta_name,
+        meta_bpm=meta_bpm,
+        meta_key_short=meta_key_short,
+        out_path=Path("/tmp/_unused_overlay.png"),
+        width=width, height=height,
+        top_text=top_text,
+        save=False,
+    )
+    base_rgba = cropped.convert("RGBA")
+    base_rgba.alpha_composite(text_overlay)
+    final = base_rgba.convert("RGB")
+    final.save(out_path, "JPEG", quality=90)
     return out_path
