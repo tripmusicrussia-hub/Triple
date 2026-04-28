@@ -336,25 +336,50 @@ def build_short(image_path: Path, mp3_path: Path, out_path: Path,
             )
             pre_composed_bg = None
 
-    # Step 2: EQ overlay disabled в этом branch (ffmpeg complex needed для
-    # alpha composite — restore later когда RAM не проблема).
-    # Backwards-compat: если ENABLE_EQ_OVERLAY=1 — log warning и skip.
+    # Step 2: re-enable circular EQ overlay в pre-compose mode.
+    # Сейчас bg jpg уже final 1080×1920 → ffmpeg нужен только 2 inputs
+    # (bg + eq.webm) + single overlay filter — намного легче чем оригинальная
+    # 3-input filter_complex (которая OOM'ила).
+    eq_webm_path: Path | None = None
     if ENABLE_EQ_OVERLAY and meta is not None:
-        logger.warning(
-            "shorts: ENABLE_EQ_OVERLAY=1 ignored в pre-compose mode (RAM safety)",
-        )
+        try:
+            import circular_eq_renderer
+            eq_webm_path = out_path.with_name(f"eq_{out_path.stem}.webm")
+            circular_eq_renderer.render_circular_eq_overlay(
+                mp3_path, eq_webm_path,
+                duration_sec=duration_sec, offset_sec=actual_offset,
+                fps=30, size=800,
+            )
+            logger.info("shorts: EQ overlay generated → %s", eq_webm_path)
+        except Exception as e:
+            logger.warning(
+                "shorts: EQ overlay failed (%s) — fallback без EQ",
+                e,
+            )
+            eq_webm_path = None
 
     # Source image для ffmpeg: pre-composed (с текстом) ИЛИ raw brand
     source_image = pre_composed_bg if (pre_composed_bg and pre_composed_bg.exists()) else image_path
-    # Filter: если pre-composed — изображение УЖЕ 1080×1920, нужен только
-    # format=yuv420p для x264. Иначе legacy letterbox (для legacy meta=None
-    # path или если pre-compose упал → fallback raw 1280×720).
-    if pre_composed_bg and pre_composed_bg.exists():
+
+    # Filter selection:
+    # - meta + pre-compose + EQ → filter_complex с overlay EQ webm на bg jpg
+    # - meta + pre-compose без EQ → simple -vf format=yuv420p
+    # - legacy meta=None → letterbox
+    has_eq = eq_webm_path is not None and eq_webm_path.exists()
+    if pre_composed_bg and pre_composed_bg.exists() and has_eq:
+        # 2-input filter_complex: [0:v]=bg jpg, [2:v]=eq webm
+        # input #1 = mp3 audio
+        filter_chain = (
+            "[0:v][2:v]overlay=(W-w)/2:(H-h)/2:shortest=1,format=yuv420p[v_out]"
+        )
+        filter_arg = ["-filter_complex", filter_chain,
+                      "-map", "[v_out]", "-map", "1:a"]
+    elif pre_composed_bg and pre_composed_bg.exists():
         filter_arg = ["-vf", "format=yuv420p"]
     else:
         filter_arg = ["-vf", _build_filter_chain(None)]
 
-    # ffmpeg cmd: simple single image + mp3 → mp4. Без filter_complex.
+    # ffmpeg cmd: bg image + mp3 (+ опционально EQ webm) → mp4
     # `-ss` ПЕРЕД `-i mp3` — accurate seek без overhead'а на full decode.
     cmd = [
         _ffmpeg(),
@@ -366,6 +391,9 @@ def build_short(image_path: Path, mp3_path: Path, out_path: Path,
         "-i", str(mp3_path),
         "-t", str(duration_sec),
     ]
+    if has_eq:
+        # 3rd input = EQ webm (alpha)
+        cmd += ["-i", str(eq_webm_path)]
     cmd += [
         *filter_arg,
         "-c:v", "libx264",
@@ -407,18 +435,20 @@ def build_short(image_path: Path, mp3_path: Path, out_path: Path,
             f"shorts ffmpeg failed ({proc.returncode}): {proc.stderr[-1500:]}"
         )
 
-    # Cleanup intermediate pre-composed bg jpg (~250KB) — не нужен после encode
-    if pre_composed_bg is not None and pre_composed_bg.exists():
-        try:
-            pre_composed_bg.unlink()
-        except Exception:
-            pass
+    # Cleanup intermediate files (pre-composed bg jpg + EQ webm)
+    for tmp in (pre_composed_bg, eq_webm_path):
+        if tmp is not None and tmp.exists():
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
 
     logger.info(
-        "short built OK: %s (%ds @ offset=%ds, meta=%s, pre_composed=%s)",
+        "short built OK: %s (%ds @ offset=%ds, meta=%s, pre_composed=%s, eq=%s)",
         out_path, duration_sec, actual_offset,
         meta.name if meta else "none",
         pre_composed_bg is not None,
+        eq_webm_path is not None,
     )
     return out_path
 
