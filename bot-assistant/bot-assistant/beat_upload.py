@@ -125,8 +125,11 @@ def beat_record_to_meta(beat: dict) -> "BeatMeta | None":
     artist_display = ARTIST_CASING.get(artist_raw_decoded, _cap_words(artist_raw_decoded))
 
     raw_name = beat.get("name") or ""
-    # Cleanup pipeline: убираем технические метки чтобы получить чистое NAME
+    # Cleanup pipeline: убираем технические метки чтобы получить чистое NAME.
+    # ВАЖНО: сначала конвертируем _ и - в пробелы, чтобы regex-паттерны
+    # вида \btype\s*beat\b корректно матчили TYPE_BEAT / TYPE-BEAT.
     name = re.sub(r"\.mp3$", "", raw_name, flags=re.I)
+    name = re.sub(r"[_\-]+", " ", name)           # ← сначала нормализуем разделители
     name = re.sub(re.escape(artist_raw_decoded), "", name, flags=re.I)
     name = re.sub(re.escape(artist_display), "", name, flags=re.I)
     name = re.sub(r"(?i)\btype\s*beat\b", "", name)
@@ -134,8 +137,10 @@ def beat_record_to_meta(beat: dict) -> "BeatMeta | None":
     name = re.sub(r"(?i)\b\d+\s*bpm\b", "", name)
     # Удаляем key только если стоит standalone (Am, Dm, C#m), не внутри слова.
     name = re.sub(r"(?i)(?<![a-z])[a-g][#b]?m(?![a-z])", "", name)
-    name = re.sub(r"(?i)\b(prod|by|iiiplfiii|leeptonxt)\b", "", name)
-    name = re.sub(r"[_\-]+", " ", name)
+    name = re.sub(r"(?i)\b(prod|by|iiiplfiii|iiiplkiii|leeptonxt|moodf1x)\b", "", name)
+    # Key as two-word phrase: "F minor", "C# major", "Bb minor"
+    name = re.sub(r"(?i)\b[a-g][#b]?\s+(?:minor|major)\b", "", name)
+    name = re.sub(r"(?i)\bx\b", "", name)              # collab "x" separator
     name = re.sub(r"\s+", " ", name).strip(" -_")
     if not name or len(name) < 2:
         name = "INSTRUMENTAL"

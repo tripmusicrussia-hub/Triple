@@ -860,25 +860,16 @@ def kb_subscribe():
     ]])
 
 def kb_main_menu(user_id: int | None = None):
-    """Main menu — только разделы. Цены, фильтры, набор, случайный — внутри
-    разделов (преимущественно «🎹 Биты»). Главное меню = roadmap, не shop.
-    """
-    beats = len([b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == "beat"])
-    tracks = len([b for b in beats_db.BEATS_CACHE if b.get("content_type") == "track"])
-    remixes = len([b for b in beats_db.BEATS_CACHE if b.get("content_type") == "remix"])
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"🎹 Биты ({beats})", callback_data="menu_beat")],
-        [InlineKeyboardButton(f"🎤 Треки ({tracks})", callback_data="menu_track"),
-         InlineKeyboardButton(f"🔀 Ремиксы ({remixes})", callback_data="menu_remix")],
-        [InlineKeyboardButton("📦 Loops&Kits", callback_data="menu_products")],
-        [InlineKeyboardButton("ℹ️ Услуги и цены", callback_data="menu_services")],
+    """Главное меню бота: канал + мои покупки + реферал. Браузинг убран — он в канале."""
+    rows = [
+        [InlineKeyboardButton("🎵 Слушать биты → канал", url=CHANNEL_LINK)],
+        [InlineKeyboardButton("🛒 Мои покупки", callback_data="my_purchases")],
         [InlineKeyboardButton(
             f"🎁 Пригласить друга → -{licensing.REFERRAL_PCT}% обоим",
             callback_data="invite_friend",
         )],
-        [InlineKeyboardButton("❤️ Избранное", callback_data="my_favorites"),
-         InlineKeyboardButton("🔍 Поиск", callback_data="search_prompt")],
-    ])
+    ]
+    return InlineKeyboardMarkup(rows)
 
 
 # ── Quick-filter chips predicates ─────────────────────────────
@@ -1551,21 +1542,15 @@ async def send_sample_pack(bot, chat_id) -> bool:
     return False
 
 async def show_main_menu(bot, chat_id, user_id: int | None = None):
-    # Защитная перезагрузка: кэш пуст, но файл на диске есть — пробуем снова.
-    # Размер не проверяем: даже корректные 2 байта "[]" — валидный JSON,
-    # а битые 500 байт всё равно выявятся парсером (load_beats ловит и
-    # логирует). Главное — дать шанс на retry, пока юзер смотрит в главное
-    # меню, иначе каталог остаётся пустым навсегда.
-    if not beats_db.BEATS_CACHE and os.path.exists(beats_db.BEATS_FILE):
-        logger.warning("show_main_menu: cache пуст, перечитываю beats_data.json")
-        beats_db.load_beats()
-    beats = len([b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == "beat"])
-    tracks = len([b for b in beats_db.BEATS_CACHE if b.get("content_type") == "track"])
-    remixes = len([b for b in beats_db.BEATS_CACHE if b.get("content_type") == "remix"])
-    text = "Привет! 👋 Что слушаем сегодня?\n\nВ каталоге: " + str(beats) + " битов, " + str(tracks) + " треков, " + str(remixes) + " ремиксов.\nВыбирай по настроению или жми случайный — не прогадаешь 🎲"
-    # user_id default = chat_id (в DM это совпадает)
     uid = user_id if user_id is not None else chat_id
-    await bot.send_message(chat_id, text, reply_markup=kb_main_menu(user_id=uid))
+    beats = len([b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == "beat"])
+    text = (
+        "🎧 Биты — в канале. Слушай, выбирай, жми <b>Купить</b> под любым постом.\n\n"
+        f"Каталог: <b>{beats}</b> битов\n"
+        "Покупка — здесь, в боте, мгновенно."
+    )
+    await bot.send_message(chat_id, text, parse_mode="HTML",
+                           reply_markup=kb_main_menu(user_id=uid))
 
 async def send_beat(bot, chat_id, beat, user_id):
     add_to_history(user_id, beat["id"])
@@ -2909,10 +2894,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "main_menu":
         beats = len([b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == "beat"])
-        tracks = len([b for b in beats_db.BEATS_CACHE if b.get("content_type") == "track"])
-        remixes = len([b for b in beats_db.BEATS_CACHE if b.get("content_type") == "remix"])
-        text = "Привет! 👋 Что слушаем сегодня?\n\nВ каталоге: " + str(beats) + " битов, " + str(tracks) + " треков, " + str(remixes) + " ремиксов.\nВыбирай по настроению или жми случайный — не прогадаешь 🎲"
-        await _nav_reply(query, text, reply_markup=kb_main_menu(user_id=user_id))
+        text = (
+            "🎧 Биты — в канале. Слушай, выбирай, жми <b>Купить</b> под любым постом.\n\n"
+            f"Каталог: <b>{beats}</b> битов\n"
+            "Покупка — здесь, в боте, мгновенно."
+        )
+        await _nav_reply(query, text, parse_mode="HTML", reply_markup=kb_main_menu(user_id=user_id))
         return
 
     if data == "menu_beat":
@@ -3212,6 +3199,39 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows = [[InlineKeyboardButton(b["name"][:40], callback_data="play_" + str(b["id"]))] for b in beats_list[-10:]]
         rows.append([InlineKeyboardButton("◀️ Меню", callback_data="main_menu")])
         await _nav_reply(query, "❤️ Избранное (" + str(len(beats_list)) + "):", reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    if data == "my_purchases":
+        user_sales = [s for s in sales.read_sales() if s.get("buyer_tg_id") == user_id]
+        if not user_sales:
+            await _nav_reply(
+                query,
+                "🛒 Покупок пока нет.\n\nСлушай биты в канале → жми <b>Купить</b> под понравившимся.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🎵 В канал", url=CHANNEL_LINK)],
+                    [InlineKeyboardButton("◀️ Меню", callback_data="main_menu")],
+                ]),
+            )
+            return
+        lines = []
+        for s in user_sales[-10:]:
+            name = s.get("beat_name") or "?"
+            ts = s.get("ts", "")[:10]
+            currency = s.get("currency", "XTR")
+            amount = s.get("stars_amount", "?")
+            if currency == "RUB":
+                price_str = f"{amount}₽"
+            elif currency == "USDT":
+                price_str = f"{amount} USDT"
+            else:
+                price_str = f"⭐{amount}"
+            lines.append(f"• {name} — {price_str} ({ts})")
+        text = "🛒 <b>Мои покупки</b>\n\n" + "\n".join(lines)
+        await _nav_reply(
+            query, text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Меню", callback_data="main_menu")]]),
+        )
         return
 
     if data.startswith("play_"):
