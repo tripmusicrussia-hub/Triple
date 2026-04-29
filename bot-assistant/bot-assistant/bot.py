@@ -5513,6 +5513,15 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
         )
         tg_caption, tg_style = await beat_post_builder.build_tg_caption_async(meta, beat_id=reserved_beat_id)
 
+        # YT title optimizer: yt-dlp search competitors → LLM adapts title.
+        # Запускаем в thread (I/O: yt-dlp + httpx). ~5-15 sec, не блокирует loop.
+        await status.edit_text(status.text + "\n🔍 Анализирую топ YT-заголовки...")
+        import yt_title_optimizer
+        opt_title, competitor_titles = await loop.run_in_executor(
+            None, lambda: yt_title_optimizer.optimized_title(meta)
+        )
+        yt_post.title = opt_title
+
         pending_uploads[token] = {
             "meta": meta,
             "mp3_path": mp3_path,
@@ -5537,12 +5546,16 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
         pending_uploads[token]["tg_preview_msg_id"] = tg_preview_msg.message_id
 
         # 2) Превью YT-поста — thumbnail + title + tags + description + кнопки.
-        # Disclaimer ставим в начале — caption у reply_photo лимитирован 1024
-        # символами; при обрезке должна резаться description, а не warning.
+        # Если нашли конкурентов — показываем топ-3 для контекста.
+        competitors_block = ""
+        if competitor_titles:
+            top3 = "\n".join(f"  {t[:60]}" for t in competitor_titles[:3])
+            competitors_block = f"🏆 Топ конкуренты:\n{top3}\n\n"
         yt_preview_head = (
             f"👁 Превью YouTube:\n"
             f"⚠️ Ссылка buy_{reserved_beat_id} заработает после публикации\n\n"
-            f"🎬 Title:\n{yt_post.title}\n\n"
+            f"{competitors_block}"
+            f"🎬 AI Title:\n{yt_post.title}\n\n"
             f"🏷 Tags ({len(yt_post.tags)}): {', '.join(yt_post.tags[:6])}...\n\n"
             f"📝 Description:\n"
         )
@@ -7371,6 +7384,16 @@ async def _do_repost(bot, reply_chat_id: int, beat: dict, meta) -> str | None:
             meta, beat_id=beat_id,
         )
 
+        # Optimize YT title before upload
+        try:
+            import yt_title_optimizer
+            opt_title, _ = await loop.run_in_executor(
+                None, lambda: yt_title_optimizer.optimized_title(meta)
+            )
+            yt_post.title = opt_title
+        except Exception:
+            logger.warning("repost: yt_title_optimizer failed, using canonical")
+
         # 5. YT upload
         vid = await loop.run_in_executor(
             None,
@@ -7432,8 +7455,9 @@ async def _do_repost(bot, reply_chat_id: int, beat: dict, meta) -> str | None:
                     b["post_url"] = f"https://t.me/{CHANNEL_ID.lstrip('@')}/{new_msg_id}"
                     b["last_reposted_at"] = datetime.now().isoformat(timespec="seconds")
                     b["last_posted_at"] = b["last_reposted_at"]
-                    # Обновляем чистое имя в каталоге чтобы будущие посты были аккуратнее
                     b["name"] = meta.name
+                    b["yt_video_id"] = vid  # store for future title updates
+                    b["yt_title"] = yt_post.title
                     break
             beats_db.save_beats()
         except Exception:
@@ -8368,6 +8392,163 @@ async def _fetch_yt_today_block(today_iso: str, recent_video_ids: list[str]) -> 
             lines.extend(video_lines)
 
     return "\n".join(lines)
+
+
+async def cmd_optimize_yt_titles(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """`/optimize_yt_titles [N]` — AI-переименование YT-видео по паттернам конкурентов.
+
+    Получает список видео канала → для каждого генерирует оптимизированный
+    title через yt_title_optimizer (yt-dlp search + LLM) → показывает diff →
+    после /confirm_yt_rename применяет изменения через YT API.
+
+    N (опц.) — максимум видео за один прогон (default 10, max 50).
+    """
+    if update.effective_user.id != ADMIN_ID:
+        return
+    args = context.args or []
+    limit = min(int(args[0]), 50) if args and args[0].isdigit() else 10
+
+    status = await update.message.reply_text(
+        f"🔍 Загружаю {limit} видео канала и генерирую AI-заголовки...\n"
+        "Займёт ~1-3 мин (yt-dlp × N видео)"
+    )
+    loop = asyncio.get_running_loop()
+    try:
+        import yt_api
+        import yt_title_optimizer
+        import beat_upload as _bu
+
+        videos = await loop.run_in_executor(
+            None, lambda: yt_api.list_channel_videos(max_results=limit)
+        )
+        if not videos:
+            await status.edit_text("❌ Нет видео на канале")
+            return
+
+        # Фильтруем: только type beat видео (содержат "type beat" в title)
+        type_beat_vids = [
+            v for v in videos
+            if "type beat" in v.get("title", "").lower()
+        ][:limit]
+
+        if not type_beat_vids:
+            await status.edit_text(f"Из {len(videos)} видео ни одно не содержит 'type beat'")
+            return
+
+        await status.edit_text(
+            f"🔍 Найдено {len(type_beat_vids)} type beat видео. "
+            f"Генерирую AI-заголовки... (по ~5 сек каждый)"
+        )
+
+        # Сопоставляем видео с битами из каталога по yt_video_id
+        yt_id_to_beat = {
+            b.get("yt_video_id"): b
+            for b in beats_db.BEATS_CACHE
+            if b.get("yt_video_id")
+        }
+
+        results = []
+        for i, v in enumerate(type_beat_vids):
+            vid_id = v["video_id"]
+            old_title = v["title"]
+
+            # Пробуем взять meta из каталога (если видео уже привязано)
+            beat_record = yt_id_to_beat.get(vid_id)
+            meta = _bu.beat_record_to_meta(beat_record) if beat_record else None
+
+            if meta is None:
+                # Нет записи — парсим artist из самого заголовка через regex
+                import re as _re
+                m = _re.search(
+                    r"(?i)([\w\s]+?)\s+type\s+beat", old_title
+                )
+                artist_guess = m.group(1).strip() if m else "Hard Trap"
+                # Строим минимальный meta-аналог для optimizer
+                from types import SimpleNamespace
+                meta = SimpleNamespace(  # type: ignore[assignment]
+                    name="",
+                    artist_display=artist_guess,
+                    artist_raw=artist_guess.lower(),
+                    bpm=0,
+                    key_short="",
+                )
+
+            try:
+                new_title, _ = await loop.run_in_executor(
+                    None, lambda m=meta: yt_title_optimizer.optimized_title(m)
+                )
+            except Exception as e:
+                logger.warning("optimize_yt_titles: failed for %s: %s", vid_id, e)
+                new_title = old_title
+
+            changed = new_title != old_title
+            results.append({
+                "video_id": vid_id,
+                "old_title": old_title,
+                "new_title": new_title,
+                "changed": changed,
+            })
+            if (i + 1) % 3 == 0:
+                await status.edit_text(
+                    f"🔍 Обработано {i+1}/{len(type_beat_vids)}..."
+                )
+
+        # Сохраняем в user_data для /confirm_yt_rename
+        context.user_data["pending_yt_renames"] = results
+
+        changed = [r for r in results if r["changed"]]
+        lines = ["📝 <b>Предлагаемые переименования:</b>\n"]
+        for r in results[:20]:
+            mark = "✅" if r["changed"] else "➡️"
+            lines.append(
+                f"{mark} <code>{r['video_id']}</code>\n"
+                f"  До:   {r['old_title'][:60]}\n"
+                f"  После: {r['new_title'][:60]}\n"
+            )
+        summary = (
+            f"\n<b>Изменится:</b> {len(changed)}/{len(results)}\n\n"
+            f"Применить? → /confirm_yt_rename\nОтменить → /cancel_yt_rename"
+        )
+        text = "\n".join(lines) + summary
+        await status.edit_text(text[:4096], parse_mode="HTML")
+
+    except Exception as e:
+        logger.exception("optimize_yt_titles failed")
+        await status.edit_text(f"❌ Ошибка: {e}")
+
+
+async def cmd_confirm_yt_rename(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """`/confirm_yt_rename` — применить переименования из /optimize_yt_titles."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    results = context.user_data.pop("pending_yt_renames", None)
+    if not results:
+        await update.message.reply_text("Нечего применять. Сначала /optimize_yt_titles")
+        return
+    changed = [r for r in results if r["changed"]]
+    if not changed:
+        await update.message.reply_text("Все заголовки уже оптимальные.")
+        return
+    status = await update.message.reply_text(
+        f"✏️ Обновляю {len(changed)} заголовков через YT API..."
+    )
+    loop = asyncio.get_running_loop()
+    import yt_api
+    ok, fail = 0, 0
+    for r in changed:
+        try:
+            await loop.run_in_executor(
+                None,
+                lambda r=r: yt_api.update_video_title(r["video_id"], r["new_title"]),
+            )
+            ok += 1
+        except Exception as e:
+            logger.warning("confirm_yt_rename: update %s failed: %s", r["video_id"], e)
+            fail += 1
+    await status.edit_text(
+        f"✅ Обновлено: {ok}\n❌ Ошибок: {fail}\n\n"
+        "Изменения на YT появятся через несколько минут."
+    )
 
 
 async def cmd_yt_audit(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -10040,6 +10221,8 @@ async def run_bot():
     app.add_handler(CommandHandler("yt_refresh_old", cmd_yt_refresh_old))
     app.add_handler(CommandHandler("yt_rename_one", cmd_yt_rename_one))
     app.add_handler(CommandHandler("yt_titles", cmd_yt_titles))
+    app.add_handler(CommandHandler("optimize_yt_titles", cmd_optimize_yt_titles))
+    app.add_handler(CommandHandler("confirm_yt_rename", cmd_confirm_yt_rename))
     app.add_handler(CommandHandler("cart", cmd_cart))
     app.add_handler(CommandHandler("reset_history", cmd_reset_history))
     app.add_handler(CommandHandler("lang", cmd_lang))

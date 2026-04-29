@@ -107,6 +107,31 @@ def get_videos_stats(video_ids: list[str]) -> dict[str, dict]:
     return out
 
 
+def get_video_snippet(video_id: str) -> dict:
+    """Возвращает snippet существующего видео (title, description, tags, categoryId)."""
+    yt = get_yt_client()
+    resp = yt.videos().list(part="snippet", id=video_id).execute()
+    items = resp.get("items", [])
+    if not items:
+        raise ValueError(f"Video not found: {video_id}")
+    return items[0]["snippet"]
+
+
+def update_video_title(video_id: str, new_title: str) -> dict:
+    """Обновляет только title существующего видео, сохраняя остальные snippet-поля."""
+    snippet = get_video_snippet(video_id)
+    snippet["title"] = new_title
+    yt = get_yt_client()
+    body = {"id": video_id, "snippet": snippet}
+    try:
+        resp = yt.videos().update(part="snippet", body=body).execute()
+        logger.info("YT title update OK: %s → %s", video_id, new_title[:50])
+        return resp
+    except HttpError as e:
+        logger.error("YT title update FAIL %s: %s", video_id, e)
+        raise
+
+
 def update_video(
     video_id: str,
     title: str,
