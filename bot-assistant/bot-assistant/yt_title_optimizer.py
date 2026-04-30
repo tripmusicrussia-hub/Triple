@@ -106,6 +106,27 @@ def _llm_generate(meta: "BeatMeta", competitor_titles: list[str]) -> str | None:
         return None
 
 
+def optimizer_decision(ctr: float, views: int, watch_minutes: float, current_title: str) -> dict:
+    """Optimizer Agent: CTR-based decision о смене title.
+
+    CTR < 3%                → change_title
+    CTR 3-6% + views < 100 → change_title (средний CTR, но мало данных)
+    CTR 3-6% + views >= 100 → keep
+    CTR > 6%                → keep
+
+    Returns: {"action": "change_title"|"keep", "reason": str}
+    """
+    if ctr > 6:
+        return {"action": "keep", "reason": f"CTR {ctr:.1f}% — отличный"}
+    elif ctr >= 3:
+        if views < 100:
+            return {"action": "change_title",
+                    "reason": f"CTR {ctr:.1f}% средний + мало просмотров ({views})"}
+        return {"action": "keep", "reason": f"CTR {ctr:.1f}% — норм, {views} просмотров"}
+    else:
+        return {"action": "change_title", "reason": f"CTR {ctr:.1f}% — ниже порога 3%"}
+
+
 def optimized_title(meta: "BeatMeta") -> tuple[str, list[str]]:
     """Main entry point: BeatMeta → (optimized_title, competitor_titles).
 

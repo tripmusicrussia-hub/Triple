@@ -8768,6 +8768,93 @@ async def cmd_confirm_yt_rename(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 
+async def cmd_yt_optimizer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """`/yt_optimizer` — Optimizer Agent: анализ CTR всех видео за 28 дней.
+
+    Показывает таблицу: video / CTR / решение (keep/change).
+    Решения сохраняются в bot_data. Применить → /confirm_optimizer.
+    Требует scope yt-analytics.readonly (переавторизация через get_yt_token.py).
+    """
+    if update.effective_user.id != ADMIN_ID:
+        return
+    await update.message.reply_text("⏳ Загружаю CTR из YouTube Analytics...")
+    import yt_api as _yta
+    import yt_title_optimizer as _yto
+    try:
+        videos = await asyncio.to_thread(_yta.list_channel_videos, 50)
+        ids = [v["video_id"] for v in videos if v.get("video_id")]
+        analytics = await asyncio.to_thread(_yta.get_videos_analytics, ids, 28)
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ Analytics API недоступен: {e}\n\n"
+            "Нужна переавторизация:\n"
+            "1. Запусти <code>python get_yt_token.py</code> локально\n"
+            "2. Обнови <b>YT_REFRESH_TOKEN</b> в Render → Manual Deploy",
+            parse_mode="HTML",
+        )
+        return
+
+    decisions, lines = [], ["📊 <b>Optimizer Agent</b> · 28 дней:\n"]
+    for v in videos[:20]:
+        vid = v.get("video_id", "")
+        if not vid or vid not in analytics:
+            continue
+        a = analytics[vid]
+        dec = _yto.optimizer_decision(a["ctr"], a["views"], a["watch_minutes"], v["title"])
+        decisions.append({"video_id": vid, "title": v["title"], "decision": dec, "analytics": a})
+        icon = "🔴" if dec["action"] == "change_title" else "🟢"
+        lines.append(
+            f"{icon} {v['title'][:40]}\n"
+            f"   CTR {a['ctr']:.1f}% · {a['views']} views · {dec['reason']}\n"
+        )
+
+    to_change = [d for d in decisions if d["decision"]["action"] == "change_title"]
+    lines.append(f"\n<b>{len(to_change)} видео нужно переименовать</b>")
+    if to_change:
+        lines.append("👉 /confirm_optimizer — применить")
+    else:
+        lines.append("Всё в порядке, ничего менять не нужно.")
+
+    context.bot_data["optimizer_decisions"] = to_change
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def cmd_confirm_optimizer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """`/confirm_optimizer` — применить решения из /yt_optimizer."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    decisions = context.bot_data.pop("optimizer_decisions", [])
+    if not decisions:
+        await update.message.reply_text("Нет решений — сначала /yt_optimizer")
+        return
+    await update.message.reply_text(f"🔄 Переименовываю {len(decisions)} видео...")
+    import beat_upload as _bu
+    import yt_api as _yta
+    import yt_title_optimizer as _yto
+    ok, fail = 0, 0
+    for d in decisions:
+        vid = d["video_id"]
+        beat = next((b for b in beats_db.BEATS_CACHE if b.get("yt_video_id") == vid), None)
+        if not beat:
+            logger.warning("confirm_optimizer: no beat for video_id %s", vid)
+            fail += 1
+            continue
+        meta = _bu.beat_record_to_meta(beat)
+        if not meta:
+            fail += 1
+            continue
+        try:
+            new_title, _ = await asyncio.to_thread(_yto.optimized_title, meta)
+            await asyncio.to_thread(_yta.update_video_title, vid, new_title)
+            logger.info("optimizer: %s → %s", d["title"][:30], new_title[:30])
+            ok += 1
+        except Exception as e:
+            logger.warning("confirm_optimizer: rename fail %s: %s", vid, e)
+            fail += 1
+        await asyncio.sleep(1)
+    await update.message.reply_text(f"✅ {ok} переименовано, {fail} ошибок.")
+
+
 async def cmd_yt_audit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """`/yt_audit` — анализ всех видео канала: топ-5 / анти-топ-5 + рекомендации.
 
@@ -10440,6 +10527,8 @@ async def run_bot():
     app.add_handler(CommandHandler("yt_titles", cmd_yt_titles))
     app.add_handler(CommandHandler("optimize_yt_titles", cmd_optimize_yt_titles))
     app.add_handler(CommandHandler("confirm_yt_rename", cmd_confirm_yt_rename))
+    app.add_handler(CommandHandler("yt_optimizer", cmd_yt_optimizer))
+    app.add_handler(CommandHandler("confirm_optimizer", cmd_confirm_optimizer))
     app.add_handler(CommandHandler("cart", cmd_cart))
     app.add_handler(CommandHandler("reset_history", cmd_reset_history))
     app.add_handler(CommandHandler("lang", cmd_lang))

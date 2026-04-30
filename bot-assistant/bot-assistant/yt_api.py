@@ -1,7 +1,9 @@
-"""YouTube Data API v3 клиент для Triple Bot.
+"""YouTube Data API v3 + YouTube Analytics API v2 клиент для Triple Bot.
 
 Авторизация через refresh_token (один раз получен get_yt_token.py локально).
 На Render 3 env vars: YT_CLIENT_ID, YT_CLIENT_SECRET, YT_REFRESH_TOKEN.
+
+Analytics API требует scope yt-analytics.readonly — см. get_yt_token.py.
 """
 
 from __future__ import annotations
@@ -22,16 +24,17 @@ SCOPES = [
     "https://www.googleapis.com/auth/youtube",
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.readonly",
+    "https://www.googleapis.com/auth/yt-analytics.readonly",
 ]
 
 
-def get_yt_client():
+def _make_creds() -> Credentials:
     client_id = os.getenv("YT_CLIENT_ID", "").strip()
     client_secret = os.getenv("YT_CLIENT_SECRET", "").strip()
     refresh_token = os.getenv("YT_REFRESH_TOKEN", "").strip()
     if not all([client_id, client_secret, refresh_token]):
         raise RuntimeError("YT_CLIENT_ID / YT_CLIENT_SECRET / YT_REFRESH_TOKEN не заданы в env")
-    creds = Credentials(
+    return Credentials(
         token=None,
         refresh_token=refresh_token,
         client_id=client_id,
@@ -39,7 +42,58 @@ def get_yt_client():
         token_uri="https://oauth2.googleapis.com/token",
         scopes=SCOPES,
     )
-    return build("youtube", "v3", credentials=creds, cache_discovery=False)
+
+
+def get_yt_client():
+    return build("youtube", "v3", credentials=_make_creds(), cache_discovery=False)
+
+
+def get_yt_analytics_client():
+    """YouTube Analytics API v2 — те же creds, scope yt-analytics.readonly.
+
+    Требует переавторизации через get_yt_token.py если старый токен без этого scope.
+    """
+    return build("youtubeAnalytics", "v2", credentials=_make_creds(), cache_discovery=False)
+
+
+def get_videos_analytics(video_ids: list[str], days: int = 28) -> dict[str, dict]:
+    """Batch CTR + stats из YouTube Analytics API v2 за последние N дней.
+
+    Returns: {video_id: {ctr (%), views, avg_view_duration_sec, watch_minutes}}
+    Raises HttpError если scope yt-analytics.readonly не выдан (нужна переавторизация).
+    """
+    if not video_ids:
+        return {}
+    from datetime import date, timedelta
+    end = date.today()
+    start = end - timedelta(days=days)
+    yt_a = get_yt_analytics_client()
+    out: dict[str, dict] = {}
+    for i in range(0, len(video_ids), 50):
+        batch = video_ids[i:i + 50]
+        resp = yt_a.reports().query(
+            ids="channel==MINE",
+            startDate=start.isoformat(),
+            endDate=end.isoformat(),
+            metrics="views,clickThroughRate,averageViewDuration,estimatedMinutesWatched",
+            dimensions="video",
+            filters=f"video=={','.join(batch)}",
+            maxResults=200,
+        ).execute()
+        headers = [h["name"] for h in resp.get("columnHeaders", [])]
+        for row in resp.get("rows", []):
+            d = dict(zip(headers, row))
+            vid = d.get("video", "")
+            if not vid:
+                continue
+            ctr_raw = float(d.get("clickThroughRate") or 0)
+            out[vid] = {
+                "ctr": round(ctr_raw * 100, 2),
+                "views": int(d.get("views") or 0),
+                "avg_view_duration_sec": round(float(d.get("averageViewDuration") or 0), 1),
+                "watch_minutes": round(float(d.get("estimatedMinutesWatched") or 0), 1),
+            }
+    return out
 
 
 def list_channel_videos(max_results: int = 200) -> list[dict]:
