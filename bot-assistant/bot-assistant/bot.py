@@ -860,10 +860,19 @@ def kb_subscribe():
     ]])
 
 def kb_main_menu(user_id: int | None = None):
-    """Главное меню бота: канал + мои покупки + реферал. Браузинг убран — он в канале."""
+    """Главное меню: бесплатный каталог + Loops&Kits + покупки + канал."""
+    free_beats = len([b for b in beats_db.BEATS_CACHE
+                      if b.get("free") and b.get("content_type", "beat") == "beat"])
+    free_kits = len([b for b in beats_db.BEATS_CACHE
+                     if b.get("free") and b.get("content_type") in
+                     {"drumkit", "samplepack", "looppack"}])
+    kit_label = f"📦 Loops & Kits ({free_kits})" if free_kits else "📦 Loops & Kits"
     rows = [
-        [InlineKeyboardButton("🎵 Слушать биты → канал", url=CHANNEL_LINK)],
+        [InlineKeyboardButton(f"🆓 Бесплатные биты ({free_beats})",
+                              callback_data="free_beats_menu")],
+        [InlineKeyboardButton(kit_label, callback_data="menu_products")],
         [InlineKeyboardButton("🛒 Мои покупки", callback_data="my_purchases")],
+        [InlineKeyboardButton("🎵 Все биты → канал", url=CHANNEL_LINK)],
         [InlineKeyboardButton(
             f"🎁 Пригласить друга → -{licensing.REFERRAL_PCT}% обоим",
             callback_data="invite_friend",
@@ -1154,7 +1163,18 @@ def kb_remixes_menu():
 def kb_after_beat(beat_id, content_type="beat", user_id: int | None = None):
     """Клавиатура под битом в DM. Если user_id передан — cart-кнопка показывает
     статус (✅ В корзине / 🛒 + В корзину) и счётчик корзины.
+    Для бесплатных битов (free=True) — показывает только кнопку скачать.
     """
+    # Бесплатный бит — упрощённая клавиатура (только скачать)
+    beat_rec = beats_db.get_beat_by_id(int(beat_id)) if beat_id else None
+    if beat_rec and beat_rec.get("free"):
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("▶️ Следующий", callback_data=f"free_next_{beat_id}"),
+             InlineKeyboardButton("❤️ В избранное", callback_data=f"fav_{beat_id}")],
+            [InlineKeyboardButton("📥 Скачать MP3", callback_data=f"download_free_{beat_id}")],
+            [InlineKeyboardButton("◀️ Меню", callback_data="main_menu")],
+        ])
+
     back_map = {"beat": "menu_beat", "track": "menu_track", "remix": "menu_remix"}
     rows = [[
         InlineKeyboardButton("▶️ Следующий", callback_data="next_" + str(beat_id)),
@@ -1543,14 +1563,44 @@ async def send_sample_pack(bot, chat_id) -> bool:
 
 async def show_main_menu(bot, chat_id, user_id: int | None = None):
     uid = user_id if user_id is not None else chat_id
-    beats = len([b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == "beat"])
+    free_n = len([b for b in beats_db.BEATS_CACHE
+                  if b.get("free") and b.get("content_type", "beat") == "beat"])
     text = (
-        "🎧 Биты — в канале. Слушай, выбирай, жми <b>Купить</b> под любым постом.\n\n"
-        f"Каталог: <b>{beats}</b> битов\n"
-        "Покупка — здесь, в боте, мгновенно."
+        "👋 Привет!\n\n"
+        f"🆓 <b>{free_n}</b> бесплатных битов — скачай прямо здесь.\n"
+        "💰 Платные биты — в канале, жми <b>Купить</b> под любым постом."
     )
     await bot.send_message(chat_id, text, parse_mode="HTML",
                            reply_markup=kb_main_menu(user_id=uid))
+
+async def send_free_beat(bot, chat_id: int, beat: dict, user_id: int):
+    """Отправляет бесплатный бит с кнопками Следующий / Скачать / Избранное."""
+    add_to_history(user_id, beat["id"])
+    bid = beat["id"]
+    tags_str = " ".join(f"#{t}" for t in (beat.get("tags") or []))
+    caption = (
+        "🆓 FREE\n"
+        "──────────────────────\n"
+        f"🎧  {beat['name']}\n"
+    )
+    if beat.get("bpm"):
+        caption += f"⚡ {beat['bpm']} BPM"
+        if beat.get("key") and beat["key"] != "-":
+            caption += f"  |  🎵 {beat['key']}"
+        caption += "\n"
+    if tags_str:
+        caption += tags_str
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("▶️ Следующий", callback_data=f"free_next_{bid}"),
+         InlineKeyboardButton("❤️ В избранное", callback_data=f"fav_{bid}")],
+        [InlineKeyboardButton("📥 Скачать MP3", callback_data=f"download_free_{bid}")],
+        [InlineKeyboardButton("◀️ Меню", callback_data="main_menu")],
+    ])
+    if beat.get("file_id"):
+        await bot.send_audio(chat_id, audio=beat["file_id"], caption=caption, reply_markup=kb)
+    else:
+        await bot.send_message(chat_id, caption + "\n\n(файл временно недоступен)", reply_markup=kb)
+
 
 async def send_beat(bot, chat_id, beat, user_id):
     add_to_history(user_id, beat["id"])
@@ -1894,6 +1944,26 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.warning("deep-link buy_ failed for %r: %s", effective_arg, e)
             # fall through to normal start flow
+
+    # Deep-link для бесплатного бита: /start free_<beat_id>
+    if effective_arg.startswith("free_"):
+        try:
+            beat_id = int(effective_arg[5:])
+            beat = beats_db.get_beat_by_id(beat_id)
+            if beat and beat.get("free") and beat.get("file_id"):
+                caption = (
+                    f"🆓 <b>{html.escape(str(beat.get('name') or '?'))}</b> — бесплатно!\n"
+                    f"⚡ {beat.get('bpm', '?')} BPM  🎹 {beat.get('key', '?')}\n\n"
+                    "Скачивай и используй — бесплатно и без ограничений 🎧"
+                )
+                await bot.send_audio(user_id, audio=beat["file_id"],
+                                     caption=caption, parse_mode="HTML")
+                return
+            await bot.send_message(user_id, "🆓 Этот бит временно недоступен.",
+                                   reply_markup=kb_main_menu(user_id=user_id))
+            return
+        except Exception as e:
+            logger.warning("deep-link free_ failed for %r: %s", effective_arg, e)
 
     subscribed = await is_subscribed(bot, user_id)
     if not subscribed:
@@ -2893,11 +2963,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "main_menu":
-        beats = len([b for b in beats_db.BEATS_CACHE if b.get("content_type", "beat") == "beat"])
+        free_n = len([b for b in beats_db.BEATS_CACHE
+                      if b.get("free") and b.get("content_type", "beat") == "beat"])
         text = (
-            "🎧 Биты — в канале. Слушай, выбирай, жми <b>Купить</b> под любым постом.\n\n"
-            f"Каталог: <b>{beats}</b> битов\n"
-            "Покупка — здесь, в боте, мгновенно."
+            "👋 Привет!\n\n"
+            f"🆓 <b>{free_n}</b> бесплатных битов — скачай прямо здесь.\n"
+            "💰 Платные биты — в канале, жми <b>Купить</b> под любым постом."
         )
         await _nav_reply(query, text, parse_mode="HTML", reply_markup=kb_main_menu(user_id=user_id))
         return
@@ -3238,6 +3309,143 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         beat = beats_db.get_beat_by_id(int(data.split("_")[1]))
         if beat:
             await send_beat(bot, query.message.chat_id, beat, user_id)
+        return
+
+    # ── Upload free/paid callbacks ────────────────────────────
+    if data == "upl_cancel":
+        context.user_data.pop("pending_upload_audio", None)
+        await query.answer("Отменено")
+        try:
+            await query.message.delete()
+        except TelegramError:
+            pass
+        return
+
+    if data == "upl_paid":
+        pending = context.user_data.pop("pending_upload_audio", None)
+        if not pending:
+            await query.answer("Сессия устарела — загрузи файл заново", show_alert=True)
+            return
+        try:
+            await query.message.delete()
+        except TelegramError:
+            pass
+        await _run_paid_beat_upload(
+            bot, user_id,
+            pending["file_id"], pending["file_name"], pending["meta"], context
+        )
+        return
+
+    if data == "upl_free":
+        pending = context.user_data.pop("pending_upload_audio", None)
+        if not pending:
+            await query.answer("Сессия устарела — загрузи файл заново", show_alert=True)
+            return
+        meta = pending["meta"]
+        file_id = pending["file_id"]
+        file_unique_id = pending.get("file_unique_id", "")
+
+        # Reserve beat_id
+        reserved_beat_id = max((b["id"] for b in beats_db.BEATS_CACHE), default=0) + 1
+        tags = [meta.artist_raw.replace(" ", "_"), meta.key_short.lower()]
+
+        new_beat = {
+            "id": reserved_beat_id,
+            "msg_id": 0,
+            "name": meta.name,
+            "tags": tags,
+            "post_url": "",
+            "bpm": meta.bpm,
+            "key": meta.key_short,
+            "file_id": file_id,
+            "file_unique_id": file_unique_id,
+            "content_type": "beat",
+            "free": True,
+            "classification_confidence": 1.0,
+        }
+        beats_db.BEATS_CACHE.append(new_beat)
+        await asyncio.to_thread(beats_db.save_beats)
+
+        free_caption = (
+            f"🆓 FREE\n\n"
+            f"🎧 {meta.name} — {meta.artist_display} Type Beat\n"
+            f"⚡ {meta.bpm} BPM  🎹 {meta.key}\n\n"
+            f"Скачай бесплатно в боте 👇"
+        )
+        bot_link = f"https://t.me/{BOT_USERNAME}?start=free_{reserved_beat_id}"
+        kb_ch = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🆓 Скачать бесплатно", url=bot_link)
+        ]])
+        sent = await bot.send_audio(
+            CHANNEL_ID, audio=file_id,
+            caption=free_caption, reply_markup=kb_ch,
+        )
+        post_url = f"https://t.me/iiiplfiii/{sent.message_id}"
+        for b in beats_db.BEATS_CACHE:
+            if b["id"] == reserved_beat_id:
+                b["msg_id"] = sent.message_id
+                b["post_url"] = post_url
+                break
+        await asyncio.to_thread(beats_db.save_beats)
+
+        await query.message.edit_text(
+            f"✅ Бесплатный бит добавлен!\n"
+            f"🎧 {meta.name} | id={reserved_beat_id}\n"
+            f"📢 {post_url}"
+        )
+        return
+
+    # ── Free beats browser ────────────────────────────────────
+    if data == "free_beats_menu":
+        free = [b for b in beats_db.BEATS_CACHE
+                if b.get("free") and b.get("content_type", "beat") == "beat" and b.get("file_id")]
+        if not free:
+            await _nav_reply(
+                query,
+                "🆓 Бесплатных битов пока нет. Скоро добавим!",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Меню", callback_data="main_menu")]]),
+            )
+            return
+        history = set(get_history(user_id))
+        available = [b for b in free if b["id"] not in history] or free
+        beat = random.choice(available)
+        await send_free_beat(bot, query.message.chat_id, beat, user_id)
+        return
+
+    if data.startswith("free_next_"):
+        try:
+            current_id = int(data.split("_")[2])
+        except (IndexError, ValueError):
+            current_id = -1
+        free = [b for b in beats_db.BEATS_CACHE
+                if b.get("free") and b.get("content_type", "beat") == "beat" and b.get("file_id")]
+        if not free:
+            await query.answer("Больше нет бесплатных битов!", show_alert=True)
+            return
+        history = set(get_history(user_id))
+        available = [b for b in free if b["id"] not in history and b["id"] != current_id]
+        if not available:
+            available = [b for b in free if b["id"] != current_id] or free
+        beat = random.choice(available)
+        await send_free_beat(bot, query.message.chat_id, beat, user_id)
+        return
+
+    if data.startswith("download_free_"):
+        try:
+            beat_id = int(data.split("_")[2])
+        except (IndexError, ValueError):
+            await query.answer("Ошибка", show_alert=True)
+            return
+        beat = beats_db.get_beat_by_id(beat_id)
+        if not beat or not beat.get("file_id"):
+            await query.answer("Бит не найден", show_alert=True)
+            return
+        await query.answer()
+        await bot.send_audio(
+            user_id,
+            audio=beat["file_id"],
+            caption=f"📥 {beat['name']} — бесплатно!\n⚡ {beat.get('bpm')} BPM  🎹 {beat.get('key')}",
+        )
         return
 
     if data.startswith("sess_bundle_"):
@@ -5432,12 +5640,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE, audio):
-    """Обработка присланного mp3: парсит имя → thumbnail + video → preview + кнопки."""
+    """Шаг 1: парсит имя файла → спрашивает бесплатный или платный."""
     import beat_upload
-    import beat_post_builder
-    import thumbnail_generator
-    import video_builder
-    from pathlib import Path
 
     try:
         meta = beat_upload.parse_filename(audio.file_name)
@@ -5449,7 +5653,35 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
         )
         return
 
-    status = await update.message.reply_text(
+    context.user_data["pending_upload_audio"] = {
+        "file_id": audio.file_id,
+        "file_unique_id": audio.file_unique_id or "",
+        "file_name": audio.file_name,
+        "meta": meta,
+    }
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🆓 Бесплатный (бот + канал, скачать)", callback_data="upl_free")],
+        [InlineKeyboardButton("💰 Платный (канал + YT + Купить)", callback_data="upl_paid")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="upl_cancel")],
+    ])
+    await update.message.reply_text(
+        f"🎧 <b>{meta.name}</b> — {meta.artist_display} Type Beat\n"
+        f"⚡ {meta.bpm} BPM  🎹 {meta.key}\n\n"
+        "Этот бит бесплатный или на продажу?",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
+
+
+async def _run_paid_beat_upload(bot, chat_id: int, file_id: str, file_name: str, meta, context):
+    """Шаг 2 (платный путь): download → thumbnail → video → YT preview + publish кнопки."""
+    import beat_post_builder
+    import thumbnail_generator
+    import video_builder
+    from pathlib import Path
+
+    status = await bot.send_message(
+        chat_id,
         f"🎧 Разобрал: {meta.name} — {meta.artist_display} Type Beat\n"
         f"⚡ BPM {meta.bpm}  🎹 {meta.key}\n\n"
         "⏳ Качаю mp3..."
@@ -5461,60 +5693,44 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
     thumb_path = Path(TEMP_UPLOAD_DIR) / f"{token}.jpg"
 
     try:
-        file = await context.bot.get_file(audio.file_id)
+        file = await bot.get_file(file_id)
         await file.download_to_drive(str(mp3_path))
 
-        # Brand-кадр канала — один JPG на весь канал (winner-паттерн ниши).
-        # Качаем с GH Release при первом upload, кэшируем в assets/brand/ (не wipe'ится janitor'ом).
         loop = asyncio.get_running_loop()
         await status.edit_text(status.text + "\n🖼 Готовлю brand-кадр...")
         brand_path = await loop.run_in_executor(None, _ensure_brand_image)
         if brand_path:
-            # Brand image + text overlay (TYPE TAG + BPM/KEY + CTA) → thumb_path
             await loop.run_in_executor(
                 None,
                 lambda: _render_thumb_with_brand_overlay(brand_path, thumb_path, meta),
             )
-            logger.info("upload: brand image + overlay → thumbnail")
         else:
-            # Fallback — legacy text-overlay (для случая если GH Release недоступен)
-            logger.warning("upload: brand image unavailable, using legacy text-thumbnail")
-            thumbnail_generator.generate_thumbnail(meta.name, meta.artist_line, thumb_path)
-        clip_loop_path = None  # больше не используется, но оставляем в payload для совместимости
+            import thumbnail_generator as _tg
+            _tg.generate_thumbnail(meta.name, meta.artist_line, thumb_path)
+        clip_loop_path = None
 
         await status.edit_text(status.text + "\n🎬 Собираю видео (ffmpeg)...")
-        logger.info("upload: starting ffmpeg for %s", mp3_path)
-        # Статичный кадр + mp3 — winning-паттерн ниши.
         await loop.run_in_executor(
             None,
             lambda: video_builder.build_video(thumb_path, mp3_path, video_path),
         )
-        logger.info("upload: ffmpeg done, building post meta")
 
-        # Резервируем beat_id заранее, чтобы в описании YT был валидный deep-link
-        # на покупку этого конкретного битка. При ошибке YT publish ID не закрепится.
-        # Защита от race-condition: если cache пустой (напр. upload сразу после
-        # redeploy, пока beats_db не успел прогрузиться с disk) — reload.
         if not beats_db.BEATS_CACHE:
-            logger.warning("BEATS_CACHE empty before beat_id reserve — force-reloading")
             beats_db.load_beats()
         reserved_beat_id = max([b["id"] for b in beats_db.BEATS_CACHE] + [0]) + 1
 
-        # Длительность mp3 для YT-timestamps (winner-паттерн). Если probe
-        # упадёт — description соберётся без timestamps-блока, не критично.
         try:
             mp3_duration = video_builder.probe_duration(mp3_path)
-        except Exception as e:
-            logger.warning("probe_duration failed, YT description без timestamps: %s", e)
+        except Exception:
             mp3_duration = None
 
         yt_post = beat_post_builder.build_yt_post(
             meta, beat_id=reserved_beat_id, duration_sec=mp3_duration,
         )
-        tg_caption, tg_style = await beat_post_builder.build_tg_caption_async(meta, beat_id=reserved_beat_id)
+        tg_caption, tg_style = await beat_post_builder.build_tg_caption_async(
+            meta, beat_id=reserved_beat_id
+        )
 
-        # YT title optimizer: yt-dlp search competitors → LLM adapts title.
-        # Запускаем в thread (I/O: yt-dlp + httpx). ~5-15 sec, не блокирует loop.
         await status.edit_text(status.text + "\n🔍 Анализирую топ YT-заголовки...")
         import yt_title_optimizer
         opt_title, competitor_titles = await loop.run_in_executor(
@@ -5532,21 +5748,19 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
             "yt_post": yt_post,
             "tg_caption": tg_caption,
             "tg_style": tg_style,
-            "tg_file_id": audio.file_id,
+            "tg_file_id": file_id,
         }
 
         await status.delete()
 
-        # 1) Превью TG-поста — точно как увидят подписчики канала.
-        tg_preview_msg = await update.message.reply_audio(
-            audio=audio.file_id,
+        tg_preview_msg = await bot.send_audio(
+            chat_id,
+            audio=file_id,
             caption=f"👁 Превью TG-поста:\n\n{tg_caption}",
         )
         pending_uploads[token]["tg_preview_chat_id"] = tg_preview_msg.chat_id
         pending_uploads[token]["tg_preview_msg_id"] = tg_preview_msg.message_id
 
-        # 2) Превью YT-поста — thumbnail + title + tags + description + кнопки.
-        # Если нашли конкурентов — показываем топ-3 для контекста.
         competitors_block = ""
         if competitor_titles:
             top3 = "\n".join(f"  {t[:60]}" for t in competitor_titles[:3])
@@ -5559,7 +5773,7 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
             f"🏷 Tags ({len(yt_post.tags)}): {', '.join(yt_post.tags[:6])}...\n\n"
             f"📝 Description:\n"
         )
-        desc_budget = max(0, 1024 - len(yt_preview_head) - 3)  # 3 — на "..."
+        desc_budget = max(0, 1024 - len(yt_preview_head) - 3)
         yt_preview = yt_preview_head + yt_post.description[:desc_budget] + "..."
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🚀 YT + Short + TG сейчас", callback_data=f"bu_all_{token}")],
@@ -5569,7 +5783,8 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
             [InlineKeyboardButton("🔄 Переписать TG-подпись", callback_data=f"bu_regen_{token}")],
             [InlineKeyboardButton("❌ Отмена", callback_data=f"bu_cancel_{token}")],
         ])
-        yt_preview_msg = await update.message.reply_photo(
+        yt_preview_msg = await bot.send_photo(
+            chat_id,
             photo=open(thumb_path, "rb"),
             caption=yt_preview[:1024],
             reply_markup=kb,
@@ -5577,7 +5792,7 @@ async def handle_beat_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
         pending_uploads[token]["yt_preview_chat_id"] = yt_preview_msg.chat_id
         pending_uploads[token]["yt_preview_msg_id"] = yt_preview_msg.message_id
     except Exception as e:
-        logger.exception("beat_upload failed")
+        logger.exception("paid_beat_upload failed")
         await status.edit_text(f"❌ Ошибка: {e}")
         _cleanup_upload(token)
 
@@ -7567,6 +7782,8 @@ def _pick_next_repost_candidate() -> dict | None:
     candidates = []
     for b in beats_db.BEATS_CACHE:
         if b.get("content_type", "beat") != "beat":
+            continue
+        if b.get("free"):
             continue
         if not b.get("file_id"):
             continue
